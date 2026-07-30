@@ -18,20 +18,6 @@ log_info()  { printf '%s[INFO]%s %s\n'  "$C_GREEN"  "$C_RESET" "$*"; }
 log_warn()  { printf '%s[WARN]%s %s\n'  "$C_YELLOW" "$C_RESET" "$*"; }
 log_error() { printf '%s[ERROR]%s %s\n' "$C_RED"    "$C_RESET" "$*" >&2; }
 
-restore_existing_stack() {
-    log_warn "attempting to restore the existing stack"
-    if (
-        cd "$INSTALL_DIR"
-        docker compose --env-file .env up -d
-    ); then
-        log_info "existing stack restore requested successfully"
-        return 0
-    fi
-
-    log_error "failed to restore the existing stack; inspect docker compose status"
-    return 1
-}
-
 usage() {
     cat <<'EOF'
 Usage: sudo ./upgrade.sh [options]
@@ -303,7 +289,10 @@ ONGRID_DATA_DIR="${ONGRID_DATA_DIR:-/var/lib/ongrid}"
 ONGRID_LOG_DIR="${ONGRID_LOG_DIR:-/var/log/ongrid}"
 log_info "data dir: $ONGRID_DATA_DIR  (override via ONGRID_DATA_DIR)"
 log_info "log dir:  $ONGRID_LOG_DIR  (override via ONGRID_LOG_DIR)"
-ongrid_prepare_data_directories "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"
+if ! ongrid_prepare_data_directories "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"; then
+    log_error "data directory permissions are not usable; the existing stack was not stopped"
+    exit 1
+fi
 
 # Detect legacy docker named volumes from pre-bind-mount installs. If
 # any are still around, the new compose would start with empty bind
@@ -367,7 +356,7 @@ if ! (
     docker compose --env-file .env down
 ); then
     log_error "failed to stop the existing stack"
-    if ! restore_existing_stack; then
+    if ! ongrid_restore_existing_stack "$INSTALL_DIR"; then
         log_error "automatic recovery failed"
     fi
     exit 1
@@ -431,15 +420,15 @@ fi
 # cp -a may reapply source-directory metadata during a legacy migration, so
 # reassert only the mount-point owners in constant time. Full-tree repair is an
 # explicit recovery action and never part of a normal upgrade.
-ongrid_prepare_data_directories "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"
+if ! ongrid_prepare_data_directories_or_restore \
+    "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR" "$INSTALL_DIR"; then
+    exit 1
+fi
 if (( REPAIR_PERMISSIONS == 1 )); then
     log_warn "repairing data ownership recursively"
 fi
-if ! ongrid_repair_data_permissions_if_enabled "$REPAIR_PERMISSIONS" "$ONGRID_DATA_DIR"; then
-    log_error "permission repair failed; the new release was not installed"
-    if ! restore_existing_stack; then
-        log_error "automatic recovery failed"
-    fi
+if ! ongrid_repair_data_permissions_or_restore \
+    "$REPAIR_PERMISSIONS" "$ONGRID_DATA_DIR" "$INSTALL_DIR"; then
     exit 1
 fi
 

@@ -92,7 +92,7 @@ sudo ./upgrade.sh
 sudo ./upgrade.sh --repair-permissions
 ```
 
-显式修复中任一 `chown` / `chmod` 失败时，脚本不会安装新版，并会尝试恢复原有 Compose 服务。环境变量 `REPAIR_PERMISSIONS` 仅接受 `1/true/yes/on` 或 `0/false/no/off`；推荐直接使用上面的命令行参数。
+普通升级若无法修正顶层目录权限，会核对实际 UID/GID 和目录模式：状态已经正确时继续，否则在停服务前退出；停栈后的迁移阶段再次校验失败时会恢复原有 Compose 服务。显式修复中任一 `chown` / `chmod` 失败时同样不会安装新版，并会尝试恢复原有服务。环境变量 `REPAIR_PERMISSIONS` 仅接受 `1/true/yes/on` 或 `0/false/no/off`；推荐直接使用上面的命令行参数。
 
 ## 卸载
 
