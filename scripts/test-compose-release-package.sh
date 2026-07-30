@@ -50,6 +50,7 @@ for required in \
   ongrid-vtest-linux-amd64/uninstall.sh \
   ongrid-vtest-linux-amd64/upgrade.sh \
   ongrid-vtest-linux-amd64/public-url.sh \
+  ongrid-vtest-linux-amd64/data-permissions.sh \
   ongrid-vtest-linux-amd64/docker-compose.yml \
   ongrid-vtest-linux-amd64/prometheus.yml; do
   grep -Fxq "$required" "$tmp_dir/archive.list"
@@ -58,6 +59,7 @@ done
 mkdir -p "$tmp_dir/extracted"
 tar -xf "$archive" -C "$tmp_dir/extracted"
 bash "$tmp_dir/extracted/ongrid-vtest-linux-amd64/install.sh" --help >/dev/null
+bash "$tmp_dir/extracted/ongrid-vtest-linux-amd64/upgrade.sh" --help >/dev/null
 
 for forbidden in \
   ongrid-vtest-linux-amd64/bin/ \
