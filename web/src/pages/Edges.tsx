@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -74,6 +75,57 @@ const ROLE_FILTER_TITLES: Record<string, [string, string]> = {
 type DeviceRow = Device & {
   hostEdge?: Edge;
 };
+
+const ROW_MENU_GAP = 6;
+const ROW_MENU_VIEWPORT_PADDING = 8;
+
+type RowMenuPosition = {
+  top: number;
+  right: number;
+  maxHeight: number;
+};
+
+function calculateRowMenuPosition(
+  triggerRect: DOMRect,
+  menuHeight: number,
+  viewportWidth: number,
+  viewportHeight: number,
+): RowMenuPosition {
+  const viewportBottom = Math.max(
+    ROW_MENU_VIEWPORT_PADDING,
+    viewportHeight - ROW_MENU_VIEWPORT_PADDING,
+  );
+  const belowTop = Math.min(
+    Math.max(triggerRect.bottom + ROW_MENU_GAP, ROW_MENU_VIEWPORT_PADDING),
+    viewportBottom,
+  );
+  const aboveBottom = Math.min(
+    Math.max(ROW_MENU_VIEWPORT_PADDING, triggerRect.top - ROW_MENU_GAP),
+    viewportBottom,
+  );
+  const belowSpace = Math.max(
+    0,
+    viewportHeight - ROW_MENU_VIEWPORT_PADDING - belowTop,
+  );
+  const aboveSpace = Math.max(
+    0,
+    aboveBottom - ROW_MENU_VIEWPORT_PADDING,
+  );
+  const openAbove = menuHeight > belowSpace && aboveSpace > belowSpace;
+  const maxHeight = openAbove ? aboveSpace : belowSpace;
+  const visibleHeight = Math.min(menuHeight, maxHeight);
+
+  return {
+    top: openAbove
+      ? Math.max(ROW_MENU_VIEWPORT_PADDING, aboveBottom - visibleHeight)
+      : belowTop,
+    right: Math.max(
+      ROW_MENU_VIEWPORT_PADDING,
+      viewportWidth - triggerRect.right,
+    ),
+    maxHeight,
+  };
+}
 
 function selectHostEdgesByDevice(edges: Edge[]): Map<number, Edge> {
   const out = new Map<number, Edge>();
@@ -1591,27 +1643,34 @@ function RowMenu({
   const { tr } = useI18n();
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const [position, setPosition] = useState<{
-    top: number;
-    right: number;
-  } | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState<RowMenuPosition | null>(null);
 
   const syncPosition = useCallback(() => {
     const trigger = triggerRef.current;
-    if (!trigger) return;
-    const rect = trigger.getBoundingClientRect();
-    setPosition({
-      top: rect.bottom + 6,
-      right: window.innerWidth - rect.right,
-    });
+    const menuElement = menuRef.current;
+    if (!trigger || !menuElement) return;
+    const menuRect = menuElement.getBoundingClientRect();
+    const menuHeight = Math.max(menuElement.scrollHeight, menuRect.height);
+    setPosition(
+      calculateRowMenuPosition(
+        trigger.getBoundingClientRect(),
+        menuHeight,
+        window.innerWidth,
+        window.innerHeight,
+      ),
+    );
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
     syncPosition();
     const onViewportChange = () => syncPosition();
     window.addEventListener("resize", onViewportChange);
-    window.addEventListener("scroll", onViewportChange, true);
+    window.addEventListener("scroll", onViewportChange, {
+      capture: true,
+      passive: true,
+    });
     return () => {
       window.removeEventListener("resize", onViewportChange);
       window.removeEventListener("scroll", onViewportChange, true);
@@ -1619,7 +1678,7 @@ function RowMenu({
   }, [open, syncPosition]);
 
   const menu = useMemo(() => {
-    if (!open || !position) return null;
+    if (!open) return null;
     return createPortal(
       <>
         <div
@@ -1628,9 +1687,15 @@ function RowMenu({
           aria-hidden
         />
         <div
+          ref={menuRef}
           role="menu"
-          className="fixed z-50 w-52 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 py-1 shadow-xl"
-          style={{ top: position.top, right: position.right }}
+          className="fixed z-50 w-52 max-w-[calc(100vw-1rem)] overflow-x-hidden overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900 py-1 shadow-xl"
+          style={{
+            top: position?.top ?? 0,
+            right: position?.right ?? ROW_MENU_VIEWPORT_PADDING,
+            maxHeight: position?.maxHeight,
+            visibility: position ? "visible" : "hidden",
+          }}
         >
           <div className="px-3 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500">
             {tr("设备操作", "Device actions")}
@@ -1772,7 +1837,14 @@ function RowMenu({
       <button
         ref={triggerRef}
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          if (open) {
+            setOpen(false);
+            return;
+          }
+          setPosition(null);
+          setOpen(true);
+        }}
         aria-label={tr("更多操作", "More actions")}
         className="rounded-md p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
       >

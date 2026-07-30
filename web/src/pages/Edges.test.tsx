@@ -201,7 +201,107 @@ describe("EdgesPage", () => {
       expect(screen.getByTestId("location")).toHaveTextContent("/devices/17"),
     );
   });
+
+  it("让设备操作菜单在视口内翻转或滚动", async () => {
+    const user = userEvent.setup();
+    const originalInnerHeight = window.innerHeight;
+    const originalGetBoundingClientRect =
+      Element.prototype.getBoundingClientRect;
+    let triggerRect = makeRect({
+      top: 540,
+      left: 1200,
+      width: 32,
+      height: 32,
+    });
+    const menuRect = makeRect({ top: 0, left: 0, width: 208, height: 315 });
+
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      value: 600,
+    });
+    const rectSpy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.getAttribute("aria-label") === "更多操作") return triggerRect;
+        if (this.getAttribute("role") === "menu") return menuRect;
+        return originalGetBoundingClientRect.call(this);
+      });
+
+    try {
+      render(
+        <MemoryRouter>
+          <EdgesPage />
+        </MemoryRouter>,
+      );
+
+      await screen.findByText("bare-metal-1");
+      await act(async () => {
+        await user.click(screen.getByRole("button", { name: "更多操作" }));
+      });
+
+      const menu = await screen.findByRole("menu");
+      await waitFor(() => {
+        const top = Number.parseFloat(menu.style.top);
+        expect(top).toBeLessThan(triggerRect.top);
+        expect(top).toBeGreaterThanOrEqual(8);
+        expect(top + menuRect.height).toBeLessThanOrEqual(
+          window.innerHeight - 8,
+        );
+      });
+
+      await act(async () => {
+        triggerRect = makeRect({
+          top: 100,
+          left: 1200,
+          width: 32,
+          height: 32,
+        });
+        Object.defineProperty(window, "innerHeight", {
+          configurable: true,
+          value: 240,
+        });
+        window.dispatchEvent(new Event("resize"));
+      });
+      await waitFor(() => {
+        const top = Number.parseFloat(menu.style.top);
+        const maxHeight = Number.parseFloat(menu.style.maxHeight);
+        expect(top).toBeGreaterThan(triggerRect.bottom);
+        expect(maxHeight).toBeLessThan(menuRect.height);
+        expect(top + maxHeight).toBeLessThanOrEqual(window.innerHeight - 8);
+      });
+    } finally {
+      rectSpy.mockRestore();
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        value: originalInnerHeight,
+      });
+    }
+  });
 });
+
+function makeRect({
+  top,
+  left,
+  width,
+  height,
+}: {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}): DOMRect {
+  return {
+    x: left,
+    y: top,
+    top,
+    left,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    toJSON: () => ({}),
+  };
+}
 
 function LocationProbe() {
   const location = useLocation();
