@@ -92,6 +92,8 @@ sudo ./upgrade.sh
 sudo ./upgrade.sh --repair-permissions
 ```
 
+显式修复中任一 `chown` / `chmod` 失败时，脚本不会安装新版，并会尝试恢复原有 Compose 服务。环境变量 `REPAIR_PERMISSIONS` 仅接受 `1/true/yes/on` 或 `0/false/no/off`；推荐直接使用上面的命令行参数。
+
 ## 卸载
 
 ```bash

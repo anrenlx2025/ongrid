@@ -18,6 +18,20 @@ log_info()  { printf '%s[INFO]%s %s\n'  "$C_GREEN"  "$C_RESET" "$*"; }
 log_warn()  { printf '%s[WARN]%s %s\n'  "$C_YELLOW" "$C_RESET" "$*"; }
 log_error() { printf '%s[ERROR]%s %s\n' "$C_RED"    "$C_RESET" "$*" >&2; }
 
+restore_existing_stack() {
+    log_warn "attempting to restore the existing stack"
+    if (
+        cd "$INSTALL_DIR"
+        docker compose --env-file .env up -d
+    ); then
+        log_info "existing stack restore requested successfully"
+        return 0
+    fi
+
+    log_error "failed to restore the existing stack; inspect docker compose status"
+    return 1
+}
+
 usage() {
     cat <<'EOF'
 Usage: sudo ./upgrade.sh [options]
@@ -210,17 +224,22 @@ trap 'log_error "upgrade failed at line $LINENO"' ERR
 UPGRADE_ARGS=("$@")
 MIGRATE_VOLUMES="${MIGRATE_VOLUMES:-}"
 NO_MIGRATE_VOLUMES="${NO_MIGRATE_VOLUMES:-}"
-REPAIR_PERMISSIONS="${REPAIR_PERMISSIONS:-}"
+REPAIR_PERMISSIONS_RAW="${REPAIR_PERMISSIONS:-}"
 while (( $# > 0 )); do
     case "$1" in
         --migrate-volumes) MIGRATE_VOLUMES=1 ;;
         --no-migrate-volumes) NO_MIGRATE_VOLUMES=1 ;;
-        --repair-permissions) REPAIR_PERMISSIONS=1 ;;
+        --repair-permissions) REPAIR_PERMISSIONS_RAW=1 ;;
         -h|--help) usage; exit 0 ;;
         *) log_error "unknown flag: $1"; usage; exit 2 ;;
     esac
     shift
 done
+if ! REPAIR_PERMISSIONS=$(ongrid_normalize_boolean "$REPAIR_PERMISSIONS_RAW"); then
+    log_error "invalid REPAIR_PERMISSIONS value: ${REPAIR_PERMISSIONS_RAW}"
+    log_error "expected one of: 1/true/yes/on or 0/false/no/off"
+    exit 2
+fi
 if [[ -n "$MIGRATE_VOLUMES" && -n "$NO_MIGRATE_VOLUMES" ]]; then
     log_error "--migrate-volumes and --no-migrate-volumes are mutually exclusive"
     exit 2
@@ -335,7 +354,7 @@ if (( ${#LEGACY_FOUND[@]} > 0 )) && [[ -z "$MIGRATE_VOLUMES" && -z "$NO_MIGRATE_
     exit 1
 fi
 
-if [[ -n "$REPAIR_PERMISSIONS" ]]; then
+if (( REPAIR_PERMISSIONS == 1 )); then
     log_warn "recursive permission repair requested; large data directories may take a long time"
 fi
 
@@ -347,11 +366,10 @@ if ! (
     cd "$INSTALL_DIR"
     docker compose --env-file .env down
 ); then
-    log_error "failed to stop the existing stack; attempting to restore it"
-    (
-        cd "$INSTALL_DIR"
-        docker compose --env-file .env up -d
-    ) || log_error "failed to restore the existing stack; inspect docker compose status"
+    log_error "failed to stop the existing stack"
+    if ! restore_existing_stack; then
+        log_error "automatic recovery failed"
+    fi
     exit 1
 fi
 
@@ -414,9 +432,15 @@ fi
 # reassert only the mount-point owners in constant time. Full-tree repair is an
 # explicit recovery action and never part of a normal upgrade.
 ongrid_prepare_data_directories "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"
-if [[ -n "$REPAIR_PERMISSIONS" ]]; then
+if (( REPAIR_PERMISSIONS == 1 )); then
     log_warn "repairing data ownership recursively"
-    ongrid_repair_data_permissions "$ONGRID_DATA_DIR"
+fi
+if ! ongrid_repair_data_permissions_if_enabled "$REPAIR_PERMISSIONS" "$ONGRID_DATA_DIR"; then
+    log_error "permission repair failed; the new release was not installed"
+    if ! restore_existing_stack; then
+        log_error "automatic recovery failed"
+    fi
+    exit 1
 fi
 
 export ONGRID_DATA_DIR ONGRID_LOG_DIR
