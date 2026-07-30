@@ -24,6 +24,8 @@ ongrid-v<VERSION>-linux-<arch>/
   install.sh             (from deploy/install/install.sh)
   uninstall.sh
   upgrade.sh
+  public-url.sh          (installer URL validation helper)
+  data-permissions.sh    (upgrade ownership helper)
   docker-compose.yml     (prod compose, from deploy/install/)
   .env.example
   prometheus.yml         (Compose scrape config)

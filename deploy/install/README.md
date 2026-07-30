@@ -78,12 +78,19 @@ sudo ./upgrade.sh
 升级脚本会：
 
 1. 使用新版本号渲染 Compose，并从 CNB 拉取全部运行镜像；任一镜像失败时旧栈保持运行。
-2. `docker compose down`（保留数据），随后覆盖 `docker-compose.yml`、`nginx.conf`、`prometheus.yml`、`grafana/`、`edge/`、`VERSION`。
-3. **不覆盖 `.env` 和 `certs/`**；只把 `.env` 中的 `ONGRID_VERSION` 更新为新版本，并补齐新版本必需的缺省项。
-4. `docker compose up -d` 启动新版。
-5. 轮询 `https://localhost:${ONGRID_HTTP_PORT}/healthz`（`-k` 跳过自签校验）最多 90 秒（库迁移可能稍慢）。
+2. 检查 legacy volume 迁移参数，并创建/修正各 bind-mount 的顶层目录；普通升级不会递归扫描已有数据。
+3. `docker compose down`（保留数据），随后覆盖 `docker-compose.yml`、`nginx.conf`、`prometheus.yml`、`grafana/`、`edge/`、`VERSION`。
+4. **不覆盖 `.env` 和 `certs/`**；只把 `.env` 中的 `ONGRID_VERSION` 更新为新版本，并补齐新版本必需的缺省项。
+5. `docker compose up -d` 启动新版。
+6. 轮询 `https://localhost:${ONGRID_HTTP_PORT}/healthz`（`-k` 跳过自签校验）最多 90 秒（库迁移可能稍慢）。
 
 数据库 schema 由 gorm AutoMigrate 在 ongrid 启动时自动处理。
+
+仅当数据目录被人工改乱、从不保留属主的备份恢复，或升级说明明确指出容器 UID 发生变化时，才执行显式权限修复。该操作会遍历历史数据，大目录可能耗时较长：
+
+```bash
+sudo ./upgrade.sh --repair-permissions
+```
 
 ## 卸载
 
@@ -152,7 +159,7 @@ v0.7.45 起所有有状态服务（MySQL / Prometheus / Loki / Tempo / qdrant / 
 /var/log/ongrid/  # manager slog 输出，可被宿主机 promtail / vector / fluent-bit 直接抓取
 ```
 
-`install.sh` / `upgrade.sh` 会自动 `mkdir -p` + `chown` 到对应 uid。生产环境推荐：
+`install.sh` 会在首次安装时初始化目录权限；`upgrade.sh` 只修正挂载点目录本身，不递归扫描已有 MySQL、Prometheus、Loki、Tempo 或 Grafana 数据。生产环境推荐：
 
 - 把 `ONGRID_DATA_DIR` 指向独立 SSD / NVMe / NFS 挂载点；
 - 关键卷（`mysql`、`prometheus`）单独走快速本地盘，`loki` / `tempo` 走容量盘。
@@ -193,7 +200,7 @@ sudo ./upgrade.sh --migrate-volumes
 
 1. `docker compose down` 停掉旧栈；
 2. 使用已拉取的新版 manager 镜像作为临时工具容器，对每个 legacy named volume 执行 `cp -a` 到对应 bind path；
-3. `chown` 到正确 uid；
+3. `cp -a` 保留原有数值 uid，并修正目标挂载点目录本身；
 4. `docker compose up -d` 起新栈。
 
 迁移结束后旧 named volume 仍然保留（不会被自动删），人工 review 完用 `docker volume rm ongrid_mysql_data prometheus_data loki_data tempo_data qdrant_data grafana_data ongrid_logs` 清理。
