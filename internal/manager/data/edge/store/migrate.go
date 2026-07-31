@@ -26,6 +26,8 @@ func Migrate(db *gorm.DB) error {
 		&model.PluginConfig{},
 		&model.EnrollmentProfile{},
 		&model.Enrollment{},
+		&model.UpgradeJob{},
+		&model.UpgradeJobItem{},
 	); err != nil {
 		return err
 	}

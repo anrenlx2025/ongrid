@@ -1,0 +1,88 @@
+import type { Device } from "@/api/devices";
+import type { EdgeEnrollmentProfile } from "@/api/edges";
+import type { TopologyNode, TopologyRelation } from "@/api/topology";
+
+export type DeviceClusterSummary = {
+  cluster: TopologyNode;
+  members: Device[];
+  memberRelations: TopologyRelation[];
+  profiles: EdgeEnrollmentProfile[];
+  online: number;
+  offline: number;
+  activeProfiles: number;
+};
+
+export function isDeviceCluster(node: TopologyNode): boolean {
+  return node.type === "cluster" && node.props?.source !== "kubernetes";
+}
+
+export function buildDeviceClusterSummaries(
+  nodes: TopologyNode[],
+  devices: Device[],
+  relations: TopologyRelation[],
+  profiles: EdgeEnrollmentProfile[],
+): DeviceClusterSummary[] {
+  const devicesByNodeID = new Map<number, Device>();
+  for (const device of devices) {
+    if (device.node_id) devicesByNodeID.set(device.node_id, device);
+  }
+
+  return nodes
+    .filter(isDeviceCluster)
+    .map((cluster) => {
+      const memberRelations = relations.filter(
+        (relation) =>
+          relation.type === "member_of" && relation.dst_id === cluster.id,
+      );
+      const members = memberRelations
+        .map((relation) => devicesByNodeID.get(relation.src_id))
+        .filter((device): device is Device => Boolean(device))
+        .sort((left, right) =>
+          (left.name || left.hostname || "").localeCompare(
+            right.name || right.hostname || "",
+          ),
+        );
+      const clusterProfiles = profiles.filter(
+        (profile) =>
+          profile.assignment_mode === "cluster" &&
+          profile.cluster_node_id === cluster.id,
+      );
+      const online = members.filter((device) => device.online === true).length;
+      return {
+        cluster,
+        members,
+        memberRelations,
+        profiles: clusterProfiles,
+        online,
+        offline: members.length - online,
+        activeProfiles: clusterProfiles.filter(
+          (profile) => profile.status === "active",
+        ).length,
+      };
+    })
+    .sort((left, right) => left.cluster.name.localeCompare(right.cluster.name));
+}
+
+export function clusterMembershipByDeviceNode(
+  clusters: TopologyNode[],
+  relations: TopologyRelation[],
+): Map<number, TopologyNode> {
+  const clustersByID = new Map(
+    clusters.filter(isDeviceCluster).map((cluster) => [cluster.id, cluster]),
+  );
+  const out = new Map<number, TopologyNode>();
+  for (const relation of relations) {
+    if (relation.type !== "member_of") continue;
+    const cluster = clustersByID.get(relation.dst_id);
+    if (cluster && !out.has(relation.src_id)) {
+      out.set(relation.src_id, cluster);
+    }
+  }
+  return out;
+}
+
+export function relationSource(relation: TopologyRelation): string {
+  return typeof relation.props?.source === "string"
+    ? relation.props.source
+    : "manual";
+}

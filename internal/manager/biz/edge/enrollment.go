@@ -142,6 +142,25 @@ func (u *EnrollmentUsecase) RevokeProfile(ctx context.Context, id uint64) error 
 	return nil
 }
 
+// DeleteProfile permanently removes an installation profile and its claim
+// records. Edge identities and devices already created from the profile are
+// intentionally retained.
+func (u *EnrollmentUsecase) DeleteProfile(ctx context.Context, id uint64) error {
+	if u.repo == nil {
+		return errs.ErrNotWiredYet
+	}
+	if id == 0 {
+		return errs.ErrInvalid
+	}
+	if err := u.repo.DeleteProfile(ctx, id); err != nil {
+		return fmt.Errorf("delete enrollment profile: %w", err)
+	}
+	if u.log != nil {
+		u.log.Info("edge enrollment profile deleted", slog.Uint64("profile_id", id))
+	}
+	return nil
+}
+
 type EnrollInput struct {
 	Token        string
 	HostInfo     tunnel.HostInfo

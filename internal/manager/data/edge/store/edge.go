@@ -47,6 +47,23 @@ func (r *Repo) GetByID(ctx context.Context, id uint64) (*model.Edge, error) {
 	return &e, nil
 }
 
+// GetManyByIDs returns active edges keyed by id. Missing and soft-deleted ids
+// are omitted so callers can distinguish them without N database round trips.
+func (r *Repo) GetManyByIDs(ctx context.Context, ids []uint64) (map[uint64]*model.Edge, error) {
+	out := make(map[uint64]*model.Edge, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var rows []*model.Edge
+	if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.ID] = row
+	}
+	return out, nil
+}
+
 // GetByAccessKey returns the edge matching the access_key_id column. Does
 // NOT return soft-deleted rows (gorm default).
 func (r *Repo) GetByAccessKey(ctx context.Context, accessKey string) (*model.Edge, error) {
@@ -120,6 +137,24 @@ func (r *Repo) UpdateStatus(ctx context.Context, id uint64, status string, lastS
 	res := r.db.WithContext(ctx).Model(&model.Edge{}).Where("id = ?", id).Updates(map[string]any{
 		"status":       status,
 		"last_seen_at": lastSeen,
+	})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
+// MarkRegistered records the completion of register_edge and marks the edge
+// online. Heartbeats intentionally use UpdateStatus instead so this timestamp
+// remains a stable session-generation marker.
+func (r *Repo) MarkRegistered(ctx context.Context, id uint64, registeredAt time.Time) error {
+	res := r.db.WithContext(ctx).Model(&model.Edge{}).Where("id = ?", id).Updates(map[string]any{
+		"status":             model.StatusOnline,
+		"last_seen_at":       registeredAt,
+		"last_registered_at": registeredAt,
 	})
 	if res.Error != nil {
 		return res.Error

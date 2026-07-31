@@ -1,0 +1,264 @@
+package edge_test
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+
+	biz "github.com/ongridio/ongrid/internal/manager/biz/edge"
+	store "github.com/ongridio/ongrid/internal/manager/data/edge/store"
+	devicemodel "github.com/ongridio/ongrid/internal/manager/model/device"
+	edgemodel "github.com/ongridio/ongrid/internal/manager/model/edge"
+	"github.com/ongridio/ongrid/internal/pkg/errs"
+	"github.com/ongridio/ongrid/internal/pkg/tunnel"
+)
+
+type upgradeDeviceReader struct {
+	rows map[uint64]*devicemodel.Device
+}
+
+func (r upgradeDeviceReader) Get(_ context.Context, id uint64) (*devicemodel.Device, error) {
+	if device, ok := r.rows[id]; ok {
+		return device, nil
+	}
+	return nil, errs.ErrNotFound
+}
+
+type upgradeResolver struct{}
+
+func (upgradeResolver) ResolveBundle(arch, version string) (string, string, string, error) {
+	if arch != "linux-amd64" && arch != "linux-arm64" {
+		return "", "", "", fmt.Errorf("unsupported arch %s", arch)
+	}
+	return "https://manager.example/edge/bundle.tar.gz", strings.Repeat("a", 64), version, nil
+}
+
+type upgradeDispatcher struct {
+	repo *store.Repo
+}
+
+func (d upgradeDispatcher) FetchPackage(context.Context, uint64, string, string, string) (tunnel.FetchPackageResponse, error) {
+	return tunnel.FetchPackageResponse{ManifestFiles: 10}, nil
+}
+
+func (d upgradeDispatcher) ApplyPackage(ctx context.Context, edgeID uint64) (tunnel.ApplyPackageResponse, error) {
+	if err := d.repo.SetAgentVersion(ctx, edgeID, "v0.10.2"); err != nil {
+		return tunnel.ApplyPackageResponse{}, err
+	}
+	if err := d.repo.MarkRegistered(ctx, edgeID, time.Now().Add(time.Second)); err != nil {
+		return tunnel.ApplyPackageResponse{}, err
+	}
+	return tunnel.ApplyPackageResponse{Accepted: true}, nil
+}
+
+type controlledUpgradeDispatcher struct {
+	mu      sync.Mutex
+	applied []uint64
+}
+
+func (d *controlledUpgradeDispatcher) FetchPackage(context.Context, uint64, string, string, string) (tunnel.FetchPackageResponse, error) {
+	return tunnel.FetchPackageResponse{ManifestFiles: 10}, nil
+}
+
+func (d *controlledUpgradeDispatcher) ApplyPackage(_ context.Context, edgeID uint64) (tunnel.ApplyPackageResponse, error) {
+	d.mu.Lock()
+	d.applied = append(d.applied, edgeID)
+	d.mu.Unlock()
+	return tunnel.ApplyPackageResponse{Accepted: true}, nil
+}
+
+func (d *controlledUpgradeDispatcher) appliedIDs() []uint64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]uint64(nil), d.applied...)
+}
+
+func TestUpgradeJobRunContinuesWithoutRequestContext(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:upgrade-job-run?mode=memory&cache=shared"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatalf("gorm.Open() error = %v", err)
+	}
+	if err := store.Migrate(db); err != nil {
+		t.Fatalf("store.Migrate() error = %v", err)
+	}
+	repo := store.NewRepo(db)
+	deviceID := uint64(501)
+	registeredAt := time.Now().Add(-time.Minute)
+	edge := &edgemodel.Edge{
+		Name: "edge-a", AccessKeyID: "upgrade-job-edge-a", SecretKeyHash: "hash",
+		Status: edgemodel.StatusOnline, DeviceID: &deviceID,
+		AgentVersion: "v0.10.1", LastRegisteredAt: &registeredAt,
+	}
+	if err := repo.Create(context.Background(), edge); err != nil {
+		t.Fatalf("repo.Create() error = %v", err)
+	}
+	devices := upgradeDeviceReader{rows: map[uint64]*devicemodel.Device{
+		deviceID: {ID: deviceID, Name: "device-a", OS: "linux", Arch: "amd64", Online: true},
+	}}
+	uc := biz.NewUpgradeJobUsecase(
+		repo, repo, devices, nil, upgradeDispatcher{repo: repo}, upgradeResolver{},
+		biz.UpgradeJobConfig{Concurrency: 1, VerifyInterval: time.Millisecond, VerifyTimeout: time.Second}, nil,
+	)
+	job, err := uc.Create(context.Background(), biz.CreateUpgradeJobInput{
+		EdgeIDs: []uint64{edge.ID}, TargetVersion: "v0.10.2",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		uc.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("upgrade coordinator did not stop")
+		}
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		current, items, err := uc.Get(context.Background(), job.ID)
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		if current.Status == edgemodel.UpgradeJobStatusSucceeded {
+			if current.Succeeded != 1 || current.Pending != 0 || len(items) != 1 || items[0].Status != edgemodel.UpgradeJobItemStatusSucceeded {
+				t.Fatalf("completed job=%+v items=%+v", current, items)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("upgrade job did not converge")
+}
+
+func TestUpgradeJobRunWaitsForCurrentBatchBeforeDispatchingNext(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:upgrade-job-batches?mode=memory&cache=shared"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatalf("gorm.Open() error = %v", err)
+	}
+	if err := store.Migrate(db); err != nil {
+		t.Fatalf("store.Migrate() error = %v", err)
+	}
+	repo := store.NewRepo(db)
+	devices := upgradeDeviceReader{rows: make(map[uint64]*devicemodel.Device)}
+	edges := make([]*edgemodel.Edge, 0, 3)
+	baseline := time.Now().Add(-time.Minute)
+	for i := 0; i < 3; i++ {
+		deviceID := uint64(601 + i)
+		edge := &edgemodel.Edge{
+			Name: fmt.Sprintf("edge-%d", i+1), AccessKeyID: fmt.Sprintf("upgrade-job-batch-%d", i+1), SecretKeyHash: "hash",
+			Status: edgemodel.StatusOnline, DeviceID: &deviceID,
+			AgentVersion: "v0.10.1", LastRegisteredAt: &baseline,
+		}
+		if err := repo.Create(context.Background(), edge); err != nil {
+			t.Fatalf("repo.Create(edge %d) error = %v", i+1, err)
+		}
+		edges = append(edges, edge)
+		devices.rows[deviceID] = &devicemodel.Device{
+			ID: deviceID, Name: fmt.Sprintf("device-%d", i+1), OS: "linux", Arch: "amd64", Online: true,
+		}
+	}
+	dispatcher := &controlledUpgradeDispatcher{}
+	uc := biz.NewUpgradeJobUsecase(
+		repo, repo, devices, nil, dispatcher, upgradeResolver{},
+		biz.UpgradeJobConfig{BatchSize: 2, Concurrency: 1, VerifyInterval: 2 * time.Millisecond, VerifyTimeout: time.Second}, nil,
+	)
+	job, err := uc.Create(context.Background(), biz.CreateUpgradeJobInput{
+		EdgeIDs: []uint64{edges[0].ID, edges[1].ID, edges[2].ID}, TargetVersion: "v0.10.2",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if job.BatchSize != 2 || job.TotalBatches != 2 {
+		t.Fatalf("created job batch metadata = %+v", job)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		uc.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("upgrade coordinator did not stop")
+		}
+	})
+
+	waitForApplied := func(want int) []uint64 {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			ids := dispatcher.appliedIDs()
+			if len(ids) >= want {
+				return ids
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %d dispatches; got %v", want, dispatcher.appliedIDs())
+		return nil
+	}
+
+	firstBatch := waitForApplied(2)
+	time.Sleep(25 * time.Millisecond)
+	if got := dispatcher.appliedIDs(); len(got) != 2 {
+		t.Fatalf("next batch dispatched before current batch converged: %v", got)
+	}
+	current, items, err := uc.Get(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("Get(current batch) error = %v", err)
+	}
+	if current.CurrentBatch != 1 || len(items) != 3 || items[0].BatchNumber != 1 || items[1].BatchNumber != 1 || items[2].BatchNumber != 2 {
+		t.Fatalf("current job=%+v items=%+v", current, items)
+	}
+	for _, edgeID := range firstBatch {
+		if err := repo.SetAgentVersion(context.Background(), edgeID, "v0.10.2"); err != nil {
+			t.Fatalf("SetAgentVersion(first batch edge %d) error = %v", edgeID, err)
+		}
+		if err := repo.MarkRegistered(context.Background(), edgeID, time.Now().Add(time.Second)); err != nil {
+			t.Fatalf("MarkRegistered(first batch edge %d) error = %v", edgeID, err)
+		}
+	}
+
+	allApplied := waitForApplied(3)
+	lastEdgeID := allApplied[2]
+	if err := repo.SetAgentVersion(context.Background(), lastEdgeID, "v0.10.2"); err != nil {
+		t.Fatalf("SetAgentVersion(second batch) error = %v", err)
+	}
+	if err := repo.MarkRegistered(context.Background(), lastEdgeID, time.Now().Add(2*time.Second)); err != nil {
+		t.Fatalf("MarkRegistered(second batch) error = %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		current, items, err = uc.Get(context.Background(), job.ID)
+		if err != nil {
+			t.Fatalf("Get(completed job) error = %v", err)
+		}
+		if current.Status == edgemodel.UpgradeJobStatusSucceeded {
+			if current.CurrentBatch != 2 || current.TotalBatches != 2 || current.Succeeded != 3 || current.Pending != 0 {
+				t.Fatalf("completed job=%+v items=%+v", current, items)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("upgrade job did not complete: applied=%v", dispatcher.appliedIDs())
+}

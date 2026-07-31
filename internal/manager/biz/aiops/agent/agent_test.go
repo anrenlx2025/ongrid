@@ -279,6 +279,9 @@ func (r *fakeEdgeRepoAgent) UpdateSecretHash(_ context.Context, _ uint64, _ stri
 func (r *fakeEdgeRepoAgent) UpdateStatus(_ context.Context, _ uint64, _ string, _ time.Time) error {
 	return nil
 }
+func (r *fakeEdgeRepoAgent) MarkRegistered(_ context.Context, _ uint64, _ time.Time) error {
+	return nil
+}
 func (r *fakeEdgeRepoAgent) UpdateRoles(_ context.Context, _ uint64, _ uint8) error {
 	return nil
 }

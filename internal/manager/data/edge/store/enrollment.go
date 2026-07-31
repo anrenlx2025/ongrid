@@ -76,6 +76,27 @@ func (r *EnrollmentRepo) RevokeProfile(ctx context.Context, id uint64) error {
 	return nil
 }
 
+// DeleteProfile removes the profile and its enrollment claim records in one
+// transaction. The independently issued Edge identities are not deleted.
+func (r *EnrollmentRepo) DeleteProfile(ctx context.Context, id uint64) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var profile model.EnrollmentProfile
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id").
+			Where("id = ?", id).
+			First(&profile).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrNotFound
+			}
+			return err
+		}
+		if err := tx.Where("profile_id = ?", id).Delete(&model.Enrollment{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&profile).Error
+	})
+}
+
 func (r *EnrollmentRepo) Claim(
 	ctx context.Context,
 	tokenHash, hostFingerprint, sourceIP string,

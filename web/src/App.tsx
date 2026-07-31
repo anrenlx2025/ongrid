@@ -34,6 +34,10 @@ const FlowEditorPage = lazy(() => import('@/pages/FlowEditor'));
 const KnowledgePage = lazy(() => import('@/pages/Knowledge'));
 const KnowledgeReposPage = lazy(() => import('@/pages/KnowledgeRepos'));
 const TopologyPage = lazy(() => import('@/pages/Topology'));
+const ClustersPage = lazy(() => import('@/pages/Clusters'));
+const DeviceClusterDetailPage = lazy(() =>
+  import('@/pages/Clusters').then((m) => ({ default: m.DeviceClusterDetailPage })),
+);
 const SettingsLayout = lazy(() => import('@/pages/SettingsLayout'));
 const SettingsLLM = lazy(() => import('@/pages/settings/LLM'));
 // Notifications = one-way alert delivery channels (Slack/Telegram/Larksuite
@@ -131,12 +135,13 @@ export default function App() {
         <Route path="/workflows/:id" element={<FlowEditorPage />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/knowledge/repos" element={<KnowledgeReposPage />} />
+        <Route path="/clusters" element={<ClustersPage />} />
+        <Route path="/clusters/:clusterId" element={<DeviceClusterDetailPage />} />
         <Route path="/topology" element={<TopologyPage />} />
         {/* Old per-entity routes — folded into /topology with a type
             chip. Redirect (without query string) so bookmarks open the
             unified page; the operator picks the type chip themselves. */}
         <Route path="/services" element={<Navigate to="/topology" replace />} />
-        <Route path="/clusters" element={<Navigate to="/topology" replace />} />
         <Route path="/apps" element={<Navigate to="/topology" replace />} />
         <Route path="/racks" element={<Navigate to="/topology" replace />} />
         {/* WebSSH 会话审计住在设备侧 — 不在 /admin（管理）里，因为

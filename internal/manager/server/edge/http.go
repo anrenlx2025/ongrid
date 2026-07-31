@@ -63,6 +63,14 @@ type PackageResolver interface {
 	ResolveBundle(arch, version string) (url, sha256, resolvedVersion string, err error)
 }
 
+// PackageCatalog is implemented by resolvers that can expose safe artifact
+// readiness metadata for preflight. It is intentionally separate from
+// PackageResolver so custom resolvers used by existing integrations continue
+// to satisfy the dispatch contract unchanged.
+type PackageCatalog interface {
+	CurrentBundles() (BundleCatalog, error)
+}
+
 // PluginConfigService is the narrow surface this handler uses from
 // biz.PluginConfigUC. Only the UI-facing methods are exposed here;
 // FetchForEdge is for the tunnel RPC path and not surfaced via HTTP.
@@ -70,6 +78,13 @@ type PluginConfigService interface {
 	ListForUI(ctx context.Context, edgeID uint64) ([]biz.PluginRow, error)
 	Set(ctx context.Context, edgeID uint64, plugin string, in biz.SetInput) (*biz.PluginRow, error)
 	CountByPlugin(ctx context.Context) (map[string]int64, error)
+}
+
+type UpgradeJobService interface {
+	Create(ctx context.Context, in biz.CreateUpgradeJobInput) (*model.UpgradeJob, error)
+	List(ctx context.Context, filter biz.UpgradeJobListFilter) ([]*model.UpgradeJob, int64, error)
+	Get(ctx context.Context, id uint64) (*model.UpgradeJob, []*model.UpgradeJobItem, error)
+	Retry(ctx context.Context, id uint64) (*model.UpgradeJob, error)
 }
 
 // Handler bundles the service with HTTP-layer state. devices is used to
@@ -84,11 +99,12 @@ type AuthzMW interface {
 }
 
 type Handler struct {
-	svc       EdgeService
-	devices   devicebiz.Repo
-	pluginCfg PluginConfigService
-	pkgRes    PackageResolver
-	authz     AuthzMW
+	svc         EdgeService
+	devices     devicebiz.Repo
+	pluginCfg   PluginConfigService
+	pkgRes      PackageResolver
+	upgradeJobs UpgradeJobService
+	authz       AuthzMW
 }
 
 // NewHandler builds the handler. devices may be nil — listings/details
@@ -102,6 +118,11 @@ func NewHandler(s EdgeService, devices devicebiz.Repo, pluginCfg PluginConfigSer
 // without it /v1/edges/{id}/upgrade-package returns 503 and the SPA
 // degrades to the legacy "URL+sha modal" upgrade.
 func (h *Handler) SetPackageResolver(r PackageResolver) { h.pkgRes = r }
+
+// SetUpgradeJobService enables persistent background package rollouts and
+// their history endpoints. The legacy synchronous batch route remains wired
+// for backward compatibility.
+func (h *Handler) SetUpgradeJobService(s UpgradeJobService) { h.upgradeJobs = s }
 
 // SetAuthz wires the casbin middleware post-construction. When set,
 // Register replaces the legacy h.requireAdmin mux on mutating routes
@@ -142,6 +163,7 @@ func (h *Handler) deleteMW(obj string) func(http.Handler) http.Handler {
 func (h *Handler) Register(r chi.Router) {
 	r.With(h.writeMW("edge:*")).Post("/v1/edges", h.createEdge)
 	r.Get("/v1/edges", h.listEdges)
+	r.Get("/v1/edge-bundles", h.listEdgeBundles)
 	r.Get("/v1/edges/{id}", h.getEdge)
 	r.With(h.deleteMW("edge:*")).Delete("/v1/edges/{id}", h.deleteEdge)
 	r.With(h.writeMW("edge:*")).Post("/v1/edges/{id}/rotate-secret", h.rotateSecret)
@@ -162,6 +184,12 @@ func (h *Handler) Register(r chi.Router) {
 	r.With(h.writeMW("edge:*")).Post("/v1/edges/batch/upgrade-package", h.batchUpgradePackage)
 	r.With(h.writeMW("edge:*")).Post("/v1/edges/batch/upgrade", h.batchUpgradeAgent)
 	r.With(h.deleteMW("edge:*")).Post("/v1/edges/batch/delete", h.batchDelete)
+	// Durable upgrade jobs continue dispatch and convergence checks after the
+	// initiating browser leaves the page.
+	r.With(h.writeMW("edge:*")).Post("/v1/edge-upgrade-jobs", h.createUpgradeJob)
+	r.Get("/v1/edge-upgrade-jobs", h.listUpgradeJobs)
+	r.Get("/v1/edge-upgrade-jobs/{id}", h.getUpgradeJob)
+	r.With(h.writeMW("edge:*")).Post("/v1/edge-upgrade-jobs/{id}/retry", h.retryUpgradeJob)
 	// Process list — read-only host introspection. Monitor page's
 	// per-device process panel calls this; same RPC the LLM tool uses.
 	r.Get("/v1/edges/{id}/processes", h.getProcesses)
@@ -360,9 +388,10 @@ type listItem struct {
 	Status string `json:"status"`
 	// Roles is denormalised from the linked Device for legacy UI compat
 	// — empty array means 未分类 OR no host device linked yet.
-	Roles       []string   `json:"roles"`
-	LastSeenAt  *time.Time `json:"last_seen_at"`
-	AccessKeyID string     `json:"access_key_id"`
+	Roles            []string   `json:"roles"`
+	LastSeenAt       *time.Time `json:"last_seen_at"`
+	LastRegisteredAt *time.Time `json:"last_registered_at,omitempty"`
+	AccessKeyID      string     `json:"access_key_id"`
 	// AgentVersion = self-reported on register_edge (optional). Empty
 	// for edges that registered with a pre-introduction binary.
 	AgentVersion string       `json:"agent_version,omitempty"`
@@ -376,17 +405,18 @@ type listResp struct {
 }
 
 type getResp struct {
-	ID           uint64       `json:"id"`
-	Name         string       `json:"name"`
-	Status       string       `json:"status"`
-	Roles        []string     `json:"roles"`
-	AccessKeyID  string       `json:"access_key_id"`
-	LastSeenAt   *time.Time   `json:"last_seen_at"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
-	AgentVersion string       `json:"agent_version,omitempty"`
-	DeviceID     *uint64      `json:"device_id,omitempty"`
-	HostInfo     *hostInfoDTO `json:"host_info,omitempty"`
+	ID               uint64       `json:"id"`
+	Name             string       `json:"name"`
+	Status           string       `json:"status"`
+	Roles            []string     `json:"roles"`
+	AccessKeyID      string       `json:"access_key_id"`
+	LastSeenAt       *time.Time   `json:"last_seen_at"`
+	LastRegisteredAt *time.Time   `json:"last_registered_at,omitempty"`
+	CreatedAt        time.Time    `json:"created_at"`
+	UpdatedAt        time.Time    `json:"updated_at"`
+	AgentVersion     string       `json:"agent_version,omitempty"`
+	DeviceID         *uint64      `json:"device_id,omitempty"`
+	HostInfo         *hostInfoDTO `json:"host_info,omitempty"`
 }
 
 type rotateResp struct {
@@ -452,18 +482,41 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 	for _, e := range edges {
 		dev := lookupDevice(devicesByID, e.DeviceID)
 		items = append(items, listItem{
-			ID:           e.ID,
-			Name:         e.Name,
-			Status:       e.Status,
-			Roles:        deviceRoles(dev),
-			LastSeenAt:   e.LastSeenAt,
-			AccessKeyID:  e.AccessKeyID,
-			AgentVersion: e.AgentVersion,
-			DeviceID:     e.DeviceID,
-			HostInfo:     deviceToHostInfo(dev),
+			ID:               e.ID,
+			Name:             e.Name,
+			Status:           e.Status,
+			Roles:            deviceRoles(dev),
+			LastSeenAt:       e.LastSeenAt,
+			LastRegisteredAt: e.LastRegisteredAt,
+			AccessKeyID:      e.AccessKeyID,
+			AgentVersion:     e.AgentVersion,
+			DeviceID:         e.DeviceID,
+			HostInfo:         deviceToHostInfo(dev),
 		})
 	}
 	writeJSON(w, http.StatusOK, listResp{Items: items, Total: len(items)})
+}
+
+func (h *Handler) listEdgeBundles(w http.ResponseWriter, r *http.Request) {
+	if _, ok := tenantctx.From(r.Context()); !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	if h.pkgRes == nil {
+		writeErr(w, fmt.Errorf("%w: edge bundle resolver is not configured", errs.ErrNotWiredYet))
+		return
+	}
+	catalogResolver, ok := h.pkgRes.(PackageCatalog)
+	if !ok {
+		writeErr(w, fmt.Errorf("%w: edge bundle catalog is not supported", errs.ErrNotWiredYet))
+		return
+	}
+	catalog, err := catalogResolver.CurrentBundles()
+	if err != nil {
+		writeErr(w, fmt.Errorf("%w: inspect edge bundles: %v", errs.ErrNotWiredYet, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, catalog)
 }
 
 func (h *Handler) getEdge(w http.ResponseWriter, r *http.Request) {
@@ -483,17 +536,18 @@ func (h *Handler) getEdge(w http.ResponseWriter, r *http.Request) {
 	}
 	dev := h.loadDevice(r.Context(), e.DeviceID)
 	writeJSON(w, http.StatusOK, getResp{
-		ID:           e.ID,
-		Name:         e.Name,
-		Status:       e.Status,
-		Roles:        deviceRoles(dev),
-		AccessKeyID:  e.AccessKeyID,
-		LastSeenAt:   e.LastSeenAt,
-		CreatedAt:    e.CreatedAt,
-		UpdatedAt:    e.UpdatedAt,
-		AgentVersion: e.AgentVersion,
-		DeviceID:     e.DeviceID,
-		HostInfo:     deviceToHostInfo(dev),
+		ID:               e.ID,
+		Name:             e.Name,
+		Status:           e.Status,
+		Roles:            deviceRoles(dev),
+		AccessKeyID:      e.AccessKeyID,
+		LastSeenAt:       e.LastSeenAt,
+		LastRegisteredAt: e.LastRegisteredAt,
+		CreatedAt:        e.CreatedAt,
+		UpdatedAt:        e.UpdatedAt,
+		AgentVersion:     e.AgentVersion,
+		DeviceID:         e.DeviceID,
+		HostInfo:         deviceToHostInfo(dev),
 	})
 }
 

@@ -33,6 +33,10 @@ type Repo interface {
 	List(ctx context.Context, f ListFilter) ([]*model.Edge, error)
 	UpdateSecretHash(ctx context.Context, id uint64, hash string) error
 	UpdateStatus(ctx context.Context, id uint64, status string, lastSeen time.Time) error
+	// MarkRegistered records a completed register_edge handshake. The
+	// timestamp changes only on registration, not on heartbeat, so upgrade
+	// orchestration can distinguish a newly started agent session.
+	MarkRegistered(ctx context.Context, id uint64, registeredAt time.Time) error
 	// UpdateName overwrites the operator-friendly display name. Used
 	// by HandleRegister to back-fill empty names with the host's
 	// reported hostname on first tunnel handshake.

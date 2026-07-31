@@ -46,8 +46,8 @@ import {
   batchDeleteEdges,
   type BatchResponse,
   createEdgeEnrollmentProfile,
+  deleteEdgeEnrollmentProfile,
   listEdgeEnrollmentProfiles,
-  revokeEdgeEnrollmentProfile,
   type CreateEdgeEnrollmentProfileResponse,
   type EdgeEnrollmentProfile,
   type EnrollmentAssignmentMode,
@@ -1069,11 +1069,11 @@ function EdgeAccessMeta({
         topologyClusters.map((cluster) => (
           <ClusterChipLink
             key={`topology-cluster:${cluster.id}`}
-            to="/topology"
+            to={`/clusters/${cluster.id}`}
             name={cluster.name}
             title={tr(
-              `所属拓扑集群：${cluster.name}（节点 #${cluster.id}）`,
-              `Topology cluster: ${cluster.name} (node #${cluster.id})`,
+              `所属集群：${cluster.name}（节点 #${cluster.id}）`,
+              `Cluster: ${cluster.name} (node #${cluster.id})`,
             )}
           />
         ))}
@@ -2189,6 +2189,9 @@ function BatchEnrollmentModal({
     useState<CreateEdgeEnrollmentProfileResponse | null>(null);
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [deletingProfileID, setDeletingProfileID] = useState<number | null>(
+    null,
+  );
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -2226,6 +2229,7 @@ function BatchEnrollmentModal({
       setCreated(null);
       setErr(null);
       setPending(false);
+      setDeletingProfileID(null);
       return;
     }
     void load();
@@ -2293,28 +2297,28 @@ function BatchEnrollmentModal({
     }
   }
 
-  async function revoke(profile: EdgeEnrollmentProfile) {
-    if (profile.status !== "active") return;
+  async function deleteProfile(profile: EdgeEnrollmentProfile) {
     if (
       !confirm(
         tr(
-          `撤销安装批次“${profile.name}”？`,
-          `Revoke installation batch “${profile.name}”?`,
+          `删除安装批次“${profile.name}”？该安装命令会立即失效，已安装设备不会被删除。`,
+          `Delete installation batch “${profile.name}”? Its installation command will stop working immediately. Installed devices will not be deleted.`,
         ),
       )
     ) {
       return;
     }
     setErr(null);
+    setDeletingProfileID(profile.id);
     try {
-      await revokeEdgeEnrollmentProfile(profile.id);
+      await deleteEdgeEnrollmentProfile(profile.id);
       setProfiles((current) =>
-        current.map((item) =>
-          item.id === profile.id ? { ...item, status: "revoked" } : item,
-        ),
+        current.filter((item) => item.id !== profile.id),
       );
     } catch (error) {
-      setErr((error as Error).message || tr("撤销失败", "Failed to revoke"));
+      setErr((error as Error).message || tr("删除失败", "Failed to delete"));
+    } finally {
+      setDeletingProfileID(null);
     }
   }
 
@@ -2578,15 +2582,16 @@ function BatchEnrollmentModal({
                     >
                       {enrollmentStatusLabel(profile.status, tr)}
                     </span>
-                    {profile.status === "active" && (
-                      <button
-                        type="button"
-                        onClick={() => void revoke(profile)}
-                        className="rounded px-2 py-1 text-[11px] text-red-300 hover:bg-red-500/10"
-                      >
-                        {tr("撤销", "Revoke")}
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      disabled={deletingProfileID === profile.id}
+                      onClick={() => void deleteProfile(profile)}
+                      className="rounded px-2 py-1 text-[11px] text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+                    >
+                      {deletingProfileID === profile.id
+                        ? tr("删除中…", "Deleting…")
+                        : tr("删除", "Delete")}
+                    </button>
                   </div>
                 ))
               )}

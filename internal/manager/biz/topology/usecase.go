@@ -315,6 +315,39 @@ func (u *Usecase) ValidateEnrollmentCluster(ctx context.Context, clusterNodeID u
 	return nil
 }
 
+// ValidateUpgradeCluster verifies that every requested device node is a
+// current member of the same operator-managed device cluster. This prevents a
+// caller from attaching an arbitrary Edge rollout to an unrelated cluster's
+// history.
+func (u *Usecase) ValidateUpgradeCluster(ctx context.Context, clusterNodeID uint64, deviceNodeIDs []uint64) error {
+	if len(deviceNodeIDs) == 0 {
+		return fmt.Errorf("%w: device nodes are required", errs.ErrInvalid)
+	}
+	if err := u.ValidateEnrollmentCluster(ctx, clusterNodeID); err != nil {
+		return err
+	}
+	relations, err := u.relations.List(ctx, RelationListFilter{
+		DstID: clusterNodeID,
+		Type:  model.RelMemberOf,
+	})
+	if err != nil {
+		return err
+	}
+	members := make(map[uint64]struct{}, len(relations))
+	for _, relation := range relations {
+		members[relation.SrcID] = struct{}{}
+	}
+	for _, deviceNodeID := range deviceNodeIDs {
+		if deviceNodeID == 0 {
+			return fmt.Errorf("%w: device node id must be positive", errs.ErrInvalid)
+		}
+		if _, ok := members[deviceNodeID]; !ok {
+			return fmt.Errorf("%w: device node %d is not a member of cluster %d", errs.ErrConflict, deviceNodeID, clusterNodeID)
+		}
+	}
+	return nil
+}
+
 // AssignEnrollmentDevice creates the automatic Device --member_of--> Cluster
 // relation for a cluster-mode Edge enrollment. It is idempotent for retries
 // and refuses to move an automatically assigned device between clusters.

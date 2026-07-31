@@ -445,9 +445,6 @@ func (u *Usecase) HandleRegister(ctx context.Context, edgeID uint64, info tunnel
 			return fmt.Errorf("finalize edge enrollment: %w", err)
 		}
 	}
-	if err := u.repo.UpdateStatus(ctx, edgeID, model.StatusOnline, time.Now().UTC()); err != nil {
-		return fmt.Errorf("update status: %w", err)
-	}
 	// Persist agent_version when the agent reports one; an empty value
 	// means "agent declined / pre-introduction binary" — leave the
 	// existing column alone rather than blanking the last known good
@@ -456,6 +453,12 @@ func (u *Usecase) HandleRegister(ctx context.Context, edgeID uint64, info tunnel
 		if err := u.repo.SetAgentVersion(ctx, edgeID, v); err != nil {
 			return fmt.Errorf("set agent version: %w", err)
 		}
+	}
+	// Write the registration marker last. Readers that observe a newer
+	// LastRegisteredAt are then guaranteed to observe the version reported by
+	// this handshake as well, which closes the upgrade verification race.
+	if err := u.repo.MarkRegistered(ctx, edgeID, time.Now().UTC()); err != nil {
+		return fmt.Errorf("mark registered: %w", err)
 	}
 	return nil
 }

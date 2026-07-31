@@ -7,11 +7,13 @@
 package edge
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 )
@@ -31,6 +33,24 @@ type FileBundleResolver struct {
 	dir            string
 	managerVersion string
 	publicURL      string
+}
+
+// BundleCatalog describes the upgrade artifacts for the manager's current
+// version. Every supported architecture is present even when its artifact is
+// missing, which lets the UI block only the affected devices before dispatch.
+type BundleCatalog struct {
+	ManagerVersion string       `json:"manager_version"`
+	Items          []BundleInfo `json:"items"`
+}
+
+type BundleInfo struct {
+	Arch       string     `json:"arch"`
+	Version    string     `json:"version"`
+	Available  bool       `json:"available"`
+	Bytes      int64      `json:"bytes,omitempty"`
+	SHA256     string     `json:"sha256,omitempty"`
+	ModifiedAt *time.Time `json:"modified_at,omitempty"`
+	Error      string     `json:"error,omitempty"`
 }
 
 // NewFileBundleResolver builds the resolver. dir typically
@@ -64,15 +84,10 @@ func (r *FileBundleResolver) ResolveBundle(arch, version string) (url, sha256, r
 	if _, err := os.Stat(tarball); err != nil {
 		return "", "", "", fmt.Errorf("bundle missing: %s (this manager image may have been built without build-edge-bundle)", name)
 	}
-	shaBytes, err := os.ReadFile(tarball + ".sha256")
+	sha, err := readBundleSHA(tarball + ".sha256")
 	if err != nil {
-		return "", "", "", fmt.Errorf("bundle sha file missing: %s.sha256", name)
+		return "", "", "", fmt.Errorf("bundle sha file invalid: %s.sha256: %w", name, err)
 	}
-	sha := strings.TrimSpace(string(shaBytes))
-	if len(sha) < 64 {
-		return "", "", "", fmt.Errorf("bundle sha file malformed: %s.sha256", name)
-	}
-	sha = sha[:64]
 	if r.publicURL == "" {
 		return "", "", "", errors.New("publicURL not configured; cannot build bundle URL")
 	}
@@ -82,6 +97,70 @@ func (r *FileBundleResolver) ResolveBundle(arch, version string) (url, sha256, r
 	// extracts edge-bundles/ into bin/ (host) → /usr/share/nginx/
 	// html/edge/ (container). Anonymous fetch; sha256 is the gate.
 	return fmt.Sprintf("%s/edge/%s", r.publicURL, name), sha, version, nil
+}
+
+// CurrentBundles reports readiness of the manager-version artifacts. It does
+// not expose filesystem paths or download URLs; callers only receive the
+// metadata needed for a safe preflight.
+func (r *FileBundleResolver) CurrentBundles() (BundleCatalog, error) {
+	if r == nil {
+		return BundleCatalog{}, errors.New("bundle resolver not wired")
+	}
+	version := strings.TrimSpace(r.managerVersion)
+	if version == "" {
+		return BundleCatalog{}, errors.New("manager version unknown; cannot inspect bundles")
+	}
+	catalog := BundleCatalog{ManagerVersion: version}
+	for _, arch := range []string{"linux-amd64", "linux-arm64"} {
+		catalog.Items = append(catalog.Items, r.inspectBundle(arch, version))
+	}
+	return catalog, nil
+}
+
+func (r *FileBundleResolver) inspectBundle(arch, version string) BundleInfo {
+	item := BundleInfo{Arch: arch, Version: version}
+	name := fmt.Sprintf("edge-bundle-%s-%s.tar.gz", arch, version)
+	tarball := filepath.Join(r.dir, name)
+	stat, err := os.Stat(tarball)
+	if err != nil {
+		item.Error = "bundle file is missing"
+		return item
+	}
+	if !stat.Mode().IsRegular() {
+		item.Error = "bundle path is not a regular file"
+		return item
+	}
+	sha, err := readBundleSHA(tarball + ".sha256")
+	if err != nil {
+		item.Error = "checksum file is missing or invalid"
+		return item
+	}
+	if strings.TrimSpace(r.publicURL) == "" {
+		item.Error = "public download URL is not configured"
+		return item
+	}
+	modifiedAt := stat.ModTime().UTC()
+	item.Available = true
+	item.Bytes = stat.Size()
+	item.SHA256 = sha
+	item.ModifiedAt = &modifiedAt
+	return item
+}
+
+func readBundleSHA(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(string(raw))
+	if len(value) < 64 {
+		return "", errors.New("checksum is shorter than 64 characters")
+	}
+	value = value[:64]
+	if _, err := hex.DecodeString(value); err != nil {
+		return "", errors.New("checksum is not hexadecimal")
+	}
+	return strings.ToLower(value), nil
 }
 
 func knownArch(a string) bool {

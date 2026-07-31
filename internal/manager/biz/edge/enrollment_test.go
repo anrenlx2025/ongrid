@@ -28,6 +28,8 @@ func (r *enrollmentRepoStub) ListProfiles(context.Context, EnrollmentProfileList
 
 func (r *enrollmentRepoStub) RevokeProfile(context.Context, uint64) error { return nil }
 
+func (r *enrollmentRepoStub) DeleteProfile(context.Context, uint64) error { return nil }
+
 func (r *enrollmentRepoStub) Claim(context.Context, string, string, string, *model.Edge, time.Time) (*model.EnrollmentProfile, *model.Enrollment, *model.Edge, bool, error) {
 	return r.profile, &model.Enrollment{ID: 1, ProfileID: r.profile.ID, EdgeID: r.edge.ID}, r.edge, true, nil
 }

@@ -20,6 +20,7 @@ type EnrollmentRepo interface {
 	GetProfileByTokenHash(ctx context.Context, tokenHash string) (*model.EnrollmentProfile, error)
 	ListProfiles(ctx context.Context, filter EnrollmentProfileListFilter) ([]*model.EnrollmentProfile, int64, error)
 	RevokeProfile(ctx context.Context, id uint64) error
+	DeleteProfile(ctx context.Context, id uint64) error
 	Claim(ctx context.Context, tokenHash, hostFingerprint, sourceIP string, candidate *model.Edge, now time.Time) (
 		profile *model.EnrollmentProfile,
 		enrollment *model.Enrollment,

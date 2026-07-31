@@ -129,6 +129,33 @@ func TestValidateEnrollmentClusterRejectsKubernetesOwnedNode(t *testing.T) {
 	}
 }
 
+func TestValidateUpgradeClusterRequiresEveryRequestedMember(t *testing.T) {
+	uc := newUC(t)
+	ctx := context.Background()
+	cluster, err := uc.CreateNode(ctx, string(model.NodeTypeCluster), "bare-metal-prod", `{"source":"manual"}`)
+	if err != nil {
+		t.Fatalf("CreateNode(cluster): %v", err)
+	}
+	member, err := uc.CreateNode(ctx, string(model.NodeTypeDevice), "member", "")
+	if err != nil {
+		t.Fatalf("CreateNode(member): %v", err)
+	}
+	outsider, err := uc.CreateNode(ctx, string(model.NodeTypeDevice), "outsider", "")
+	if err != nil {
+		t.Fatalf("CreateNode(outsider): %v", err)
+	}
+	if _, err := uc.CreateRelation(ctx, member.ID, cluster.ID, model.RelMemberOf, `{"source":"manual"}`); err != nil {
+		t.Fatalf("CreateRelation(member): %v", err)
+	}
+
+	if err := uc.ValidateUpgradeCluster(ctx, cluster.ID, []uint64{member.ID}); err != nil {
+		t.Fatalf("ValidateUpgradeCluster(member) error = %v", err)
+	}
+	if err := uc.ValidateUpgradeCluster(ctx, cluster.ID, []uint64{member.ID, outsider.ID}); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("ValidateUpgradeCluster(outsider) error = %v, want ErrConflict", err)
+	}
+}
+
 func TestEnsureKubernetesClusterUpsertsTopologyNode(t *testing.T) {
 	uc := newUC(t)
 	ctx := context.Background()

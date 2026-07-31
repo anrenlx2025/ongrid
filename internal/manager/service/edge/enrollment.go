@@ -25,6 +25,10 @@ func (s *EnrollmentService) RevokeProfile(ctx context.Context, id uint64) error 
 	return s.uc.RevokeProfile(ctx, id)
 }
 
+func (s *EnrollmentService) DeleteProfile(ctx context.Context, id uint64) error {
+	return s.uc.DeleteProfile(ctx, id)
+}
+
 func (s *EnrollmentService) Enroll(ctx context.Context, in biz.EnrollInput) (*biz.EnrollResult, error) {
 	return s.uc.Enroll(ctx, in)
 }

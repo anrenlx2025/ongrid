@@ -29,6 +29,7 @@ import {
   Share2,
   Plug,
   ShipWheel,
+  Boxes,
 } from 'lucide-react';
 import { Avatar } from './Avatar';
 import { AgentBadge } from './AgentBadge';
@@ -265,6 +266,13 @@ export function Sidebar() {
           <HardDrive size={16} />
         </Link>
         <Link
+          to="/clusters"
+          aria-label={tr('集群', 'Clusters')}
+          className="rounded-lg p-2 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+        >
+          <Boxes size={16} />
+        </Link>
+        <Link
           to="/kubernetes"
           aria-label={tr('Kubernetes', 'Kubernetes')}
           className="rounded-lg p-2 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
@@ -401,6 +409,7 @@ export function Sidebar() {
 
         <CollapsibleSection storageKey="resources" title={tr('基础设施', 'Infrastructure')} defaultOpen>
           <SidebarNavItem to="/devices" icon={HardDrive} label={tr('设备', 'Devices')} />
+          <SidebarNavItem to="/clusters" icon={Boxes} label={tr('集群', 'Clusters')} />
           <SidebarNavItem to="/kubernetes" icon={ShipWheel} label="Kubernetes" />
           <SidebarNavItem to="/topology" icon={Share2} label={tr('拓扑', 'Topology')} />
         </CollapsibleSection>

@@ -83,6 +83,50 @@ func TestEnrollmentProfileRevokeStopsClaims(t *testing.T) {
 	}
 }
 
+func TestEnrollmentProfileDeleteRemovesClaimsButKeepsEdge(t *testing.T) {
+	edgeRepo := newTestRepo(t)
+	repo := NewEnrollmentRepo(edgeRepo.db)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	profile := &model.EnrollmentProfile{
+		Name:           "rack-delete",
+		AssignmentMode: model.EnrollmentModeBatchOnly,
+		TokenHash:      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		ExpiresAt:      now.Add(time.Hour),
+		MaxUses:        2,
+		Status:         model.EnrollmentStatusActive,
+	}
+	if err := repo.CreateProfile(ctx, profile); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+	candidate := &model.Edge{Name: "host", AccessKeyID: "access-delete", SecretKeyHash: "hash", Status: model.StatusOffline}
+	_, _, edge, _, err := repo.Claim(ctx, profile.TokenHash, "fp_delete", "", candidate, now)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := repo.DeleteProfile(ctx, profile.ID); err != nil {
+		t.Fatalf("DeleteProfile: %v", err)
+	}
+
+	if _, _, _, _, err := repo.Claim(ctx, profile.TokenHash, "fp_other", "", candidate, now); !errors.Is(err, errs.ErrUnauthorized) {
+		t.Fatalf("deleted claim error = %v, want ErrUnauthorized", err)
+	}
+	var enrollmentCount int64
+	if err := edgeRepo.db.Model(&model.Enrollment{}).Where("profile_id = ?", profile.ID).Count(&enrollmentCount).Error; err != nil {
+		t.Fatalf("count enrollments: %v", err)
+	}
+	if enrollmentCount != 0 {
+		t.Fatalf("enrollment count = %d, want 0", enrollmentCount)
+	}
+	var edgeCount int64
+	if err := edgeRepo.db.Model(&model.Edge{}).Where("id = ?", edge.ID).Count(&edgeCount).Error; err != nil {
+		t.Fatalf("count edge: %v", err)
+	}
+	if edgeCount != 1 {
+		t.Fatalf("edge count = %d, want 1", edgeCount)
+	}
+}
+
 func TestEnrollmentProfileExpiryStopsClaims(t *testing.T) {
 	edgeRepo := newTestRepo(t)
 	repo := NewEnrollmentRepo(edgeRepo.db)

@@ -307,6 +307,20 @@ func (r *fakeRepo) UpdateStatus(_ context.Context, id uint64, status string, las
 	return nil
 }
 
+func (r *fakeRepo) MarkRegistered(_ context.Context, id uint64, registeredAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.byID[id]
+	if !ok || e.DeletedAt != nil {
+		return errs.ErrNotFound
+	}
+	e.Status = model.StatusOnline
+	at := registeredAt
+	e.LastSeenAt = &at
+	e.LastRegisteredAt = &at
+	return nil
+}
+
 func (r *fakeRepo) UpdateName(_ context.Context, id uint64, name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -647,6 +661,9 @@ func TestHandleRegisterUpsertsDeviceAndLinksEdge(t *testing.T) {
 	}
 	if after.LastSeenAt == nil {
 		t.Errorf("LastSeenAt not updated")
+	}
+	if after.LastRegisteredAt == nil {
+		t.Errorf("LastRegisteredAt not updated")
 	}
 	if after.DeviceID == nil {
 		t.Fatal("Edge.DeviceID not set after register")
