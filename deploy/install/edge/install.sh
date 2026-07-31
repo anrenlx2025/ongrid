@@ -8,6 +8,13 @@
 #       --server-edge-addr=<host>:40012 \
 #       --server-http-addr=<host>:8443
 #
+#   # Reusable batch enrollment (each host receives independent credentials):
+#   curl -k -sSL https://<server>/install.sh | bash -s -- \
+#       --enrollment-token=TOKEN \
+#       --server-edge-addr=<host>:40012 \
+#       --server-http-addr=<host>:8443 \
+#       --tls-insecure
+#
 #   --server-http-addr  is the same host:port your browser uses (the nginx
 #                       front-door); the script downloads the right binary
 #                       from https://<http-addr>/edge/ongrid-edge-<os>-<arch>.
@@ -25,8 +32,10 @@ set -euo pipefail
 
 ACCESS_KEY=""
 SECRET_KEY=""
+ENROLLMENT_TOKEN=""
 SERVER_EDGE_ADDR=""
 SERVER_HTTP_ADDR=""
+TLS_INSECURE=0
 
 INSTALL_DIR="/usr/local/bin"
 ENV_DIR="/etc/ongrid-edge"
@@ -72,13 +81,14 @@ usage() {
     cat <<EOF
 Usage: install.sh [OPTIONS]
 
-Required (install):
-  --access-key=KEY
-  --secret-key=SECRET
+Required (install, choose one credential mode):
+  --access-key=KEY --secret-key=SECRET
+  --enrollment-token=TOKEN         reusable bounded bootstrap token
   --server-edge-addr=HOST:PORT     edge geminio endpoint, e.g. ongrid.example.com:40012
   --server-http-addr=HOST[:PORT]   http endpoint, e.g. ongrid.example.com:8443
 
 Other:
+  --tls-insecure                   skip TLS verification for enrollment (self-signed only)
   --uninstall                      stop + remove ongrid-edge (keeps /var/log)
   -h, --help                       this help
 
@@ -92,8 +102,10 @@ for arg in "$@"; do
     case "$arg" in
         --access-key=*)        ACCESS_KEY="${arg#*=}" ;;
         --secret-key=*)        SECRET_KEY="${arg#*=}" ;;
+        --enrollment-token=*)  ENROLLMENT_TOKEN="${arg#*=}" ;;
         --server-edge-addr=*)  SERVER_EDGE_ADDR="${arg#*=}" ;;
         --server-http-addr=*)  SERVER_HTTP_ADDR="${arg#*=}" ;;
+        --tls-insecure)        TLS_INSECURE=1 ;;
         --uninstall)           UNINSTALL=1 ;;
         -h|--help)             usage; exit 0 ;;
         *) log_error "unknown arg: $arg"; usage; exit 2 ;;
@@ -121,8 +133,15 @@ fi
 
 # --- arg validation ----------------------------------------------------------
 
-[[ -n "$ACCESS_KEY"       ]] || { log_error "missing --access-key";       usage; exit 2; }
-[[ -n "$SECRET_KEY"       ]] || { log_error "missing --secret-key";       usage; exit 2; }
+if [[ -n "$ENROLLMENT_TOKEN" ]]; then
+    if [[ -n "$ACCESS_KEY" || -n "$SECRET_KEY" ]]; then
+        log_error "--enrollment-token cannot be combined with --access-key/--secret-key"
+        usage; exit 2
+    fi
+else
+    [[ -n "$ACCESS_KEY" ]] || { log_error "missing --access-key or --enrollment-token"; usage; exit 2; }
+    [[ -n "$SECRET_KEY" ]] || { log_error "missing --secret-key"; usage; exit 2; }
+fi
 [[ -n "$SERVER_EDGE_ADDR" ]] || { log_error "missing --server-edge-addr"; usage; exit 2; }
 [[ -n "$SERVER_HTTP_ADDR" ]] || { log_error "missing --server-http-addr"; usage; exit 2; }
 
@@ -253,11 +272,26 @@ mkdir -p "$ENV_DIR"
 chown "root:${SERVICE_GROUP}" "$ENV_DIR"
 chmod 750 "$ENV_DIR"
 
-cat > "$ENV_FILE" <<EOF
+if [[ -n "$ENROLLMENT_TOKEN" ]]; then
+    log_info "claiming an independent edge identity"
+    ENROLL_ARGS=(
+        enroll
+        "--manager-url=https://${SERVER_HTTP_ADDR}"
+        "--cloud-addr-fallback=${SERVER_EDGE_ADDR}"
+        "--output=${ENV_FILE}"
+    )
+    if [[ $TLS_INSECURE -eq 1 ]]; then
+        ENROLL_ARGS+=(--tls-insecure)
+    fi
+    ONGRID_ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN" "${INSTALL_DIR}/ongrid-edge" "${ENROLL_ARGS[@]}"
+    unset ENROLLMENT_TOKEN
+else
+    cat > "$ENV_FILE" <<EOF
 ONGRID_EDGE_CLOUD_ADDR=${SERVER_EDGE_ADDR}
 ONGRID_EDGE_ACCESS_KEY=${ACCESS_KEY}
 ONGRID_EDGE_SECRET_KEY=${SECRET_KEY}
 EOF
+fi
 chmod 640 "$ENV_FILE"
 chown "root:${SERVICE_GROUP}" "$ENV_FILE"
 
@@ -452,11 +486,19 @@ else
     log_error "  fix: usermod -aG systemd-journal ${SERVICE_USER}; ensure persistent journal (/var/log/journal)"
     SELFCHECK_FAIL=1
 fi
-DP_HOST="${SERVER_HTTP_ADDR%%:*}"
-if [[ -n "$DP_HOST" ]] && timeout 5 bash -c "exec 3<>/dev/tcp/${DP_HOST}/443" 2>/dev/null; then
-    log_ok "data-plane host ${DP_HOST}:443 reachable (TCP)"
+DP_HOST="$SERVER_HTTP_ADDR"
+DP_PORT="443"
+if [[ "$SERVER_HTTP_ADDR" =~ ^\[([^]]+)\](:([0-9]+))?$ ]]; then
+    DP_HOST="${BASH_REMATCH[1]}"
+    [[ -n "${BASH_REMATCH[3]:-}" ]] && DP_PORT="${BASH_REMATCH[3]}"
+elif [[ "$SERVER_HTTP_ADDR" =~ ^([^:]+):([0-9]+)$ ]]; then
+    DP_HOST="${BASH_REMATCH[1]}"
+    DP_PORT="${BASH_REMATCH[2]}"
+fi
+if [[ -n "$DP_HOST" ]] && timeout 5 bash -c "exec 3<>/dev/tcp/${DP_HOST}/${DP_PORT}" 2>/dev/null; then
+    log_ok "data-plane host ${DP_HOST}:${DP_PORT} reachable (TCP)"
 else
-    log_warn "data-plane host ${DP_HOST}:443 not reachable from here — logs/traces push may fail"
+    log_warn "data-plane host ${DP_HOST}:${DP_PORT} not reachable from here — logs/traces push may fail"
 fi
 if [[ $SELFCHECK_FAIL -eq 0 ]]; then
     log_ok "self-check passed"

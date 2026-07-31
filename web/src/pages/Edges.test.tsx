@@ -88,12 +88,43 @@ describe("EdgesPage", () => {
               name: "bare-metal-1",
               hostname: "bm-1",
               ip_address: "10.0.0.9",
+              node_id: 119,
               roles: ["server"],
               online: true,
               last_seen_at: "2026-06-29T10:00:00Z",
             },
           ],
           total: 3,
+        }),
+      ),
+      http.get("/api/v1/topology/nodes", () =>
+        HttpResponse.json({
+          items: [
+            {
+              id: 501,
+              type: "cluster",
+              name: "bare-metal-prod",
+              props: { source: "manual" },
+              created_at: "2026-07-31T00:00:00Z",
+              updated_at: "2026-07-31T00:00:00Z",
+            },
+          ],
+          total: 1,
+        }),
+      ),
+      http.get("/api/v1/topology/relations", () =>
+        HttpResponse.json({
+          items: [
+            {
+              id: 701,
+              src_id: 119,
+              dst_id: 501,
+              type: "member_of",
+              props: { source: "edge_enrollment", profile_id: 1 },
+              created_at: "2026-07-31T00:00:00Z",
+            },
+          ],
+          total: 1,
         }),
       ),
       http.get("/api/v1/k8s/edge-attachments", () =>
@@ -130,7 +161,26 @@ describe("EdgesPage", () => {
     );
   });
 
-  it("隐藏 Controller Edge，并把 K8s Controller 标到所在 Node Edge", async () => {
+  it("在非 Kubernetes 设备行展示所属拓扑集群", async () => {
+    render(
+      <MemoryRouter>
+        <EdgesPage />
+      </MemoryRouter>,
+    );
+
+    const deviceName = await screen.findByText("bare-metal-1");
+    const row = deviceName.closest("tr") as HTMLTableRowElement;
+    expect(row).not.toBeNull();
+    const clusterLink = within(row).getByRole("link", {
+      name: "所属集群 bare-metal-prod",
+    });
+    expect(clusterLink).toHaveAttribute("href", "/topology");
+    expect(
+      within(clusterLink).getByText("集群 · bare-metal-prod"),
+    ).toBeInTheDocument();
+  });
+
+  it("隐藏 Controller Edge，并为设备展示统一的 K8s 和集群标签", async () => {
     render(
       <MemoryRouter>
         <EdgesPage />
@@ -143,11 +193,22 @@ describe("EdgesPage", () => {
       screen.queryByText("k8s:kind-local:ongrid-k8s-control-plane"),
     ).not.toBeInTheDocument();
     expect(screen.queryByText("kind-controller")).not.toBeInTheDocument();
-    expect(screen.getByText("K8s Node")).toBeInTheDocument();
-    expect(screen.getByText("K8s Controller")).toBeInTheDocument();
-    expect(screen.getByText("kind-local")).toBeInTheDocument();
+    expect(screen.queryByText("K8s Node")).not.toBeInTheDocument();
+    expect(screen.queryByText("K8s Controller")).not.toBeInTheDocument();
     const k8sRow = k8sNameCells[0].closest("tr");
     expect(k8sRow).not.toBeNull();
+    expect(
+      within(k8sRow as HTMLTableRowElement).getByText("K8s"),
+    ).toBeInTheDocument();
+    const clusterLink = within(k8sRow as HTMLTableRowElement).getByRole(
+      "link",
+      { name: "所属集群 kind-local" },
+    );
+    expect(clusterLink).toHaveAttribute("href", "/kubernetes/1");
+    const clusterChip = within(clusterLink)
+      .getByText("集群 · kind-local")
+      .closest("span.inline-flex");
+    expect(clusterChip).toHaveClass("bg-sky-500/10", "text-sky-300");
     expect(
       within(k8sRow as HTMLTableRowElement).queryByText("Kubernetes 管理"),
     ).not.toBeInTheDocument();
@@ -165,7 +226,11 @@ describe("EdgesPage", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByText("bare-metal-1")).toBeInTheDocument();
     expect(screen.getByText("bm-1")).toBeInTheDocument();
-    expect(screen.getByText("Host Edge")).toBeInTheDocument();
+    expect(screen.queryByText("Host Edge")).not.toBeInTheDocument();
+    expect(screen.getByText("Host")).toHaveClass(
+      "bg-indigo-500/10",
+      "text-indigo-300",
+    );
     expect(screen.getByRole("table")).toHaveClass("w-full", "min-w-[1260px]");
   });
 
@@ -189,7 +254,9 @@ describe("EdgesPage", () => {
       expect(screen.getByTestId("location")).toHaveTextContent("/devices/17"),
     );
 
-    expect(within(k8sRow).queryByText("Kubernetes 管理")).not.toBeInTheDocument();
+    expect(
+      within(k8sRow).queryByText("Kubernetes 管理"),
+    ).not.toBeInTheDocument();
     expect(
       within(k8sRow).getByRole("link", { name: /打开.*终端/ }),
     ).toHaveAttribute("href", "/devices/17/shell");
@@ -276,6 +343,204 @@ describe("EdgesPage", () => {
         value: originalInnerHeight,
       });
     }
+  });
+
+  it("生成可绑定集群的批量安装命令", async () => {
+    const user = userEvent.setup();
+    let submitted: Record<string, unknown> | null = null;
+    server.use(
+      http.get("/api/v1/topology/nodes", () =>
+        HttpResponse.json({
+          items: [
+            {
+              id: 88,
+              type: "cluster",
+              name: "bare-metal-prod",
+              props: {},
+              created_at: "2026-07-31T00:00:00Z",
+              updated_at: "2026-07-31T00:00:00Z",
+            },
+          ],
+          total: 1,
+        }),
+      ),
+      http.get("/api/v1/edge-enrollment-profiles", () =>
+        HttpResponse.json({ items: [], total: 0, page: 1, page_size: 100 }),
+      ),
+      http.post("/api/v1/edge-enrollment-profiles", async ({ request }) => {
+        submitted = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(
+          {
+            profile: {
+              id: 7,
+              name: "机房批次",
+              assignment_mode: "cluster",
+              cluster_node_id: 88,
+              expires_at: "2026-08-01T00:00:00Z",
+              max_uses: 100,
+              used_count: 0,
+              status: "active",
+              created_at: "2026-07-31T00:00:00Z",
+            },
+            enrollment_token: "oen_reusable_token",
+          },
+          { status: 201 },
+        );
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <EdgesPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("bare-metal-1");
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: "批量安装设备" }));
+    });
+    const dialog = await screen.findByRole("dialog", { name: "批量安装 Edge" });
+    await within(dialog).findByText("暂无安装批次");
+    await act(async () => {
+      await user.type(
+        within(dialog).getByLabelText("安装批次名称"),
+        "机房批次",
+      );
+      await user.selectOptions(
+        within(dialog).getByLabelText("归属方式"),
+        "cluster",
+      );
+    });
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText("集群")).toBeInTheDocument(),
+    );
+    await act(async () => {
+      await user.selectOptions(within(dialog).getByLabelText("集群"), "88");
+      await user.click(
+        within(dialog).getByRole("button", { name: "生成安装命令" }),
+      );
+    });
+
+    await waitFor(() =>
+      expect(submitted).toEqual({
+        name: "机房批次",
+        assignment_mode: "cluster",
+        cluster_node_id: 88,
+        expires_in_hours: 24,
+        max_uses: 100,
+      }),
+    );
+    expect(
+      await within(dialog).findByText(/--enrollment-token=oen_reusable_token/),
+    ).toBeInTheDocument();
+    expect(within(dialog).getAllByText(/--tls-insecure/)).toHaveLength(2);
+  });
+
+  it("没有已有集群时可直接新建并绑定批量安装命令", async () => {
+    const user = userEvent.setup();
+    const requestOrder: string[] = [];
+    let clusterInput: Record<string, unknown> | null = null;
+    let profileInput: Record<string, unknown> | null = null;
+    server.use(
+      http.get("/api/v1/topology/nodes", () =>
+        HttpResponse.json({ items: [], total: 0 }),
+      ),
+      http.get("/api/v1/edge-enrollment-profiles", () =>
+        HttpResponse.json({ items: [], total: 0, page: 1, page_size: 100 }),
+      ),
+      http.post("/api/v1/topology/nodes", async ({ request }) => {
+        requestOrder.push("cluster");
+        clusterInput = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(
+          {
+            id: 99,
+            type: "cluster",
+            name: "上海机房生产集群",
+            props: { source: "manual" },
+            created_at: "2026-07-31T00:00:00Z",
+            updated_at: "2026-07-31T00:00:00Z",
+          },
+          { status: 201 },
+        );
+      }),
+      http.post("/api/v1/edge-enrollment-profiles", async ({ request }) => {
+        requestOrder.push("profile");
+        profileInput = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(
+          {
+            profile: {
+              id: 8,
+              name: "首次部署",
+              assignment_mode: "cluster",
+              cluster_node_id: 99,
+              expires_at: "2026-08-01T00:00:00Z",
+              max_uses: 100,
+              used_count: 0,
+              status: "active",
+              created_at: "2026-07-31T00:00:00Z",
+            },
+            enrollment_token: "oen_first_cluster_token",
+          },
+          { status: 201 },
+        );
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <EdgesPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("bare-metal-1");
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: "批量安装设备" }));
+    });
+    const dialog = await screen.findByRole("dialog", { name: "批量安装 Edge" });
+    await within(dialog).findByText("暂无安装批次");
+    await act(async () => {
+      await user.type(
+        within(dialog).getByLabelText("安装批次名称"),
+        "首次部署",
+      );
+      await user.selectOptions(
+        within(dialog).getByLabelText("归属方式"),
+        "cluster",
+      );
+    });
+
+    expect(
+      within(dialog).getByRole("radio", { name: "新建集群" }),
+    ).toBeChecked();
+    expect(
+      within(dialog).getByRole("radio", { name: "选择已有集群" }),
+    ).toBeDisabled();
+    await act(async () => {
+      await user.type(
+        within(dialog).getByLabelText("新集群名称"),
+        "上海机房生产集群",
+      );
+      await user.click(
+        within(dialog).getByRole("button", { name: "生成安装命令" }),
+      );
+    });
+
+    await waitFor(() => expect(requestOrder).toEqual(["cluster", "profile"]));
+    expect(clusterInput).toEqual({
+      type: "cluster",
+      name: "上海机房生产集群",
+      props: { source: "manual" },
+    });
+    expect(profileInput).toEqual({
+      name: "首次部署",
+      assignment_mode: "cluster",
+      cluster_node_id: 99,
+      expires_in_hours: 24,
+      max_uses: 100,
+    });
+    expect(
+      await within(dialog).findByText(
+        /--enrollment-token=oen_first_cluster_token/,
+      ),
+    ).toBeInTheDocument();
   });
 });
 

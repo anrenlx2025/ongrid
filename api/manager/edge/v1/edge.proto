@@ -26,6 +26,20 @@ service EdgeService {
 
     // RotateSecret 为现有 edge 重新生成 SecretKey；旧 secret 立刻失效。
     rpc RotateSecret(RotateSecretRequest) returns (RotateSecretResponse);
+
+    // CreateEnrollmentProfile 创建一条可复用的非 Kubernetes Edge 批量安装配置。
+    // enrollment_token 仅在此次响应中明文返回。
+    rpc CreateEnrollmentProfile(CreateEnrollmentProfileRequest) returns (CreateEnrollmentProfileResponse);
+
+    // ListEnrollmentProfiles 列出批量安装配置；永不返回 enrollment_token。
+    rpc ListEnrollmentProfiles(ListEnrollmentProfilesRequest) returns (ListEnrollmentProfilesResponse);
+
+    // RevokeEnrollmentProfile 撤销安装配置，已领取的独立 Edge 凭证不受影响。
+    rpc RevokeEnrollmentProfile(RevokeEnrollmentProfileRequest) returns (google.protobuf.Empty);
+
+    // EnrollEdge 使用安装令牌为当前主机领取一对独立 Edge 凭证。
+    // HTTP 层使用 Authorization: Bearer <enrollment_token>，不使用用户 JWT。
+    rpc EnrollEdge(EnrollEdgeRequest) returns (EnrollEdgeResponse);
 }
 
 // ---------- 领域类型 ----------
@@ -35,6 +49,13 @@ enum EdgeStatus {
     EDGE_STATUS_UNSPECIFIED = 0;
     EDGE_STATUS_ONLINE = 1;
     EDGE_STATUS_OFFLINE = 2;
+}
+
+// EnrollmentAssignmentMode 决定安装配置是否写入拓扑集群归属。
+enum EnrollmentAssignmentMode {
+    ENROLLMENT_ASSIGNMENT_MODE_UNSPECIFIED = 0;
+    ENROLLMENT_ASSIGNMENT_MODE_BATCH_ONLY = 1;
+    ENROLLMENT_ASSIGNMENT_MODE_CLUSTER = 2;
 }
 
 // HostInfo edge 汇报的静态主机信息（随 register_edge 上来）。
@@ -110,4 +131,58 @@ message RotateSecretResponse {
     // 新签发的 secret_key，仅此次响应明文返回。access_key 不变。
     string secret_key = 1 [json_name = "secret_key"];
     google.protobuf.Timestamp rotated_at = 2 [json_name = "rotated_at"];
+}
+
+message EnrollmentProfile {
+    uint64 id = 1 [json_name = "id"];
+    string name = 2 [json_name = "name"];
+    EnrollmentAssignmentMode assignment_mode = 3 [json_name = "assignment_mode"];
+    optional uint64 cluster_node_id = 4 [json_name = "cluster_node_id"];
+    google.protobuf.Timestamp expires_at = 5 [json_name = "expires_at"];
+    int32 max_uses = 6 [json_name = "max_uses"];
+    int32 used_count = 7 [json_name = "used_count"];
+    string status = 8 [json_name = "status"]; // active / revoked / expired / exhausted
+    google.protobuf.Timestamp created_at = 9 [json_name = "created_at"];
+}
+
+message CreateEnrollmentProfileRequest {
+    string name = 1 [json_name = "name"];
+    EnrollmentAssignmentMode assignment_mode = 2 [json_name = "assignment_mode"];
+    optional uint64 cluster_node_id = 3 [json_name = "cluster_node_id"];
+    int32 expires_in_hours = 4 [json_name = "expires_in_hours"];
+    int32 max_uses = 5 [json_name = "max_uses"];
+}
+
+message CreateEnrollmentProfileResponse {
+    EnrollmentProfile profile = 1 [json_name = "profile"];
+    string enrollment_token = 2 [json_name = "enrollment_token"];
+}
+
+message ListEnrollmentProfilesRequest {
+    int32 page = 1 [json_name = "page"];
+    int32 page_size = 2 [json_name = "page_size"];
+}
+
+message ListEnrollmentProfilesResponse {
+    repeated EnrollmentProfile profiles = 1 [json_name = "profiles"];
+    int32 total = 2 [json_name = "total"];
+    int32 page = 3 [json_name = "page"];
+    int32 page_size = 4 [json_name = "page_size"];
+}
+
+message RevokeEnrollmentProfileRequest {
+    uint64 id = 1 [json_name = "id"];
+}
+
+message EnrollEdgeRequest {
+    HostInfo host_info = 1 [json_name = "host_info"];
+    string agent_version = 2 [json_name = "agent_version"];
+}
+
+message EnrollEdgeResponse {
+    uint64 edge_id = 1 [json_name = "edge_id"];
+    string access_key = 2 [json_name = "access_key"];
+    string secret_key = 3 [json_name = "secret_key"];
+    string cloud_addr = 4 [json_name = "cloud_addr"];
+    string manager_public_url = 5 [json_name = "manager_public_url"];
 }

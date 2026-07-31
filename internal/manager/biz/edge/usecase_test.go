@@ -989,6 +989,21 @@ type stubMirror struct {
 	deletes [][2]uint64
 }
 
+type stubEnrollmentFinalizer struct {
+	edgeID       uint64
+	deviceID     uint64
+	deviceNodeID uint64
+	calls        int
+}
+
+func (s *stubEnrollmentFinalizer) Finalize(_ context.Context, edgeID, deviceID, deviceNodeID uint64) error {
+	s.edgeID = edgeID
+	s.deviceID = deviceID
+	s.deviceNodeID = deviceNodeID
+	s.calls++
+	return nil
+}
+
 func (s *stubMirror) EnsureNodeForDevice(_ context.Context, deviceID uint64, _ string) (uint64, error) {
 	s.calls = append(s.calls, deviceID)
 	return deviceID + 1000, nil
@@ -1041,6 +1056,32 @@ func TestHandleRegisterMirrorsDeviceToNode(t *testing.T) {
 	}
 	if len(mirror.calls) != 1 {
 		t.Errorf("mirror called %d times after second register, want still 1", len(mirror.calls))
+	}
+}
+
+func TestHandleRegisterFinalizesEnrollmentWithDeviceNode(t *testing.T) {
+	repo := newFakeRepo()
+	devices := newFakeDeviceRepo()
+	mirror := &stubMirror{}
+	finalizer := &stubEnrollmentFinalizer{}
+	uc := NewUsecase(repo, devices, nil, nil)
+	uc.SetNodeMirror(mirror)
+	uc.SetEnrollmentFinalizer(finalizer)
+	ctx := context.Background()
+
+	created, err := uc.Create(ctx, "edge-enrolled", nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	info := tunnel.HostInfo{Hostname: "node-enrolled", OS: "linux", Arch: "amd64", Fingerprint: "host-id"}
+	if err := uc.HandleRegister(ctx, created.Edge.ID, info, "v1.0.0"); err != nil {
+		t.Fatalf("HandleRegister: %v", err)
+	}
+	if finalizer.calls != 1 || finalizer.edgeID != created.Edge.ID || finalizer.deviceID == 0 {
+		t.Fatalf("finalizer = %+v", finalizer)
+	}
+	if finalizer.deviceNodeID != finalizer.deviceID+1000 {
+		t.Fatalf("deviceNodeID = %d, want %d", finalizer.deviceNodeID, finalizer.deviceID+1000)
 	}
 }
 

@@ -806,6 +806,7 @@ func main() {
 	}
 	k8sUC.SetTelemetryTargetResolver(pluginEndpointResolver)
 	pluginConfigUC := managerbizedge.NewPluginConfigUC(pluginConfigRepo, nil, pluginEndpointResolver, log)
+	edgeUC.SetPluginSeeder(pluginConfigUC)
 
 	edgeHandler := managerserveredge.NewHandler(edgeSvc, deviceRepo, pluginConfigUC)
 	edgeHandler.SetAuthz(authzMW)
@@ -837,6 +838,22 @@ func main() {
 		topologyNodeRepo, topologyRelationRepo, topologyRelationTypeRepo, topologyNodeTypeRepo, log,
 	)
 	topologyHandler := managerservertopology.NewHandler(topologyUC)
+
+	// Non-Kubernetes fleet enrollment: a short-lived reusable profile issues
+	// one independent Edge identity per host. Cluster assignment is delegated
+	// to the topology UC and finalized by the normal register_edge flow.
+	edgeEnrollmentRepo := manageredgedata.NewEnrollmentRepo(db)
+	edgeEnrollmentUC := managerbizedge.NewEnrollmentUsecase(
+		edgeEnrollmentRepo,
+		topologyUC,
+		edgeUC,
+		managerbizedge.EnrollmentConfig{PublicURL: cfg.PublicURL, TunnelAddr: cfg.TunnelAddr},
+		log,
+	)
+	edgeEnrollmentSvc := managersvcedge.NewEnrollmentService(edgeEnrollmentUC)
+	edgeEnrollmentHandler := managerserveredge.NewEnrollmentHandler(edgeEnrollmentSvc)
+	edgeEnrollmentHandler.SetAuthz(authzMW)
+	edgeUC.SetEnrollmentFinalizer(edgeEnrollmentUC)
 
 	// device→topology mirror. Plug the topology UC into edge UC
 	// so the register flow drops a `nodes` row alongside each new
@@ -2232,6 +2249,7 @@ func main() {
 	edgeOnlyAuthHandler.RegisterAt(mux, "/internal/auth/edge-verify")
 	telemetryOnlyAuthHandler.RegisterAt(mux, "/internal/auth/telemetry-verify")
 	k8sHandler.RegisterInternal(mux)
+	edgeEnrollmentHandler.RegisterInternal(mux)
 
 	// All BC HTTP lives under /api. Public iam routes (login / refresh)
 	// skip the auth middleware; everything else goes through it via
@@ -2328,6 +2346,7 @@ func main() {
 			})
 			iamHandler.RegisterProtected(protected)
 			edgeHandler.Register(protected)
+			edgeEnrollmentHandler.RegisterProtected(protected)
 			k8sHandler.RegisterProtected(protected)
 			webshellHandler.Register(protected)
 			deviceHandler.Register(protected)

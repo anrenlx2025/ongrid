@@ -21,7 +21,12 @@ func Migrate(db *gorm.DB) error {
 			return err
 		}
 	}
-	if err := db.AutoMigrate(&model.Edge{}, &model.PluginConfig{}); err != nil {
+	if err := db.AutoMigrate(
+		&model.Edge{},
+		&model.PluginConfig{},
+		&model.EnrollmentProfile{},
+		&model.Enrollment{},
+	); err != nil {
 		return err
 	}
 	if err := dbx.BackfillDeleteMarker(db, model.Edge{}.TableName()); err != nil {

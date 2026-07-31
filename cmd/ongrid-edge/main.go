@@ -76,6 +76,13 @@ func main() {
 		}
 		return
 	}
+	if handled, err := runEnrollmentCommand(context.Background(), os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "edge enrollment: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Print-and-exit flags before anything that can fail (config load,
 	// env access). install.sh and operators rely on `ongrid-edge --version`

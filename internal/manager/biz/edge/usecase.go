@@ -40,14 +40,19 @@ type NodeMirror interface {
 	DeleteNodeForDevice(ctx context.Context, deviceID, nodeID uint64) error
 }
 
+type EnrollmentFinalizer interface {
+	Finalize(ctx context.Context, edgeID, deviceID, deviceNodeID uint64) error
+}
+
 // Usecase is the manager/edge biz-layer facade.
 type Usecase struct {
-	repo    Repo
-	devices devicebiz.Repo
-	links   devicebiz.EdgeDeviceRepo
-	mirror  NodeMirror
-	plugins PluginConfigSeeder
-	log     *slog.Logger
+	repo        Repo
+	devices     devicebiz.Repo
+	links       devicebiz.EdgeDeviceRepo
+	mirror      NodeMirror
+	enrollments EnrollmentFinalizer
+	plugins     PluginConfigSeeder
+	log         *slog.Logger
 
 	// In-memory per-edge plugin health, fed by the heartbeat path. See
 	// plugin_health.go. Lazily initialised so a zero-value Usecase works.
@@ -77,6 +82,10 @@ func NewUsecase(repo Repo, devices devicebiz.Repo, links devicebiz.EdgeDeviceRep
 // nil leaves the register flow on the legacy path (device row only;
 // topology.nodes backfilled by topology Migrate on next boot).
 func (u *Usecase) SetNodeMirror(m NodeMirror) { u.mirror = m }
+
+func (u *Usecase) SetEnrollmentFinalizer(finalizer EnrollmentFinalizer) {
+	u.enrollments = finalizer
+}
 
 // SetPluginSeeder wires the plugin-config seeder so Create can drop
 // default-enabled rows for the five out-of-the-box observability
@@ -108,25 +117,9 @@ func (u *Usecase) Create(ctx context.Context, name string, createdBy *uint64) (*
 	// the host's reported hostname on first tunnel handshake. The SPA
 	// shows "(待主机上线)" placeholder for blank names in the meantime.
 
-	ak, err := randomURLSafe(accessKeyEntropyBytes)
+	e, ak, sk, err := newEdgeIdentity(name, createdBy)
 	if err != nil {
-		return nil, fmt.Errorf("gen access key: %w", err)
-	}
-	sk, err := randomURLSafe(secretKeyEntropyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("gen secret key: %w", err)
-	}
-	hash, err := passwd.Hash(sk)
-	if err != nil {
-		return nil, fmt.Errorf("hash secret key: %w", err)
-	}
-
-	e := &model.Edge{
-		Name:          name,
-		AccessKeyID:   ak,
-		SecretKeyHash: hash,
-		Status:        model.StatusOffline,
-		CreatedBy:     createdBy,
+		return nil, err
 	}
 	if err := u.repo.Create(ctx, e); err != nil {
 		return nil, fmt.Errorf("create edge: %w", err)
@@ -138,6 +131,28 @@ func (u *Usecase) Create(ctx context.Context, name string, createdBy *uint64) (*
 		u.seedDefaultPlugins(ctx, e.ID)
 	}
 	return &CreateResult{Edge: e, AccessKey: ak, SecretKey: sk}, nil
+}
+
+func newEdgeIdentity(name string, createdBy *uint64) (*model.Edge, string, string, error) {
+	ak, err := randomURLSafe(accessKeyEntropyBytes)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("gen access key: %w", err)
+	}
+	sk, err := randomURLSafe(secretKeyEntropyBytes)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("gen secret key: %w", err)
+	}
+	hash, err := passwd.Hash(sk)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("hash secret key: %w", err)
+	}
+	return &model.Edge{
+		Name:          strings.TrimSpace(name),
+		AccessKeyID:   ak,
+		SecretKeyHash: hash,
+		Status:        model.StatusOffline,
+		CreatedBy:     createdBy,
+	}, ak, sk, nil
 }
 
 // seedDefaultPlugins drops enabled=true rows for the five out-of-the-box
@@ -159,6 +174,11 @@ func (u *Usecase) Create(ctx context.Context, name string, createdBy *uint64) (*
 // Specs are "{}" when the plugin's own defaults are enough — both
 // plugin code paths gracefully fill in when SpecJSON is empty.
 func (u *Usecase) seedDefaultPlugins(ctx context.Context, edgeID uint64) {
+	// Plugin seeding is optional. Keep identity creation usable during
+	// degraded boots and in tests where the plugin config usecase is not wired.
+	if u == nil || u.plugins == nil {
+		return
+	}
 	defaults := []struct {
 		name string
 		spec string
@@ -392,6 +412,8 @@ func (u *Usecase) HandleRegister(ctx context.Context, edgeID uint64, info tunnel
 			if u.log != nil {
 				u.log.Warn("topology mirror: set device.node_id failed", "device_id", dev.ID, "node_id", nodeID, "err", err)
 			}
+		} else {
+			dev.NodeID = &nodeID
 		}
 	}
 	if u.links != nil {
@@ -412,6 +434,15 @@ func (u *Usecase) HandleRegister(ctx context.Context, edgeID uint64, info tunnel
 	if strings.TrimSpace(edge.Name) == "" && strings.TrimSpace(info.Hostname) != "" {
 		if err := u.repo.UpdateName(ctx, edgeID, info.Hostname); err != nil {
 			return fmt.Errorf("backfill edge name: %w", err)
+		}
+	}
+	if u.enrollments != nil {
+		var deviceNodeID uint64
+		if dev.NodeID != nil {
+			deviceNodeID = *dev.NodeID
+		}
+		if err := u.enrollments.Finalize(ctx, edgeID, dev.ID, deviceNodeID); err != nil {
+			return fmt.Errorf("finalize edge enrollment: %w", err)
 		}
 	}
 	if err := u.repo.UpdateStatus(ctx, edgeID, model.StatusOnline, time.Now().UTC()); err != nil {
