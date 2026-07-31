@@ -16,6 +16,27 @@ curl -k -sSL https://<server>/install.sh | bash -s -- \
 
 The install script detects the host architecture and downloads the matching binary from `https://<server>/edge/ongrid-edge-<os>-<arch>`.
 
+## Batch install (non-Kubernetes fleets)
+
+Open **Devices → Batch install** to create a bounded installation profile. A profile can either be:
+
+- **Batch only**: devices share an installation batch for auditing, with no topology relationship.
+- **Attach to cluster**: every enrolled device is automatically linked as `Device --member_of--> Cluster` when it first connects.
+
+The generated command can be run on multiple hosts:
+
+```bash
+curl -k -sSL https://<server>/install.sh | bash -s -- \
+  --enrollment-token=<token> \
+  --server-edge-addr=<server>:40012 \
+  --server-http-addr=<server> \
+  --tls-insecure
+```
+
+The enrollment token is only a short-lived bootstrap capability. Each host exchanges it for a different AccessKey and SecretKey; devices never share a tunnel identity. Profiles expire, have a maximum device count, and can be revoked from the same dialog. Re-running the command on a host that has already completed enrollment is rejected instead of replacing its active credentials.
+
+For a production deployment with a trusted HTTPS certificate, remove both `-k` and `--tls-insecure` from the command.
+
 ## Build and stage the edge binary (source installs only)
 
 Release tarballs include pre-built binaries. If you are running from source, build and stage the binary before any host can install:
@@ -79,7 +100,7 @@ If the control plane and the edge agent run on the **same host**, use `127.0.0.1
 
 Port 443 (nginx) handles TLS termination. The tunnel port (default 40012) uses plain TCP — do not configure a TLS CA for the edge connection.
 
-The self-signed certificate warning on `curl` is expected — the `-k` flag suppresses it for the install script download only.
+The self-signed certificate warning on `curl` is expected. For single-device installation, `-k` suppresses verification only while downloading the script and binaries. Batch enrollment also contacts the Manager API, so the default self-signed command includes `--tls-insecure`; remove both options after installing a trusted certificate.
 
 ## Verify the connection
 

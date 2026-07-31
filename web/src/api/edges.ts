@@ -143,6 +143,25 @@ export type CreateEdgeResponse = {
   created_at: string;
 };
 
+export type EnrollmentAssignmentMode = 'batch_only' | 'cluster';
+
+export type EdgeEnrollmentProfile = {
+  id: number;
+  name: string;
+  assignment_mode: EnrollmentAssignmentMode;
+  cluster_node_id?: number;
+  expires_at: string;
+  max_uses: number;
+  used_count: number;
+  status: 'active' | 'revoked' | 'expired' | 'exhausted';
+  created_at: string;
+};
+
+export type CreateEdgeEnrollmentProfileResponse = {
+  profile: EdgeEnrollmentProfile;
+  enrollment_token: string;
+};
+
 export type RotateSecretResponse = {
   secret_key: string;
 };
@@ -181,6 +200,35 @@ export function getEdge(id: string | number) {
 
 export function createEdge(input: { name: string }) {
   return request<CreateEdgeResponse>('POST', '/edges', input);
+}
+
+export function createEdgeEnrollmentProfile(input: {
+  name: string;
+  assignment_mode: EnrollmentAssignmentMode;
+  cluster_node_id?: number;
+  expires_in_hours: number;
+  max_uses: number;
+}) {
+  return request<CreateEdgeEnrollmentProfileResponse>(
+    'POST',
+    '/edge-enrollment-profiles',
+    input,
+  );
+}
+
+export function listEdgeEnrollmentProfiles(params?: { page?: number; pageSize?: number }) {
+  const qs = new URLSearchParams();
+  if (params?.page) qs.set('page', String(params.page));
+  if (params?.pageSize) qs.set('page_size', String(params.pageSize));
+  const suffix = qs.toString();
+  return request<{ items: EdgeEnrollmentProfile[]; total: number; page: number; page_size: number }>(
+    'GET',
+    `/edge-enrollment-profiles${suffix ? `?${suffix}` : ''}`,
+  );
+}
+
+export function revokeEdgeEnrollmentProfile(id: number) {
+  return request<void>('POST', `/edge-enrollment-profiles/${id}/revoke`);
 }
 
 export function deleteEdge(id: string | number) {

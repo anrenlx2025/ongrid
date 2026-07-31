@@ -84,6 +84,51 @@ func TestCreateRelationValidates(t *testing.T) {
 	}
 }
 
+func TestAssignEnrollmentDeviceIsIdempotentAndRejectsAutomaticMove(t *testing.T) {
+	uc := newUC(t)
+	ctx := context.Background()
+	clusterA, err := uc.CreateNode(ctx, string(model.NodeTypeCluster), "bare-metal-a", "")
+	if err != nil {
+		t.Fatalf("CreateNode(clusterA): %v", err)
+	}
+	clusterB, err := uc.CreateNode(ctx, string(model.NodeTypeCluster), "bare-metal-b", "")
+	if err != nil {
+		t.Fatalf("CreateNode(clusterB): %v", err)
+	}
+	device, err := uc.CreateNode(ctx, string(model.NodeTypeDevice), "host-a", "")
+	if err != nil {
+		t.Fatalf("CreateNode(device): %v", err)
+	}
+	if err := uc.AssignEnrollmentDevice(ctx, clusterA.ID, device.ID, 11, 21); err != nil {
+		t.Fatalf("AssignEnrollmentDevice(first): %v", err)
+	}
+	if err := uc.AssignEnrollmentDevice(ctx, clusterA.ID, device.ID, 11, 21); err != nil {
+		t.Fatalf("AssignEnrollmentDevice(retry): %v", err)
+	}
+	relations, total, err := uc.ListRelations(ctx, biz.RelationListFilter{SrcID: device.ID, Type: model.RelMemberOf})
+	if err != nil {
+		t.Fatalf("ListRelations: %v", err)
+	}
+	if total != 1 || len(relations) != 1 || relations[0].DstID != clusterA.ID || !strings.Contains(relations[0].PropsJSON, `"source":"edge_enrollment"`) {
+		t.Fatalf("relations = %+v total=%d", relations, total)
+	}
+	if err := uc.AssignEnrollmentDevice(ctx, clusterB.ID, device.ID, 12, 21); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("move error = %v, want ErrConflict", err)
+	}
+}
+
+func TestValidateEnrollmentClusterRejectsKubernetesOwnedNode(t *testing.T) {
+	uc := newUC(t)
+	ctx := context.Background()
+	cluster, err := uc.CreateNode(ctx, string(model.NodeTypeCluster), "k8s-prod", `{"source":"kubernetes"}`)
+	if err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	if err := uc.ValidateEnrollmentCluster(ctx, cluster.ID); !errors.Is(err, errs.ErrInvalid) {
+		t.Fatalf("ValidateEnrollmentCluster error = %v, want ErrInvalid", err)
+	}
+}
+
 func TestEnsureKubernetesClusterUpsertsTopologyNode(t *testing.T) {
 	uc := newUC(t)
 	ctx := context.Background()

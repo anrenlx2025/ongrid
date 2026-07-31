@@ -66,6 +66,8 @@ type PluginConfigUC struct {
 	log          *slog.Logger
 }
 
+var _ PluginConfigSeeder = (*PluginConfigUC)(nil)
+
 // NewPluginConfigUC builds the use-case. notifier may be nil during
 // startup (before frontierbound is wired); calls become no-ops then.
 // resolver MUST be non-nil — without it FetchForEdge can't tell the edge
@@ -75,6 +77,20 @@ func NewPluginConfigUC(repo PluginConfigRepo, notifier EdgeReloadNotifier, resol
 		log = slog.Default()
 	}
 	return &PluginConfigUC{repo: repo, notifier: notifier, resolver: resolver, log: log}
+}
+
+// UpsertSpec implements PluginConfigSeeder for newly created Edge identities.
+// Reuse Set so seed rows receive the same validation and persistence behavior
+// as operator-managed plugin settings.
+func (uc *PluginConfigUC) UpsertSpec(ctx context.Context, edgeID uint64, plugin string, enabled bool, specJSON string) error {
+	var spec map[string]interface{}
+	if specJSON != "" {
+		if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+			return fmt.Errorf("%w: decode seed spec: %v", errs.ErrInvalid, err)
+		}
+	}
+	_, err := uc.Set(ctx, edgeID, plugin, SetInput{Enabled: enabled, Spec: spec})
+	return err
 }
 
 // SetNotifier injects the notifier post-construction. cmd/ongrid wires

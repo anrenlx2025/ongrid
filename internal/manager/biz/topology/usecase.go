@@ -291,6 +291,89 @@ func (u *Usecase) DeleteNodeForDevice(ctx context.Context, deviceID, nodeID uint
 	return nil
 }
 
+// ValidateEnrollmentCluster verifies that an Edge enrollment profile points
+// at a live generic topology cluster. The profile stores the node id, so a
+// client claiming the token cannot redirect itself to another cluster.
+func (u *Usecase) ValidateEnrollmentCluster(ctx context.Context, clusterNodeID uint64) error {
+	if u.nodes == nil {
+		return errs.ErrNotWiredYet
+	}
+	if clusterNodeID == 0 {
+		return fmt.Errorf("%w: cluster_node_id required", errs.ErrInvalid)
+	}
+	node, err := u.nodes.Get(ctx, clusterNodeID)
+	if err != nil {
+		return err
+	}
+	if node.Type != string(model.NodeTypeCluster) {
+		return fmt.Errorf("%w: topology node %d is %q, not cluster", errs.ErrInvalid, clusterNodeID, node.Type)
+	}
+	var props map[string]any
+	if err := json.Unmarshal([]byte(node.PropsJSON), &props); err == nil && props["source"] == "kubernetes" {
+		return fmt.Errorf("%w: kubernetes-owned cluster nodes cannot be used by edge enrollment", errs.ErrInvalid)
+	}
+	return nil
+}
+
+// AssignEnrollmentDevice creates the automatic Device --member_of--> Cluster
+// relation for a cluster-mode Edge enrollment. It is idempotent for retries
+// and refuses to move an automatically assigned device between clusters.
+// Manual and Kubernetes-owned relations remain untouched.
+func (u *Usecase) AssignEnrollmentDevice(ctx context.Context, clusterNodeID, deviceNodeID, profileID, deviceID uint64) error {
+	if u.nodes == nil || u.relations == nil || u.types == nil {
+		return errs.ErrNotWiredYet
+	}
+	if clusterNodeID == 0 || deviceNodeID == 0 || profileID == 0 || deviceID == 0 {
+		return fmt.Errorf("%w: cluster_node_id, device_node_id, profile_id and device_id required", errs.ErrInvalid)
+	}
+	if err := u.ValidateEnrollmentCluster(ctx, clusterNodeID); err != nil {
+		return err
+	}
+	deviceNode, err := u.nodes.Get(ctx, deviceNodeID)
+	if err != nil {
+		return err
+	}
+	if deviceNode.Type != string(model.NodeTypeDevice) {
+		return fmt.Errorf("%w: topology node %d is %q, not device", errs.ErrInvalid, deviceNodeID, deviceNode.Type)
+	}
+
+	props, err := json.Marshal(map[string]any{
+		"source":     "edge_enrollment",
+		"profile_id": profileID,
+		"device_id":  deviceID,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal edge enrollment relation props: %w", err)
+	}
+	relations, err := u.relations.List(ctx, RelationListFilter{SrcID: deviceNodeID, Type: model.RelMemberOf})
+	if err != nil {
+		return err
+	}
+	for _, relation := range relations {
+		var current map[string]any
+		if err := json.Unmarshal([]byte(relation.PropsJSON), &current); err != nil {
+			current = nil // Malformed legacy props are treated as operator-owned.
+		}
+		if current["source"] == "edge_enrollment" && relation.DstID != clusterNodeID {
+			return fmt.Errorf("%w: device is already assigned by another enrollment cluster", errs.ErrConflict)
+		}
+		if relation.DstID != clusterNodeID {
+			continue
+		}
+		if current["source"] != "edge_enrollment" {
+			// The requested membership already exists and is operator- or
+			// Kubernetes-owned. Do not overwrite its provenance.
+			return nil
+		}
+		if relation.PropsJSON == string(props) {
+			return nil
+		}
+		return u.relations.Update(ctx, relation.ID, string(props))
+	}
+	_, err = u.CreateRelation(ctx, deviceNodeID, clusterNodeID, model.RelMemberOf, string(props))
+	return err
+}
+
 // EnsureKubernetesCluster mirrors one onboarded Kubernetes cluster into the
 // generic topology graph as a type=cluster node. currentNodeID is the stable
 // k8s_clusters.node_id pointer when the k8s table already has one.

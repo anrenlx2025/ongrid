@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { StatusPill } from "@/components/StatusPill";
 import { Modal } from "@/components/Modal";
+import { Chip } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { openMetricDrilldown } from "@/lib/drilldown";
 import { relativeTime } from "@/lib/format";
@@ -44,7 +45,20 @@ import {
   batchUpgradeEdgeAgent,
   batchDeleteEdges,
   type BatchResponse,
+  createEdgeEnrollmentProfile,
+  listEdgeEnrollmentProfiles,
+  revokeEdgeEnrollmentProfile,
+  type CreateEdgeEnrollmentProfileResponse,
+  type EdgeEnrollmentProfile,
+  type EnrollmentAssignmentMode,
 } from "@/api/edges";
+import {
+  createNode,
+  listNodes,
+  listRelations,
+  type TopologyNode,
+  type TopologyRelation,
+} from "@/api/topology";
 import { deleteDevice, listDevices, type Device } from "@/api/devices";
 import {
   filterVisibleDeviceEdges,
@@ -74,6 +88,7 @@ const ROLE_FILTER_TITLES: Record<string, [string, string]> = {
 
 type DeviceRow = Device & {
   hostEdge?: Edge;
+  topologyClusters: TopologyNode[];
 };
 
 const ROW_MENU_GAP = 6;
@@ -107,10 +122,7 @@ function calculateRowMenuPosition(
     0,
     viewportHeight - ROW_MENU_VIEWPORT_PADDING - belowTop,
   );
-  const aboveSpace = Math.max(
-    0,
-    aboveBottom - ROW_MENU_VIEWPORT_PADDING,
-  );
+  const aboveSpace = Math.max(0, aboveBottom - ROW_MENU_VIEWPORT_PADDING);
   const openAbove = menuHeight > belowSpace && aboveSpace > belowSpace;
   const maxHeight = openAbove ? aboveSpace : belowSpace;
   const visibleHeight = Math.min(menuHeight, maxHeight);
@@ -138,6 +150,39 @@ function selectHostEdgesByDevice(edges: Edge[]): Map<number, Edge> {
     }
   }
   return out;
+}
+
+function indexTopologyClusters(
+  clusters: TopologyNode[],
+  relations: TopologyRelation[],
+): Map<number, TopologyNode[]> {
+  const clustersByID = new Map(
+    clusters.map((cluster) => [cluster.id, cluster]),
+  );
+  const out = new Map<number, TopologyNode[]>();
+  for (const relation of relations) {
+    if (relation.type !== "member_of") continue;
+    const cluster = clustersByID.get(relation.dst_id);
+    if (!cluster) continue;
+    const memberships = out.get(relation.src_id) ?? [];
+    if (!memberships.some((item) => item.id === cluster.id)) {
+      memberships.push(cluster);
+      memberships.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    out.set(relation.src_id, memberships);
+  }
+  return out;
+}
+
+async function loadTopologyClusters(): Promise<Map<number, TopologyNode[]>> {
+  const [clusterResp, relationResp] = await Promise.all([
+    listNodes({ type: "cluster" }),
+    listRelations({ type: "member_of" }),
+  ]);
+  return indexTopologyClusters(
+    clusterResp.items ?? [],
+    relationResp.items ?? [],
+  );
 }
 
 function isBetterHostEdge(candidate: Edge, current: Edge): boolean {
@@ -190,6 +235,7 @@ export default function EdgesPage() {
       .catch(() => setManagerVersion(""));
   }, []);
   const [createOpen, setCreateOpen] = useState(false);
+  const [batchInstallOpen, setBatchInstallOpen] = useState(false);
   const [secretReveal, setSecretReveal] = useState<{
     title: string;
     accessKey: string;
@@ -218,11 +264,13 @@ export default function EdgesPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const [deviceResp, edgeResp, attachments] = await Promise.all([
-        listDevices(rolesFilter ? { roles: rolesFilter } : undefined),
-        listEdges(),
-        loadK8sEdgeAttachments(),
-      ]);
+      const [deviceResp, edgeResp, attachments, topologyClustersByNodeID] =
+        await Promise.all([
+          listDevices(rolesFilter ? { roles: rolesFilter } : undefined),
+          listEdges(),
+          loadK8sEdgeAttachments(),
+          loadTopologyClusters(),
+        ]);
       const allEdges = edgeResp.items ?? [];
       const edgeByDeviceID = selectHostEdgesByDevice(
         filterVisibleDeviceEdges(allEdges, attachments),
@@ -237,6 +285,9 @@ export default function EdgesPage() {
         .map((d) => ({
           ...d,
           hostEdge: edgeByDeviceID.get(d.id),
+          topologyClusters: d.node_id
+            ? (topologyClustersByNodeID.get(d.node_id) ?? [])
+            : [],
         }))
         .filter(
           (device) => device.hostEdge || !controllerDeviceIDs.has(device.id),
@@ -558,6 +609,15 @@ export default function EdgesPage() {
             </Link>
             <button
               type="button"
+              onClick={() => setBatchInstallOpen(true)}
+              disabled={!canMutate}
+              aria-label={tr("批量安装设备", "Batch install devices")}
+              className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Copy size={12} /> {tr("批量安装", "Batch install")}
+            </button>
+            <button
+              type="button"
               onClick={() => setCreateOpen(true)}
               aria-label={tr("新建设备", "New device")}
               className="inline-flex items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90"
@@ -751,7 +811,10 @@ export default function EdgesPage() {
                                 </span>
                               )}
                             </span>
-                            <EdgeAccessMeta attachments={attachments} />
+                            <EdgeAccessMeta
+                              attachments={attachments}
+                              topologyClusters={d.topologyClusters}
+                            />
                           </div>
                         </td>
                         <td className="max-w-[260px] min-w-[220px] truncate whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
@@ -891,6 +954,11 @@ export default function EdgesPage() {
         }}
       />
 
+      <BatchEnrollmentModal
+        open={batchInstallOpen}
+        onClose={() => setBatchInstallOpen(false)}
+      />
+
       <SecretRevealModal
         data={secretReveal}
         onClose={() => setSecretReveal(null)}
@@ -972,39 +1040,71 @@ export default function EdgesPage() {
   }
 }
 
-function EdgeAccessMeta({ attachments }: { attachments: K8sEdgeAttachment[] }) {
+function EdgeAccessMeta({
+  attachments,
+  topologyClusters,
+}: {
+  attachments: K8sEdgeAttachment[];
+  topologyClusters: TopologyNode[];
+}) {
   const { tr } = useI18n();
-  if (attachments.length === 0) {
-    return <EdgeAccessPill>{tr("Host Edge", "Host edge")}</EdgeAccessPill>;
-  }
   const clusters = uniqueAttachmentClusters(attachments);
   return (
     <div className="flex min-w-0 shrink-0 items-center gap-1">
-      {attachments.map((item) => (
-        <EdgeAccessPill
-          key={`${item.kind}:${item.clusterId}:${item.nodeName ?? ""}`}
-          kind={item.kind}
-        >
-          {item.kind === "k8s-node"
-            ? tr("K8s Node", "K8s node")
-            : tr("K8s Controller", "K8s controller")}
-        </EdgeAccessPill>
-      ))}
+      <EdgeAccessPill kind={attachments.length > 0 ? "k8s" : "host"}>
+        {attachments.length > 0 ? "K8s" : "Host"}
+      </EdgeAccessPill>
       {clusters.map((item) => (
-        <Link
+        <ClusterChipLink
           key={`cluster:${item.clusterId}`}
           to={`/kubernetes/${item.clusterId}`}
-          onClick={(ev) => ev.stopPropagation()}
+          name={item.clusterName}
           title={tr(
             `所属集群：${item.clusterName}`,
             `Cluster: ${item.clusterName}`,
           )}
-          className="block max-w-[120px] truncate font-mono text-[10px] leading-4 text-zinc-500 hover:text-zinc-300"
-        >
-          {item.clusterName}
-        </Link>
+        />
       ))}
+      {attachments.length === 0 &&
+        topologyClusters.map((cluster) => (
+          <ClusterChipLink
+            key={`topology-cluster:${cluster.id}`}
+            to="/topology"
+            name={cluster.name}
+            title={tr(
+              `所属拓扑集群：${cluster.name}（节点 #${cluster.id}）`,
+              `Topology cluster: ${cluster.name} (node #${cluster.id})`,
+            )}
+          />
+        ))}
     </div>
+  );
+}
+
+function ClusterChipLink({
+  to,
+  name,
+  title,
+}: {
+  to: string;
+  name: string;
+  title: string;
+}) {
+  const { tr } = useI18n();
+  return (
+    <Link
+      to={to}
+      onClick={(ev) => ev.stopPropagation()}
+      title={title}
+      aria-label={tr(`所属集群 ${name}`, `Cluster ${name}`)}
+      className="block max-w-[160px] hover:opacity-80"
+    >
+      <Chip tone="info" dense className="max-w-full whitespace-nowrap">
+        <span className="truncate">
+          {tr("集群", "Cluster")} · {name}
+        </span>
+      </Chip>
+    </Link>
   );
 }
 
@@ -1012,18 +1112,16 @@ function EdgeAccessPill({
   kind,
   children,
 }: {
-  kind?: K8sEdgeAttachment["kind"];
+  kind: "host" | "k8s";
   children: ReactNode;
 }) {
   return (
     <span
       className={cn(
         "inline-flex items-center whitespace-nowrap rounded border px-1 py-[1px] text-[10px] leading-4",
-        kind === "k8s-controller" || kind === "k8s-controller-runtime"
-          ? "border-sky-500/30 bg-sky-500/10 text-sky-300"
-          : kind === "k8s-node"
-            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-            : "border-zinc-700 bg-zinc-900 text-zinc-400",
+        kind === "k8s"
+          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+          : "border-indigo-500/30 bg-indigo-500/10 text-indigo-300",
       )}
     >
       {children}
@@ -2066,4 +2164,523 @@ function InstallCommandRow({
       </p>
     </div>
   );
+}
+
+function BatchEnrollmentModal({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose(): void;
+}) {
+  const { tr } = useI18n();
+  const [name, setName] = useState("");
+  const [mode, setMode] = useState<EnrollmentAssignmentMode>("batch_only");
+  const [clusterInputMode, setClusterInputMode] = useState<"existing" | "new">(
+    "existing",
+  );
+  const [clusterChoice, setClusterChoice] = useState("");
+  const [newClusterName, setNewClusterName] = useState("");
+  const [expiresInHours, setExpiresInHours] = useState(24);
+  const [maxUses, setMaxUses] = useState(100);
+  const [clusters, setClusters] = useState<TopologyNode[]>([]);
+  const [profiles, setProfiles] = useState<EdgeEnrollmentProfile[]>([]);
+  const [created, setCreated] =
+    useState<CreateEdgeEnrollmentProfileResponse | null>(null);
+  const [pending, setPending] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [clusterResp, profileResp] = await Promise.all([
+        listNodes({ type: "cluster", limit: 200 }),
+        listEdgeEnrollmentProfiles({ page: 1, pageSize: 100 }),
+      ]);
+      const availableClusters = clusterResp.items.filter(
+        (cluster) => cluster.props?.source !== "kubernetes",
+      );
+      setClusters(availableClusters);
+      setClusterInputMode(availableClusters.length === 0 ? "new" : "existing");
+      setClusterChoice(
+        availableClusters[0] ? String(availableClusters[0].id) : "",
+      );
+      setProfiles(profileResp.items);
+    } catch (error) {
+      setErr((error as Error).message || tr("加载失败", "Failed to load"));
+    } finally {
+      setLoading(false);
+    }
+  }, [tr]);
+
+  useEffect(() => {
+    if (!open) {
+      setName("");
+      setMode("batch_only");
+      setClusterInputMode("existing");
+      setClusterChoice("");
+      setNewClusterName("");
+      setExpiresInHours(24);
+      setMaxUses(100);
+      setCreated(null);
+      setErr(null);
+      setPending(false);
+      return;
+    }
+    void load();
+  }, [open, load]);
+
+  async function createProfile() {
+    if (pending) return;
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setErr(tr("请输入安装批次名称", "Enter an installation batch name"));
+      return;
+    }
+    if (mode === "cluster") {
+      if (clusterInputMode === "existing" && !clusterChoice) {
+        setErr(tr("请选择集群", "Select a cluster"));
+        return;
+      }
+      if (clusterInputMode === "new" && !newClusterName.trim()) {
+        setErr(tr("请输入新集群名称", "Enter a new cluster name"));
+        return;
+      }
+    }
+    setPending(true);
+    setErr(null);
+    let newlyCreatedCluster: TopologyNode | null = null;
+    try {
+      let clusterNodeID: number | undefined;
+      if (mode === "cluster") {
+        if (clusterInputMode === "new") {
+          newlyCreatedCluster = await createNode({
+            type: "cluster",
+            name: newClusterName.trim(),
+            props: { source: "manual" },
+          });
+          clusterNodeID = newlyCreatedCluster.id;
+          setClusters((current) => [newlyCreatedCluster!, ...current]);
+          setClusterChoice(String(newlyCreatedCluster.id));
+          setClusterInputMode("existing");
+        } else {
+          clusterNodeID = Number(clusterChoice);
+        }
+      }
+      const result = await createEdgeEnrollmentProfile({
+        name: trimmedName,
+        assignment_mode: mode,
+        ...(clusterNodeID ? { cluster_node_id: clusterNodeID } : {}),
+        expires_in_hours: expiresInHours,
+        max_uses: maxUses,
+      });
+      setCreated(result);
+      setProfiles((current) => [result.profile, ...current]);
+    } catch (error) {
+      const message =
+        (error as Error).message || tr("创建失败", "Failed to create");
+      setErr(
+        newlyCreatedCluster
+          ? tr(
+              `集群“${newlyCreatedCluster.name}”已创建，但安装命令生成失败：${message}。请直接重试。`,
+              `Cluster “${newlyCreatedCluster.name}” was created, but command generation failed: ${message}. Retry directly.`,
+            )
+          : message,
+      );
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function revoke(profile: EdgeEnrollmentProfile) {
+    if (profile.status !== "active") return;
+    if (
+      !confirm(
+        tr(
+          `撤销安装批次“${profile.name}”？`,
+          `Revoke installation batch “${profile.name}”?`,
+        ),
+      )
+    ) {
+      return;
+    }
+    setErr(null);
+    try {
+      await revokeEdgeEnrollmentProfile(profile.id);
+      setProfiles((current) =>
+        current.map((item) =>
+          item.id === profile.id ? { ...item, status: "revoked" } : item,
+        ),
+      );
+    } catch (error) {
+      setErr((error as Error).message || tr("撤销失败", "Failed to revoke"));
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={tr("批量安装 Edge", "Batch install Edge")}
+      size="lg"
+      footer={
+        created ? (
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white"
+          >
+            {tr("我已保存命令", "I've saved the command")}
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+            >
+              {tr("取消", "Cancel")}
+            </button>
+            <button
+              type="button"
+              onClick={() => void createProfile()}
+              disabled={pending}
+              className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+            >
+              {pending
+                ? tr("生成中…", "Generating…")
+                : tr("生成安装命令", "Generate command")}
+            </button>
+          </>
+        )
+      }
+    >
+      {created ? (
+        <>
+          <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+            {tr(
+              "令牌只显示一次。每台主机执行同一命令时都会领取独立凭证；达到上限、过期或撤销后命令失效。",
+              "The token is shown once. Every host running this command receives independent credentials; the command stops working when exhausted, expired, or revoked.",
+            )}
+          </div>
+          <BatchInstallCommand token={created.enrollment_token} />
+        </>
+      ) : (
+        <div className="space-y-5">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block text-[11px] text-zinc-500 sm:col-span-2">
+              {tr("安装批次名称", "Installation batch name")}
+              <input
+                autoFocus
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder={tr(
+                  "例如：上海机房 2026-07",
+                  "e.g. Shanghai DC 2026-07",
+                )}
+                className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+              />
+            </label>
+            <label className="block text-[11px] text-zinc-500">
+              {tr("归属方式", "Assignment")}
+              <select
+                value={mode}
+                onChange={(event) => {
+                  const nextMode = event.target
+                    .value as EnrollmentAssignmentMode;
+                  setMode(nextMode);
+                  if (nextMode === "cluster") {
+                    setClusterInputMode(
+                      clusters.length === 0 ? "new" : "existing",
+                    );
+                    setClusterChoice(clusters[0] ? String(clusters[0].id) : "");
+                  }
+                }}
+                className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+              >
+                <option value="batch_only">
+                  {tr("仅安装批次（不关联集群）", "Batch only (no cluster)")}
+                </option>
+                <option value="cluster">
+                  {tr("关联拓扑集群", "Attach to topology cluster")}
+                </option>
+              </select>
+            </label>
+            {mode === "cluster" && (
+              <fieldset className="space-y-2 sm:col-span-2">
+                <legend className="text-[11px] text-zinc-500">
+                  {tr("集群", "Cluster")}
+                </legend>
+                <div
+                  role="radiogroup"
+                  aria-label={tr("集群设置方式", "Cluster setup")}
+                  className="flex flex-wrap gap-2"
+                >
+                  <label
+                    className={cn(
+                      "inline-flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs",
+                      clusterInputMode === "existing"
+                        ? "border-zinc-600 bg-zinc-800 text-zinc-100"
+                        : "border-zinc-800 bg-zinc-950 text-zinc-400",
+                      clusters.length === 0 && "cursor-not-allowed opacity-50",
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="batch-cluster-input-mode"
+                      value="existing"
+                      checked={clusterInputMode === "existing"}
+                      disabled={clusters.length === 0}
+                      onChange={() => {
+                        setClusterInputMode("existing");
+                        setClusterChoice(
+                          clusters[0] ? String(clusters[0].id) : "",
+                        );
+                      }}
+                      className="accent-accent"
+                    />
+                    {tr("选择已有集群", "Choose existing")}
+                  </label>
+                  <label
+                    className={cn(
+                      "inline-flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs",
+                      clusterInputMode === "new"
+                        ? "border-zinc-600 bg-zinc-800 text-zinc-100"
+                        : "border-zinc-800 bg-zinc-950 text-zinc-400",
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="batch-cluster-input-mode"
+                      value="new"
+                      checked={clusterInputMode === "new"}
+                      onChange={() => setClusterInputMode("new")}
+                      className="accent-accent"
+                    />
+                    {tr("新建集群", "Create new")}
+                  </label>
+                </div>
+                {clusterInputMode === "existing" ? (
+                  <label className="block text-[11px] text-zinc-500">
+                    {tr("已有集群", "Existing cluster")}
+                    <select
+                      aria-label={tr("集群", "Cluster")}
+                      value={clusterChoice}
+                      onChange={(event) => setClusterChoice(event.target.value)}
+                      className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+                    >
+                      <option value="">{tr("请选择", "Select")}</option>
+                      {clusters.map((cluster) => (
+                        <option key={cluster.id} value={cluster.id}>
+                          {cluster.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <label className="block text-[11px] text-zinc-500">
+                    {tr("新集群名称", "New cluster name")}
+                    <input
+                      aria-label={tr("新集群名称", "New cluster name")}
+                      value={newClusterName}
+                      maxLength={128}
+                      onChange={(event) =>
+                        setNewClusterName(event.target.value)
+                      }
+                      placeholder={tr(
+                        "例如：上海机房生产集群",
+                        "e.g. Shanghai production cluster",
+                      )}
+                      className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+                    />
+                    <span className="mt-1 block text-[11px] text-zinc-600">
+                      {clusters.length === 0
+                        ? tr(
+                            "当前还没有非 Kubernetes 集群，生成命令时会同时创建第一个集群。",
+                            "No non-Kubernetes cluster exists yet. The first cluster will be created with the command.",
+                          )
+                        : tr(
+                            "生成命令时会同时创建拓扑集群并完成关联。",
+                            "The topology cluster will be created and linked when generating the command.",
+                          )}
+                    </span>
+                  </label>
+                )}
+              </fieldset>
+            )}
+            <label className="block text-[11px] text-zinc-500">
+              {tr("有效期（小时）", "Validity (hours)")}
+              <input
+                type="number"
+                min={1}
+                max={168}
+                value={expiresInHours}
+                onChange={(event) =>
+                  setExpiresInHours(Number(event.target.value))
+                }
+                className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+              />
+            </label>
+            <label className="block text-[11px] text-zinc-500">
+              {tr("最多安装设备数", "Maximum devices")}
+              <input
+                type="number"
+                min={1}
+                max={10000}
+                value={maxUses}
+                onChange={(event) => setMaxUses(Number(event.target.value))}
+                className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+              />
+            </label>
+          </div>
+
+          <div>
+            <div className="mb-2 text-[11px] uppercase tracking-wider text-zinc-500">
+              {tr("最近安装批次", "Recent installation batches")}
+            </div>
+            <div className="divide-y divide-zinc-800 overflow-hidden rounded-lg border border-zinc-800">
+              {loading ? (
+                <div className="px-3 py-4 text-center text-xs text-zinc-500">
+                  {tr("加载中…", "Loading…")}
+                </div>
+              ) : profiles.length === 0 ? (
+                <div className="px-3 py-4 text-center text-xs text-zinc-500">
+                  {tr("暂无安装批次", "No installation batches")}
+                </div>
+              ) : (
+                profiles.slice(0, 10).map((profile) => (
+                  <div
+                    key={profile.id}
+                    className="flex items-center gap-3 px-3 py-2 text-xs"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-zinc-200">
+                        {profile.name}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-zinc-500">
+                        {profile.assignment_mode === "cluster"
+                          ? tr(
+                              `集群：${clusters.find((item) => item.id === profile.cluster_node_id)?.name ?? profile.cluster_node_id}`,
+                              `Cluster: ${clusters.find((item) => item.id === profile.cluster_node_id)?.name ?? profile.cluster_node_id}`,
+                            )
+                          : tr("仅批次", "Batch only")}
+                        {` · ${profile.used_count}/${profile.max_uses}`}
+                      </div>
+                    </div>
+                    <span
+                      className={cn(
+                        "text-[11px]",
+                        profile.status === "active"
+                          ? "text-emerald-500"
+                          : "text-zinc-500",
+                      )}
+                    >
+                      {enrollmentStatusLabel(profile.status, tr)}
+                    </span>
+                    {profile.status === "active" && (
+                      <button
+                        type="button"
+                        onClick={() => void revoke(profile)}
+                        className="rounded px-2 py-1 text-[11px] text-red-300 hover:bg-red-500/10"
+                      >
+                        {tr("撤销", "Revoke")}
+                      </button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {err && (
+        <div
+          role="alert"
+          className="mt-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300"
+        >
+          {err}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function BatchInstallCommand({ token }: { token: string }) {
+  const { tr } = useI18n();
+  const [copied, setCopied] = useState(false);
+  const host =
+    typeof window !== "undefined" ? window.location.host : "ongrid.example.com";
+  const hostname =
+    typeof window !== "undefined"
+      ? window.location.hostname
+      : "ongrid.example.com";
+  const tunnelAddr = `${hostname.includes(":") ? `[${hostname}]` : hostname}:40012`;
+  const command =
+    `curl -k -sSL https://${host}/install.sh | bash -s -- ` +
+    `--enrollment-token=${token} ` +
+    `--server-edge-addr=${tunnelAddr} ` +
+    `--server-http-addr=${host} --tls-insecure`;
+  const display =
+    `curl -k -sSL https://${host}/install.sh | bash -s -- \\\n` +
+    `  --enrollment-token=${token} \\\n` +
+    `  --server-edge-addr=${tunnelAddr} \\\n` +
+    `  --server-http-addr=${host} \\\n` +
+    `  --tls-insecure`;
+  return (
+    <div className="mt-4">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-[11px] uppercase tracking-wider text-zinc-500">
+          {tr("在每台目标主机执行", "Run on every target host")}
+        </span>
+        <button
+          type="button"
+          aria-label={tr("复制批量安装命令", "Copy batch install command")}
+          onClick={() => {
+            navigator.clipboard
+              .writeText(command)
+              .then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              })
+              .catch(() => undefined);
+          }}
+          className={cn(
+            "inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs",
+            copied
+              ? "bg-emerald-500/15 text-emerald-300"
+              : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700",
+          )}
+        >
+          {copied ? <Check size={12} /> : <Copy size={12} />}
+          {copied ? tr("已复制", "Copied") : tr("复制单行", "Copy one-liner")}
+        </button>
+      </div>
+      <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2 font-mono text-[11px] leading-relaxed text-zinc-200">
+        {display}
+      </pre>
+      <p className="mt-2 text-[11px] text-zinc-500">
+        {tr(
+          "当前命令兼容默认自签名证书，因此包含 -k / --tls-insecure。正式环境配置可信证书后应移除这两个选项。",
+          "This command supports the default self-signed certificate, so it includes -k / --tls-insecure. Remove both after configuring a trusted certificate in production.",
+        )}
+      </p>
+    </div>
+  );
+}
+
+function enrollmentStatusLabel(
+  status: EdgeEnrollmentProfile["status"],
+  tr: (zh: string, en: string) => string,
+) {
+  switch (status) {
+    case "active":
+      return tr("有效", "Active");
+    case "revoked":
+      return tr("已撤销", "Revoked");
+    case "expired":
+      return tr("已过期", "Expired");
+    case "exhausted":
+      return tr("已用完", "Exhausted");
+  }
 }
