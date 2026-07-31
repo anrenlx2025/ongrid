@@ -225,6 +225,7 @@ func (u *UpgradeJobUsecase) Retry(ctx context.Context, id uint64) (*model.Upgrad
 		return nil, errs.ErrConflict
 	}
 	snapshots := make([]UpgradeRetrySnapshot, 0)
+	deviceNodeIDs := make([]uint64, 0)
 	for _, item := range items {
 		if item.Status != model.UpgradeJobItemStatusFailed && item.Status != model.UpgradeJobItemStatusTimedOut {
 			continue
@@ -233,10 +234,34 @@ func (u *UpgradeJobUsecase) Retry(ctx context.Context, id uint64) (*model.Upgrad
 		if err != nil {
 			return nil, fmt.Errorf("get edge %d for retry: %w", item.EdgeID, err)
 		}
+		if job.ClusterNodeID != nil {
+			if u.devices == nil || u.clusters == nil {
+				return nil, errs.ErrNotWiredYet
+			}
+			if edge.DeviceID == nil || *edge.DeviceID == 0 {
+				return nil, fmt.Errorf("%w: edge %d is not linked to a host device", errs.ErrInvalid, edge.ID)
+			}
+			device, err := u.devices.Get(ctx, *edge.DeviceID)
+			if err != nil {
+				return nil, fmt.Errorf("get device %d for retry edge %d: %w", *edge.DeviceID, item.EdgeID, err)
+			}
+			if device.NodeID == nil || *device.NodeID == 0 {
+				return nil, fmt.Errorf("%w: device %d has no topology node", errs.ErrInvalid, device.ID)
+			}
+			deviceNodeIDs = append(deviceNodeIDs, *device.NodeID)
+		}
 		snapshots = append(snapshots, UpgradeRetrySnapshot{
 			EdgeID: item.EdgeID, FromVersion: edge.AgentVersion,
 			BaselineRegisteredAt: cloneTime(edge.LastRegisteredAt),
 		})
+	}
+	if len(snapshots) == 0 {
+		return nil, errs.ErrConflict
+	}
+	if job.ClusterNodeID != nil {
+		if err := u.clusters.ValidateUpgradeCluster(ctx, *job.ClusterNodeID, deviceNodeIDs); err != nil {
+			return nil, fmt.Errorf("validate retry upgrade cluster: %w", err)
+		}
 	}
 	job, err = u.repo.RetryUpgradeJob(ctx, id, snapshots, time.Now())
 	if err != nil {
@@ -244,6 +269,33 @@ func (u *UpgradeJobUsecase) Retry(ctx context.Context, id uint64) (*model.Upgrad
 	}
 	u.notify()
 	return job, nil
+}
+
+// UpgradeJobClusterDeleteGuard blocks cluster deletion while its background
+// rollout can still dispatch or verify devices.
+type UpgradeJobClusterDeleteGuard struct {
+	repo UpgradeJobRepo
+}
+
+func NewUpgradeJobClusterDeleteGuard(repo UpgradeJobRepo) *UpgradeJobClusterDeleteGuard {
+	return &UpgradeJobClusterDeleteGuard{repo: repo}
+}
+
+func (g *UpgradeJobClusterDeleteGuard) ValidateClusterDelete(ctx context.Context, clusterNodeID uint64) error {
+	if g == nil || g.repo == nil {
+		return errs.ErrNotWiredYet
+	}
+	if clusterNodeID == 0 {
+		return errs.ErrInvalid
+	}
+	count, err := g.repo.CountActiveUpgradeJobsForCluster(ctx, clusterNodeID)
+	if err != nil {
+		return fmt.Errorf("count active upgrade jobs for cluster: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("%w: cluster %d still has %d active upgrade job(s)", errs.ErrConflict, clusterNodeID, count)
+	}
+	return nil
 }
 
 // Run recovers interrupted work, then drains queued jobs until ctx is

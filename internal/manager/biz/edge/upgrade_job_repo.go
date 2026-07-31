@@ -37,6 +37,7 @@ type UpgradeJobRepo interface {
 	RequeueUpgradeJob(ctx context.Context, jobID uint64, now time.Time) error
 	RecoverUpgradeJobs(ctx context.Context) error
 	RetryUpgradeJob(ctx context.Context, jobID uint64, snapshots []UpgradeRetrySnapshot, now time.Time) (*model.UpgradeJob, error)
+	CountActiveUpgradeJobsForCluster(ctx context.Context, clusterNodeID uint64) (int64, error)
 	DeleteFinishedUpgradeJobsBefore(ctx context.Context, cutoff time.Time) (int64, error)
 }
 

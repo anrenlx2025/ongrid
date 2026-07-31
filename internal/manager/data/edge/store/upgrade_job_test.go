@@ -14,7 +14,8 @@ func TestUpgradeJobLifecycleAndRetry(t *testing.T) {
 	ctx := context.Background()
 	baseline := time.Date(2026, 7, 31, 9, 0, 0, 0, time.UTC)
 	deviceA, deviceB, deviceC := uint64(101), uint64(102), uint64(103)
-	job := &model.UpgradeJob{TargetVersion: "v0.10.2"}
+	clusterID := uint64(501)
+	job := &model.UpgradeJob{ClusterNodeID: &clusterID, TargetVersion: "v0.10.2"}
 	items := []*model.UpgradeJobItem{
 		{EdgeID: 1, DeviceID: &deviceA, Arch: "linux-amd64", FromVersion: "v0.10.1", TargetVersion: "v0.10.2", Status: model.UpgradeJobItemStatusQueued, BaselineRegisteredAt: &baseline},
 		{EdgeID: 2, DeviceID: &deviceB, Arch: "linux-arm64", FromVersion: "v0.10.1", TargetVersion: "v0.10.2", Status: model.UpgradeJobItemStatusQueued, BaselineRegisteredAt: &baseline},
@@ -29,6 +30,9 @@ func TestUpgradeJobLifecycleAndRetry(t *testing.T) {
 	if job.BatchSize != model.DefaultUpgradeJobBatchSize || job.CurrentBatch != 0 || job.TotalBatches != 1 ||
 		items[0].BatchNumber != 1 || items[1].BatchNumber != 1 || items[2].BatchNumber != 0 {
 		t.Fatalf("created batch metadata job=%+v items=%+v", job, items)
+	}
+	if active, err := repo.CountActiveUpgradeJobsForCluster(ctx, clusterID); err != nil || active != 1 {
+		t.Fatalf("CountActiveUpgradeJobsForCluster(active) = %d, %v; want 1", active, err)
 	}
 
 	claimed, err := repo.ClaimNextUpgradeJob(ctx, baseline.Add(time.Minute))
@@ -67,6 +71,9 @@ func TestUpgradeJobLifecycleAndRetry(t *testing.T) {
 	if refreshed.Status != model.UpgradeJobStatusPartialFailed || refreshed.Succeeded != 1 || refreshed.Failed != 1 || refreshed.Skipped != 1 || refreshed.Pending != 0 {
 		t.Fatalf("refreshed job = %+v", refreshed)
 	}
+	if active, err := repo.CountActiveUpgradeJobsForCluster(ctx, clusterID); err != nil || active != 0 {
+		t.Fatalf("CountActiveUpgradeJobsForCluster(finished) = %d, %v; want 0", active, err)
+	}
 
 	retryBaseline := completedAt.Add(time.Minute)
 	retried, err := repo.RetryUpgradeJob(ctx, job.ID, []biz.UpgradeRetrySnapshot{{
@@ -86,8 +93,8 @@ func TestUpgradeJobLifecycleAndRetry(t *testing.T) {
 	if rows[1].Status != model.UpgradeJobItemStatusQueued || rows[1].BatchNumber != 1 || rows[1].ErrorCode != "" || rows[1].BaselineRegisteredAt == nil || !rows[1].BaselineRegisteredAt.Equal(retryBaseline) {
 		t.Fatalf("retried item = %+v", rows[1])
 	}
-	if rows[0].Status != model.UpgradeJobItemStatusSucceeded || rows[0].BatchNumber != 0 {
-		t.Fatalf("completed item retained stale retry batch = %+v", rows[0])
+	if rows[0].Status != model.UpgradeJobItemStatusSucceeded || rows[0].BatchNumber != 1 {
+		t.Fatalf("completed item lost its original batch = %+v", rows[0])
 	}
 }
 

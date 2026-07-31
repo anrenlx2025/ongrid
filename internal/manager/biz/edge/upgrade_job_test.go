@@ -2,6 +2,7 @@ package edge_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -32,6 +33,16 @@ func (r upgradeDeviceReader) Get(_ context.Context, id uint64) (*devicemodel.Dev
 }
 
 type upgradeResolver struct{}
+
+type upgradeClusterValidator struct {
+	err   error
+	calls int
+}
+
+func (v *upgradeClusterValidator) ValidateUpgradeCluster(_ context.Context, _ uint64, _ []uint64) error {
+	v.calls++
+	return v.err
+}
 
 func (upgradeResolver) ResolveBundle(arch, version string) (string, string, string, error) {
 	if arch != "linux-amd64" && arch != "linux-arm64" {
@@ -143,6 +154,67 @@ func TestUpgradeJobRunContinuesWithoutRequestContext(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("upgrade job did not converge")
+}
+
+func TestRetryUpgradeJobRejectsDeviceRemovedFromCluster(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:upgrade-job-retry-cluster?mode=memory&cache=shared"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatalf("gorm.Open() error = %v", err)
+	}
+	if err := store.Migrate(db); err != nil {
+		t.Fatalf("store.Migrate() error = %v", err)
+	}
+	repo := store.NewRepo(db)
+	deviceID, nodeID, clusterID := uint64(701), uint64(1701), uint64(101)
+	baseline := time.Now().Add(-time.Minute)
+	edge := &edgemodel.Edge{
+		Name: "edge-retry", AccessKeyID: "upgrade-job-retry-cluster", SecretKeyHash: "hash",
+		Status: edgemodel.StatusOnline, DeviceID: &deviceID,
+		AgentVersion: "v0.10.1", LastRegisteredAt: &baseline,
+	}
+	if err := repo.Create(context.Background(), edge); err != nil {
+		t.Fatalf("repo.Create(edge) error = %v", err)
+	}
+	devices := upgradeDeviceReader{rows: map[uint64]*devicemodel.Device{
+		deviceID: {ID: deviceID, NodeID: &nodeID, Name: "device-retry", OS: "linux", Arch: "amd64", Online: true},
+	}}
+	validator := &upgradeClusterValidator{}
+	uc := biz.NewUpgradeJobUsecase(
+		repo, repo, devices, validator, &controlledUpgradeDispatcher{}, upgradeResolver{},
+		biz.UpgradeJobConfig{}, nil,
+	)
+	job, err := uc.Create(context.Background(), biz.CreateUpgradeJobInput{
+		ClusterNodeID: &clusterID, EdgeIDs: []uint64{edge.ID}, TargetVersion: "v0.10.2",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	_, items, err := uc.Get(context.Background(), job.ID)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("Get() items = %+v, error = %v", items, err)
+	}
+	if err := repo.MarkUpgradeItemDispatching(context.Background(), items[0].ID, time.Now()); err != nil {
+		t.Fatalf("MarkUpgradeItemDispatching() error = %v", err)
+	}
+	if err := repo.MarkUpgradeItemFailed(context.Background(), items[0].ID, edgemodel.UpgradeJobItemStatusFailed,
+		"fetch_failed", "offline", "", nil, time.Now()); err != nil {
+		t.Fatalf("MarkUpgradeItemFailed() error = %v", err)
+	}
+	if _, err := repo.RefreshUpgradeJob(context.Background(), job.ID, time.Now()); err != nil {
+		t.Fatalf("RefreshUpgradeJob() error = %v", err)
+	}
+
+	validator.err = errs.ErrConflict
+	if _, err := uc.Retry(context.Background(), job.ID); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("Retry() error = %v, want ErrConflict", err)
+	}
+	if validator.calls != 2 {
+		t.Fatalf("ValidateUpgradeCluster calls = %d, want 2", validator.calls)
+	}
+	_, items, err = uc.Get(context.Background(), job.ID)
+	if err != nil || items[0].Status != edgemodel.UpgradeJobItemStatusFailed {
+		t.Fatalf("retry rejection changed item = %+v, error = %v", items, err)
+	}
 }
 
 func TestUpgradeJobRunWaitsForCurrentBatchBeforeDispatchingNext(t *testing.T) {

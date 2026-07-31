@@ -311,7 +311,7 @@ describe("device cluster pages", () => {
     server.use(
       http.get("/api/v1/edges", () =>
         HttpResponse.json({
-          items: [hostEdge({ agent_version: "v0.10.2" })],
+          items: [hostEdge({ agent_version: "0.10.2" })],
           total: 1,
         }),
       ),
@@ -319,6 +319,7 @@ describe("device cluster pages", () => {
 
     renderDetail();
     await screen.findByRole("heading", { name: "成员设备" });
+    expect(screen.queryByText("落后")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "批量升级" }));
     const dialog = screen.getByRole("dialog", {
       name: "批量升级 · bare-metal-prod",

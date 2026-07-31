@@ -126,6 +126,24 @@ func (u *EnrollmentUsecase) ListProfiles(ctx context.Context, filter EnrollmentP
 	return u.repo.ListProfiles(ctx, filter)
 }
 
+// ValidateClusterDelete refuses to orphan a still-usable installation command.
+func (u *EnrollmentUsecase) ValidateClusterDelete(ctx context.Context, clusterNodeID uint64) error {
+	if u == nil || u.repo == nil {
+		return errs.ErrNotWiredYet
+	}
+	if clusterNodeID == 0 {
+		return errs.ErrInvalid
+	}
+	count, err := u.repo.CountActiveProfilesForCluster(ctx, clusterNodeID, time.Now())
+	if err != nil {
+		return fmt.Errorf("count active enrollment profiles for cluster: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("%w: cluster %d still has %d active enrollment profile(s)", errs.ErrConflict, clusterNodeID, count)
+	}
+	return nil
+}
+
 func (u *EnrollmentUsecase) RevokeProfile(ctx context.Context, id uint64) error {
 	if u.repo == nil {
 		return errs.ErrNotWiredYet

@@ -1,3 +1,6 @@
+ALTER TABLE edges
+    ADD COLUMN last_registered_at DATETIME(3) NULL AFTER last_seen_at;
+
 CREATE TABLE IF NOT EXISTS edge_upgrade_jobs (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     cluster_node_id BIGINT UNSIGNED NULL,

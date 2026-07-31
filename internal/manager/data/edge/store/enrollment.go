@@ -57,6 +57,15 @@ func (r *EnrollmentRepo) ListProfiles(ctx context.Context, filter biz.Enrollment
 	return profiles, total, nil
 }
 
+func (r *EnrollmentRepo) CountActiveProfilesForCluster(ctx context.Context, clusterNodeID uint64, now time.Time) (int64, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&model.EnrollmentProfile{}).
+		Where("cluster_node_id = ? AND assignment_mode = ? AND status = ? AND expires_at > ? AND used_count < max_uses",
+			clusterNodeID, model.EnrollmentModeCluster, model.EnrollmentStatusActive, now).
+		Count(&count).Error
+	return count, err
+}
+
 func (r *EnrollmentRepo) RevokeProfile(ctx context.Context, id uint64) error {
 	res := r.db.WithContext(ctx).Model(&model.EnrollmentProfile{}).
 		Where("id = ? AND status = ?", id, model.EnrollmentStatusActive).

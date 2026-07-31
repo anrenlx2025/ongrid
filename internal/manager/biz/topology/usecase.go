@@ -16,11 +16,18 @@ import (
 // handlers (and future tools) call into Usecase rather than the repos
 // directly so all validation lives in one place.
 type Usecase struct {
-	nodes     NodeRepo
-	relations RelationRepo
-	types     RelationTypeRepo
-	nodeTypes NodeTypeRepo
-	log       *slog.Logger
+	nodes               NodeRepo
+	relations           RelationRepo
+	types               RelationTypeRepo
+	nodeTypes           NodeTypeRepo
+	clusterDeleteGuards []ClusterDeleteGuard
+	log                 *slog.Logger
+}
+
+// ClusterDeleteGuard lets dependent domains refuse deletion while they still
+// own live records referencing a topology cluster.
+type ClusterDeleteGuard interface {
+	ValidateClusterDelete(ctx context.Context, clusterNodeID uint64) error
 }
 
 // NewUsecase builds the usecase. Any repo may be nil — methods touching
@@ -28,6 +35,14 @@ type Usecase struct {
 // boot/test wiring.
 func NewUsecase(nodes NodeRepo, relations RelationRepo, types RelationTypeRepo, nodeTypes NodeTypeRepo, log *slog.Logger) *Usecase {
 	return &Usecase{nodes: nodes, relations: relations, types: types, nodeTypes: nodeTypes, log: log}
+}
+
+// AddClusterDeleteGuard registers one dependent-domain lifecycle check.
+func (u *Usecase) AddClusterDeleteGuard(guard ClusterDeleteGuard) {
+	if u == nil || guard == nil {
+		return
+	}
+	u.clusterDeleteGuards = append(u.clusterDeleteGuards, guard)
 }
 
 // ---------- Node ------------------------------------------------------------
@@ -106,8 +121,26 @@ func (u *Usecase) ListNodes(ctx context.Context, f NodeListFilter) ([]*model.Nod
 // node_id pointing at this row and orphaning that FK is worse than
 // surfacing the error.
 func (u *Usecase) DeleteNode(ctx context.Context, id uint64) error {
-	if u.nodes == nil {
+	if u.nodes == nil || u.relations == nil {
 		return errs.ErrNotWiredYet
+	}
+	node, err := u.nodes.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if node.Type == string(model.NodeTypeCluster) {
+		for _, guard := range u.clusterDeleteGuards {
+			if err := guard.ValidateClusterDelete(ctx, id); err != nil {
+				return err
+			}
+		}
+	}
+	references, err := u.relations.Count(ctx, RelationListFilter{SrcOrDstID: id})
+	if err != nil {
+		return err
+	}
+	if references > 0 {
+		return fmt.Errorf("%w: topology node %d still has %d relation(s)", errs.ErrConflict, id, references)
 	}
 	return u.nodes.Delete(ctx, id)
 }
@@ -142,6 +175,13 @@ func (u *Usecase) CreateRelation(ctx context.Context, srcID, dstID uint64, typ, 
 	if _, ok := endpoints[dstID]; !ok {
 		return nil, fmt.Errorf("%w: dst node %d", errs.ErrNotFound, dstID)
 	}
+	if typ == model.RelMemberOf &&
+		endpoints[srcID].Type == string(model.NodeTypeDevice) &&
+		endpoints[dstID].Type == string(model.NodeTypeCluster) {
+		if err := validateDeviceClusterMembership(endpoints[dstID], propsJSON); err != nil {
+			return nil, err
+		}
+	}
 	// Relation type must be registered.
 	if _, err := u.types.Get(ctx, typ); err != nil {
 		return nil, fmt.Errorf("relation type %q: %w", typ, err)
@@ -155,6 +195,28 @@ func (u *Usecase) CreateRelation(ctx context.Context, srcID, dstID uint64, typ, 
 			slog.Uint64("id", r.ID), slog.Uint64("src", srcID), slog.Uint64("dst", dstID), slog.String("type", typ))
 	}
 	return r, nil
+}
+
+func validateDeviceClusterMembership(cluster *model.Node, propsJSON string) error {
+	clusterSource := topologyPropsSource(cluster.PropsJSON)
+	relationSource := topologyPropsSource(propsJSON)
+	switch {
+	case clusterSource == "kubernetes" && relationSource != "kubernetes":
+		return fmt.Errorf("%w: kubernetes-owned clusters only accept kubernetes membership", errs.ErrInvalid)
+	case clusterSource != "kubernetes" && relationSource == "kubernetes":
+		return fmt.Errorf("%w: kubernetes membership requires a kubernetes-owned cluster", errs.ErrInvalid)
+	default:
+		return nil
+	}
+}
+
+func topologyPropsSource(propsJSON string) string {
+	var props map[string]any
+	if err := json.Unmarshal([]byte(propsJSON), &props); err != nil {
+		return ""
+	}
+	source, _ := props["source"].(string)
+	return source
 }
 
 // UpdateRelation rewrites only the props bag — the (src, dst, type)

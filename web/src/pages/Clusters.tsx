@@ -61,6 +61,7 @@ import {
 import {
   buildClusterUpgradePlan,
   selectClusterHostEdges,
+  versionsEqual,
 } from "./clusters/upgrade";
 
 const PAGE_SIZE = 500;
@@ -1127,7 +1128,7 @@ function ClusterEdgeVersionCell({
     return <span className="text-zinc-600">—</span>;
   }
   const drifted = Boolean(
-    managerVersion && edge.agent_version !== managerVersion,
+    managerVersion && !versionsEqual(edge.agent_version, managerVersion),
   );
   return (
     <span className="inline-flex items-center gap-1">

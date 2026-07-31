@@ -19,6 +19,7 @@ type EnrollmentRepo interface {
 	CreateProfile(ctx context.Context, profile *model.EnrollmentProfile) error
 	GetProfileByTokenHash(ctx context.Context, tokenHash string) (*model.EnrollmentProfile, error)
 	ListProfiles(ctx context.Context, filter EnrollmentProfileListFilter) ([]*model.EnrollmentProfile, int64, error)
+	CountActiveProfilesForCluster(ctx context.Context, clusterNodeID uint64, now time.Time) (int64, error)
 	RevokeProfile(ctx context.Context, id uint64) error
 	DeleteProfile(ctx context.Context, id uint64) error
 	Claim(ctx context.Context, tokenHash, hostFingerprint, sourceIP string, candidate *model.Edge, now time.Time) (

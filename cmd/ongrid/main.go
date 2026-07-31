@@ -839,6 +839,7 @@ func main() {
 	topologyUC := managerbiztopology.NewUsecase(
 		topologyNodeRepo, topologyRelationRepo, topologyRelationTypeRepo, topologyNodeTypeRepo, log,
 	)
+	topologyUC.AddClusterDeleteGuard(managerbizedge.NewUpgradeJobClusterDeleteGuard(edgeRepo))
 	topologyHandler := managerservertopology.NewHandler(topologyUC)
 
 	// Persistent package rollout coordinator. It owns job/item records and
@@ -875,6 +876,7 @@ func main() {
 	edgeEnrollmentHandler := managerserveredge.NewEnrollmentHandler(edgeEnrollmentSvc)
 	edgeEnrollmentHandler.SetAuthz(authzMW)
 	edgeUC.SetEnrollmentFinalizer(edgeEnrollmentUC)
+	topologyUC.AddClusterDeleteGuard(edgeEnrollmentUC)
 
 	// device→topology mirror. Plug the topology UC into edge UC
 	// so the register flow drops a `nodes` row alongside each new

@@ -117,6 +117,73 @@ func TestAssignEnrollmentDeviceIsIdempotentAndRejectsAutomaticMove(t *testing.T)
 	}
 }
 
+func TestDeviceClusterMembershipIsExclusiveAndKubernetesOwned(t *testing.T) {
+	uc := newUC(t)
+	ctx := context.Background()
+	clusterA, _ := uc.CreateNode(ctx, string(model.NodeTypeCluster), "bare-metal-a", `{"source":"manual"}`)
+	clusterB, _ := uc.CreateNode(ctx, string(model.NodeTypeCluster), "bare-metal-b", `{"source":"manual"}`)
+	k8sCluster, _ := uc.CreateNode(ctx, string(model.NodeTypeCluster), "k8s", `{"source":"kubernetes"}`)
+	device, _ := uc.CreateNode(ctx, string(model.NodeTypeDevice), "host-a", "")
+
+	first, err := uc.CreateRelation(ctx, device.ID, clusterA.ID, model.RelMemberOf, `{"source":"manual"}`)
+	if err != nil {
+		t.Fatalf("CreateRelation(first): %v", err)
+	}
+	repeated, err := uc.CreateRelation(ctx, device.ID, clusterA.ID, model.RelMemberOf, `{"source":"manual"}`)
+	if err != nil || repeated.ID != first.ID {
+		t.Fatalf("CreateRelation(idempotent) = %+v, %v; want relation %d", repeated, err, first.ID)
+	}
+	if _, err := uc.CreateRelation(ctx, device.ID, clusterB.ID, model.RelMemberOf, `{"source":"manual"}`); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("CreateRelation(second cluster) error = %v, want ErrConflict", err)
+	}
+
+	k8sDevice, _ := uc.CreateNode(ctx, string(model.NodeTypeDevice), "host-k8s", "")
+	if _, err := uc.CreateRelation(ctx, k8sDevice.ID, k8sCluster.ID, model.RelMemberOf, `{"source":"manual"}`); !errors.Is(err, errs.ErrInvalid) {
+		t.Fatalf("CreateRelation(manual to k8s) error = %v, want ErrInvalid", err)
+	}
+	if _, err := uc.CreateRelation(ctx, k8sDevice.ID, clusterA.ID, model.RelMemberOf, `{"source":"kubernetes"}`); !errors.Is(err, errs.ErrInvalid) {
+		t.Fatalf("CreateRelation(k8s to manual) error = %v, want ErrInvalid", err)
+	}
+	if _, err := uc.CreateRelation(ctx, k8sDevice.ID, k8sCluster.ID, model.RelMemberOf, `{"source":"kubernetes"}`); err != nil {
+		t.Fatalf("CreateRelation(k8s membership): %v", err)
+	}
+	if _, err := uc.CreateRelation(ctx, k8sDevice.ID, clusterA.ID, model.RelMemberOf, `{"source":"manual"}`); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("CreateRelation(k8s device to manual cluster) error = %v, want ErrConflict", err)
+	}
+}
+
+type clusterDeleteGuardStub struct {
+	blockedID uint64
+}
+
+func (g clusterDeleteGuardStub) ValidateClusterDelete(_ context.Context, clusterNodeID uint64) error {
+	if clusterNodeID == g.blockedID {
+		return errs.ErrConflict
+	}
+	return nil
+}
+
+func TestDeleteClusterEnforcesRelationsAndDependentGuards(t *testing.T) {
+	uc := newUC(t)
+	ctx := context.Background()
+	cluster, _ := uc.CreateNode(ctx, string(model.NodeTypeCluster), "bare-metal", `{"source":"manual"}`)
+	device, _ := uc.CreateNode(ctx, string(model.NodeTypeDevice), "host", "")
+	relation, err := uc.CreateRelation(ctx, device.ID, cluster.ID, model.RelMemberOf, `{"source":"manual"}`)
+	if err != nil {
+		t.Fatalf("CreateRelation: %v", err)
+	}
+	if err := uc.DeleteNode(ctx, cluster.ID); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("DeleteNode(with relation) error = %v, want ErrConflict", err)
+	}
+	if err := uc.DeleteRelation(ctx, relation.ID); err != nil {
+		t.Fatalf("DeleteRelation: %v", err)
+	}
+	uc.AddClusterDeleteGuard(clusterDeleteGuardStub{blockedID: cluster.ID})
+	if err := uc.DeleteNode(ctx, cluster.ID); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("DeleteNode(blocked dependency) error = %v, want ErrConflict", err)
+	}
+}
+
 func TestValidateEnrollmentClusterRejectsKubernetesOwnedNode(t *testing.T) {
 	uc := newUC(t)
 	ctx := context.Background()

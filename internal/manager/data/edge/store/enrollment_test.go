@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,5 +147,28 @@ func TestEnrollmentProfileExpiryStopsClaims(t *testing.T) {
 	candidate := &model.Edge{Name: "host", AccessKeyID: "access", SecretKeyHash: "hash", Status: model.StatusOffline}
 	if _, _, _, _, err := repo.Claim(ctx, profile.TokenHash, "fp_host", "", candidate, now); !errors.Is(err, errs.ErrUnauthorized) {
 		t.Fatalf("expired claim error = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestCountActiveProfilesForClusterUsesEffectiveStatus(t *testing.T) {
+	edgeRepo := newTestRepo(t)
+	repo := NewEnrollmentRepo(edgeRepo.db)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	clusterID := uint64(501)
+	profiles := []*model.EnrollmentProfile{
+		{Name: "active", AssignmentMode: model.EnrollmentModeCluster, ClusterNodeID: &clusterID, TokenHash: strings.Repeat("1", 64), ExpiresAt: now.Add(time.Hour), MaxUses: 2, UsedCount: 1, Status: model.EnrollmentStatusActive},
+		{Name: "expired", AssignmentMode: model.EnrollmentModeCluster, ClusterNodeID: &clusterID, TokenHash: strings.Repeat("2", 64), ExpiresAt: now.Add(-time.Minute), MaxUses: 2, Status: model.EnrollmentStatusActive},
+		{Name: "exhausted", AssignmentMode: model.EnrollmentModeCluster, ClusterNodeID: &clusterID, TokenHash: strings.Repeat("3", 64), ExpiresAt: now.Add(time.Hour), MaxUses: 1, UsedCount: 1, Status: model.EnrollmentStatusActive},
+		{Name: "revoked", AssignmentMode: model.EnrollmentModeCluster, ClusterNodeID: &clusterID, TokenHash: strings.Repeat("4", 64), ExpiresAt: now.Add(time.Hour), MaxUses: 2, Status: model.EnrollmentStatusRevoked},
+	}
+	for _, profile := range profiles {
+		if err := repo.CreateProfile(ctx, profile); err != nil {
+			t.Fatalf("CreateProfile(%s): %v", profile.Name, err)
+		}
+	}
+	count, err := repo.CountActiveProfilesForCluster(ctx, clusterID, now)
+	if err != nil || count != 1 {
+		t.Fatalf("CountActiveProfilesForCluster() = %d, %v; want 1", count, err)
 	}
 }

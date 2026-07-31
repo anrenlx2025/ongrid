@@ -348,14 +348,6 @@ func (r *Repo) RetryUpgradeJob(ctx context.Context, jobID uint64, snapshots []bi
 		}).Order("id ASC").Find(&items).Error; err != nil {
 			return err
 		}
-		// Batch metadata describes the active attempt. Devices which already
-		// finished are not members of the retry rollout, so clear their old
-		// batch number before assigning fresh batches to the retry set.
-		if err := tx.Model(&model.UpgradeJobItem{}).
-			Where("job_id = ?", jobID).
-			Update("batch_number", 0).Error; err != nil {
-			return err
-		}
 		reset := 0
 		for _, item := range items {
 			snapshot, ok := byEdge[item.EdgeID]
@@ -404,6 +396,17 @@ func (r *Repo) RetryUpgradeJob(ctx context.Context, jobID uint64, snapshots []bi
 		return nil, err
 	}
 	return r.RefreshUpgradeJob(ctx, jobID, now)
+}
+
+func (r *Repo) CountActiveUpgradeJobsForCluster(ctx context.Context, clusterNodeID uint64) (int64, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&model.UpgradeJob{}).
+		Where("cluster_node_id = ? AND deleted_at IS NULL AND status IN ?", clusterNodeID, []string{
+			model.UpgradeJobStatusQueued,
+			model.UpgradeJobStatusRunning,
+		}).
+		Count(&count).Error
+	return count, err
 }
 
 func (r *Repo) DeleteFinishedUpgradeJobsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
