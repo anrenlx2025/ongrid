@@ -163,16 +163,10 @@ URL="https://${SERVER_HTTP_ADDR}/edge/${BINARY}"
 
 # --- download ----------------------------------------------------------------
 
-# Stop the running agent before overwriting the binary. ETXTBSY is rare on
-# linux for ELF replacement but `systemctl stop` is cheap and cleaner.
-if systemctl is-active --quiet ongrid-edge 2>/dev/null; then
-    log_info "stopping running ongrid-edge to refresh binary"
-    systemctl stop ongrid-edge || true
-fi
-
 log_info "downloading ${URL}"
 TMP_BIN=$(mktemp /tmp/ongrid-edge.XXXXXX)
-trap 'rm -f "$TMP_BIN"; log_error "install failed at line $LINENO (exit $?)"' ERR
+PENDING_ENV_FILE=""
+trap 'rm -f "${TMP_BIN:-}"; if [[ -n "${PENDING_ENV_FILE:-}" ]]; then rm -f "$PENDING_ENV_FILE"; fi; log_error "install failed at line $LINENO (exit $?)"' ERR
 if ! curl -fLk --retry 3 --retry-delay 2 -o "$TMP_BIN" "$URL"; then
     log_error "download failed: ${URL}"
     log_error "  - check that the http endpoint is correct and reachable"
@@ -183,9 +177,40 @@ if [[ ! -s "$TMP_BIN" ]]; then
     log_error "downloaded binary is empty: $TMP_BIN"
     rm -f "$TMP_BIN"; exit 1
 fi
+
+# Exchange the reusable bootstrap token before touching a running agent. If a
+# completed host accidentally runs the command again, the Manager rejects the
+# claim and this script exits while the existing binary, credentials, and
+# systemd service are still intact. The downloaded binary is used because an
+# older installed version may not implement the enroll subcommand yet.
+if [[ -n "$ENROLLMENT_TOKEN" ]]; then
+    log_info "claiming an independent edge identity"
+    chmod 0755 "$TMP_BIN"
+    PENDING_ENV_FILE=$(mktemp /tmp/ongrid-edge-env.XXXXXX)
+    ENROLL_ARGS=(
+        enroll
+        "--manager-url=https://${SERVER_HTTP_ADDR}"
+        "--cloud-addr-fallback=${SERVER_EDGE_ADDR}"
+        "--output=${PENDING_ENV_FILE}"
+    )
+    if [[ $TLS_INSECURE -eq 1 ]]; then
+        ENROLL_ARGS+=(--tls-insecure)
+    fi
+    ONGRID_ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN" "$TMP_BIN" "${ENROLL_ARGS[@]}"
+    unset ENROLLMENT_TOKEN
+fi
+
+# Stop the running agent only after enrollment has succeeded, immediately
+# before replacing its binary. ETXTBSY is rare on Linux for ELF replacement,
+# but an explicit stop keeps the refresh deterministic.
+if systemctl is-active --quiet ongrid-edge 2>/dev/null; then
+    log_info "stopping running ongrid-edge to refresh binary"
+    systemctl stop ongrid-edge || true
+fi
+
 install -m 0755 -o root -g root "$TMP_BIN" "${INSTALL_DIR}/ongrid-edge"
 rm -f "$TMP_BIN"
-trap 'log_error "install failed at line $LINENO (exit $?)"' ERR
+TMP_BIN=""
 
 # --- ADR-024 ExecStartPre hook ----------------------------------------------
 #
@@ -272,19 +297,10 @@ mkdir -p "$ENV_DIR"
 chown "root:${SERVICE_GROUP}" "$ENV_DIR"
 chmod 750 "$ENV_DIR"
 
-if [[ -n "$ENROLLMENT_TOKEN" ]]; then
-    log_info "claiming an independent edge identity"
-    ENROLL_ARGS=(
-        enroll
-        "--manager-url=https://${SERVER_HTTP_ADDR}"
-        "--cloud-addr-fallback=${SERVER_EDGE_ADDR}"
-        "--output=${ENV_FILE}"
-    )
-    if [[ $TLS_INSECURE -eq 1 ]]; then
-        ENROLL_ARGS+=(--tls-insecure)
-    fi
-    ONGRID_ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN" "${INSTALL_DIR}/ongrid-edge" "${ENROLL_ARGS[@]}"
-    unset ENROLLMENT_TOKEN
+if [[ -n "$PENDING_ENV_FILE" ]]; then
+    install -m 0640 -o root -g "$SERVICE_GROUP" "$PENDING_ENV_FILE" "$ENV_FILE"
+    rm -f "$PENDING_ENV_FILE"
+    PENDING_ENV_FILE=""
 else
     cat > "$ENV_FILE" <<EOF
 ONGRID_EDGE_CLOUD_ADDR=${SERVER_EDGE_ADDR}
@@ -294,6 +310,7 @@ EOF
 fi
 chmod 640 "$ENV_FILE"
 chown "root:${SERVICE_GROUP}" "$ENV_FILE"
+trap 'log_error "install failed at line $LINENO (exit $?)"' ERR
 
 # --- state dir ---------------------------------------------------------------
 #
