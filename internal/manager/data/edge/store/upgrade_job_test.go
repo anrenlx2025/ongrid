@@ -58,6 +58,17 @@ func TestUpgradeJobLifecycleAndRetry(t *testing.T) {
 	if len(dispatchedItems) != 3 || dispatchedItems[0].BaselineRegisteredAt == nil || !dispatchedItems[0].BaselineRegisteredAt.Equal(firstDispatchBaseline) {
 		t.Fatalf("dispatch baseline was not refreshed: items=%+v", dispatchedItems)
 	}
+	preApplyBaseline := baseline.Add(45 * time.Second)
+	if err := repo.RefreshUpgradeItemBaseline(ctx, items[0].ID, preApplyBaseline); err != nil {
+		t.Fatalf("RefreshUpgradeItemBaseline() error = %v", err)
+	}
+	_, dispatchedItems, err = repo.GetUpgradeJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetUpgradeJob(pre-apply) error = %v", err)
+	}
+	if dispatchedItems[0].BaselineRegisteredAt == nil || !dispatchedItems[0].BaselineRegisteredAt.Equal(preApplyBaseline) {
+		t.Fatalf("pre-apply baseline was not refreshed: item=%+v", dispatchedItems[0])
+	}
 	if err := repo.MarkUpgradeItemWaiting(ctx, items[0].ID, completedAt.Add(time.Minute)); err != nil {
 		t.Fatalf("MarkUpgradeItemWaiting(first) error = %v", err)
 	}

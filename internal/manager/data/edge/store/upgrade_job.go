@@ -183,6 +183,13 @@ func (r *Repo) MarkUpgradeItemDispatching(ctx context.Context, itemID uint64, ba
 	return nil
 }
 
+func (r *Repo) RefreshUpgradeItemBaseline(ctx context.Context, itemID uint64, baselineRegisteredAt time.Time) error {
+	return r.updateUpgradeItem(ctx, itemID, model.UpgradeJobItemStatusDispatching, map[string]any{
+		"baseline_registered_at": baselineRegisteredAt,
+		"updated_at":             baselineRegisteredAt,
+	})
+}
+
 func (r *Repo) MarkUpgradeItemWaiting(ctx context.Context, itemID uint64, deadline time.Time) error {
 	return r.updateUpgradeItem(ctx, itemID, model.UpgradeJobItemStatusDispatching, map[string]any{
 		"status":                   model.UpgradeJobItemStatusWaitingRegistration,

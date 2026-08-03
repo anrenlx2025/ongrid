@@ -91,6 +91,41 @@ func (d *controlledUpgradeDispatcher) appliedIDs() []uint64 {
 	return append([]uint64(nil), d.applied...)
 }
 
+type fetchReconnectUpgradeDispatcher struct {
+	repo *store.Repo
+	mu   sync.Mutex
+	at   *time.Time
+}
+
+func (d *fetchReconnectUpgradeDispatcher) FetchPackage(ctx context.Context, edgeID uint64, _ string, _ string, _ string) (tunnel.FetchPackageResponse, error) {
+	registeredAt := time.Now().UTC()
+	if err := d.repo.MarkRegistered(ctx, edgeID, registeredAt); err != nil {
+		return tunnel.FetchPackageResponse{}, err
+	}
+	d.mu.Lock()
+	d.at = &registeredAt
+	d.mu.Unlock()
+	return tunnel.FetchPackageResponse{ManifestFiles: 10}, nil
+}
+
+func (d *fetchReconnectUpgradeDispatcher) ApplyPackage(context.Context, uint64) (tunnel.ApplyPackageResponse, error) {
+	return tunnel.ApplyPackageResponse{Accepted: true}, nil
+}
+
+func (d *fetchReconnectUpgradeDispatcher) registeredAt() *time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return cloneTestTime(d.at)
+}
+
+func cloneTestTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
 func TestUpgradeJobRunContinuesWithoutRequestContext(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open("file:upgrade-job-run?mode=memory&cache=shared"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
@@ -219,7 +254,7 @@ func TestUpgradeJobForceReinstallDoesNotShortCircuitQueuedConvergence(t *testing
 			if err != nil {
 				t.Fatalf("Get() error = %v", err)
 			}
-			if len(items) != 1 || items[0].BaselineRegisteredAt == nil || !items[0].BaselineRegisteredAt.Equal(queuedRegistrationAt) {
+			if len(items) != 1 || items[0].BaselineRegisteredAt == nil || !items[0].BaselineRegisteredAt.After(queuedRegistrationAt) {
 				t.Fatalf("force reinstall dispatch baseline = %+v", items)
 			}
 			return
@@ -227,6 +262,105 @@ func TestUpgradeJobForceReinstallDoesNotShortCircuitQueuedConvergence(t *testing
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("force reinstall was short-circuited instead of being dispatched")
+}
+
+func TestUpgradeJobRefreshesBaselineAfterFetch(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:upgrade-job-fetch-reconnect?mode=memory&cache=shared"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatalf("gorm.Open() error = %v", err)
+	}
+	if err := store.Migrate(db); err != nil {
+		t.Fatalf("store.Migrate() error = %v", err)
+	}
+	repo := store.NewRepo(db)
+	deviceID := uint64(581)
+	registeredAt := time.Now().Add(-time.Minute)
+	edge := &edgemodel.Edge{
+		Name: "edge-fetch-reconnect", AccessKeyID: "upgrade-job-edge-fetch-reconnect", SecretKeyHash: "hash",
+		Status: edgemodel.StatusOnline, DeviceID: &deviceID,
+		AgentVersion: "v0.10.1", LastRegisteredAt: &registeredAt,
+	}
+	if err := repo.Create(context.Background(), edge); err != nil {
+		t.Fatalf("repo.Create() error = %v", err)
+	}
+	devices := upgradeDeviceReader{rows: map[uint64]*devicemodel.Device{
+		deviceID: {ID: deviceID, Name: "device-fetch-reconnect", OS: "linux", Arch: "amd64", Online: true},
+	}}
+	dispatcher := &fetchReconnectUpgradeDispatcher{repo: repo}
+	uc := biz.NewUpgradeJobUsecase(
+		repo, repo, devices, nil, dispatcher, upgradeResolver{},
+		biz.UpgradeJobConfig{Concurrency: 1, VerifyInterval: time.Millisecond, VerifyTimeout: time.Second}, nil,
+	)
+	job, err := uc.Create(context.Background(), biz.CreateUpgradeJobInput{
+		EdgeIDs: []uint64{edge.ID}, TargetVersion: "v0.10.2",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		uc.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("upgrade coordinator did not stop")
+		}
+	})
+
+	waitingObserved := false
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, items, err := uc.Get(context.Background(), job.ID)
+		if err != nil {
+			t.Fatalf("Get(waiting) error = %v", err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("Get(waiting) items = %+v", items)
+		}
+		if items[0].Status == edgemodel.UpgradeJobItemStatusFailed {
+			t.Fatalf("registration during FetchPackage was treated as an upgrade result: %+v", items[0])
+		}
+		if items[0].Status == edgemodel.UpgradeJobItemStatusWaitingRegistration {
+			fetchRegisteredAt := dispatcher.registeredAt()
+			if fetchRegisteredAt == nil || items[0].BaselineRegisteredAt == nil || !items[0].BaselineRegisteredAt.After(*fetchRegisteredAt) {
+				t.Fatalf("pre-apply baseline did not advance past fetch registration: fetch=%v item=%+v", fetchRegisteredAt, items[0])
+			}
+			waitingObserved = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !waitingObserved {
+		t.Fatal("upgrade item did not enter registration verification")
+	}
+
+	if err := repo.SetAgentVersion(context.Background(), edge.ID, "v0.10.2"); err != nil {
+		t.Fatalf("SetAgentVersion() error = %v", err)
+	}
+	if err := repo.MarkRegistered(context.Background(), edge.ID, time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("MarkRegistered(target) error = %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		current, items, err := uc.Get(context.Background(), job.ID)
+		if err != nil {
+			t.Fatalf("Get(completed) error = %v", err)
+		}
+		if current.Status == edgemodel.UpgradeJobStatusSucceeded {
+			if len(items) != 1 || items[0].Status != edgemodel.UpgradeJobItemStatusSucceeded {
+				t.Fatalf("completed job=%+v items=%+v", current, items)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("upgrade job did not converge after target registration")
 }
 
 func TestRetryUpgradeJobRejectsDeviceRemovedFromCluster(t *testing.T) {
@@ -394,7 +528,7 @@ func TestUpgradeJobRunWaitsForCurrentBatchBeforeDispatchingNext(t *testing.T) {
 		t.Fatalf("Get(second batch waiting) error = %v", err)
 	}
 	if items[2].Status != edgemodel.UpgradeJobItemStatusWaitingRegistration ||
-		items[2].BaselineRegisteredAt == nil || !items[2].BaselineRegisteredAt.Equal(queuedRegistrationAt) {
+		items[2].BaselineRegisteredAt == nil || !items[2].BaselineRegisteredAt.After(queuedRegistrationAt) {
 		t.Fatalf("queued registration was treated as an upgrade result: job=%+v item=%+v", current, items[2])
 	}
 	if err := repo.SetAgentVersion(context.Background(), lastEdgeID, "v0.10.2"); err != nil {

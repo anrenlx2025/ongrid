@@ -537,6 +537,15 @@ func (u *UpgradeJobUsecase) dispatchItem(ctx context.Context, item *model.Upgrad
 		u.failDispatch(ctx, item, "fetch_failed", fmt.Sprintf("fetch package: %v", err))
 		return
 	}
+	// FetchPackage may spend minutes downloading and verifying the bundle while
+	// the existing agent remains active. Exclude any registration observed in
+	// that staging window before ApplyPackage asks the agent to restart.
+	if err := u.repo.RefreshUpgradeItemBaseline(ctx, item.ID, time.Now().UTC()); err != nil {
+		if u.log != nil {
+			u.log.Warn("refresh edge upgrade baseline before apply", slog.Uint64("item_id", item.ID), slog.Any("err", err))
+		}
+		return
+	}
 	apply, err := u.dispatcher.ApplyPackage(dispatchCtx, item.EdgeID)
 	if err != nil {
 		if errors.Is(err, context.Canceled) && ctx.Err() != nil {
