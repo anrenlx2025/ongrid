@@ -400,7 +400,7 @@ func (u *UpgradeJobUsecase) processJob(ctx context.Context, job *model.UpgradeJo
 		if err := u.startBatch(ctx, job, batchNumber); err != nil {
 			return err
 		}
-		u.dispatchQueued(ctx, batch)
+		u.dispatchQueued(ctx, batch, job.ForceReinstall)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -439,7 +439,7 @@ func (u *UpgradeJobUsecase) startBatch(ctx context.Context, job *model.UpgradeJo
 	return nil
 }
 
-func (u *UpgradeJobUsecase) dispatchQueued(ctx context.Context, items []*model.UpgradeJobItem) {
+func (u *UpgradeJobUsecase) dispatchQueued(ctx context.Context, items []*model.UpgradeJobItem, forceReinstall bool) {
 	if len(items) == 0 {
 		return
 	}
@@ -468,14 +468,14 @@ func (u *UpgradeJobUsecase) dispatchQueued(ctx context.Context, items []*model.U
 				if ctx.Err() != nil {
 					return
 				}
-				u.dispatchItemSafely(ctx, item)
+				u.dispatchItemSafely(ctx, item, forceReinstall)
 			}
 		}()
 	}
 	wg.Wait()
 }
 
-func (u *UpgradeJobUsecase) dispatchItemSafely(ctx context.Context, item *model.UpgradeJobItem) {
+func (u *UpgradeJobUsecase) dispatchItemSafely(ctx context.Context, item *model.UpgradeJobItem, forceReinstall bool) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			u.failDispatch(ctx, item, "worker_panic", fmt.Sprintf("upgrade worker panic: %v", recovered))
@@ -485,16 +485,30 @@ func (u *UpgradeJobUsecase) dispatchItemSafely(ctx context.Context, item *model.
 			}
 		}
 	}()
-	u.dispatchItem(ctx, item)
+	u.dispatchItem(ctx, item, forceReinstall)
 }
 
-func (u *UpgradeJobUsecase) dispatchItem(ctx context.Context, item *model.UpgradeJobItem) {
-	now := time.Now()
-	if err := u.repo.MarkUpgradeItemDispatching(ctx, item.ID, now); err != nil {
+func (u *UpgradeJobUsecase) dispatchItem(ctx context.Context, item *model.UpgradeJobItem, forceReinstall bool) {
+	current, err := u.edges.GetByID(ctx, item.EdgeID)
+	if err != nil {
+		u.failDispatch(ctx, item, "edge_state_unavailable", fmt.Sprintf("read edge state before dispatch: %v", err))
 		return
 	}
-	current, err := u.edges.GetByID(ctx, item.EdgeID)
-	if err == nil && hasConverged(item.BaselineRegisteredAt, current.LastRegisteredAt, current.AgentVersion, item.TargetVersion) {
+	converged := hasConverged(item.BaselineRegisteredAt, current.LastRegisteredAt, current.AgentVersion, item.TargetVersion)
+	recovered := item.Attempt > 0 && converged
+	alreadyConverged := !forceReinstall && converged
+	// Later batches may wait long enough for an unrelated re-registration. Use
+	// the state immediately before dispatch as the verification baseline, while
+	// preserving an interrupted attempt's baseline so recovery stays idempotent.
+	baseline := cloneTime(current.LastRegisteredAt)
+	if recovered || alreadyConverged {
+		baseline = cloneTime(item.BaselineRegisteredAt)
+	}
+	now := time.Now()
+	if err := u.repo.MarkUpgradeItemDispatching(ctx, item.ID, baseline, now); err != nil {
+		return
+	}
+	if recovered || alreadyConverged {
 		deadline := now.Add(u.config.VerifyTimeout)
 		if err := u.repo.MarkUpgradeItemWaiting(ctx, item.ID, deadline); err != nil {
 			if u.log != nil {

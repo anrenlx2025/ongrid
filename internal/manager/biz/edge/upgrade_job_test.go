@@ -156,6 +156,79 @@ func TestUpgradeJobRunContinuesWithoutRequestContext(t *testing.T) {
 	t.Fatal("upgrade job did not converge")
 }
 
+func TestUpgradeJobForceReinstallDoesNotShortCircuitQueuedConvergence(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:upgrade-job-force-reinstall?mode=memory&cache=shared"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatalf("gorm.Open() error = %v", err)
+	}
+	if err := store.Migrate(db); err != nil {
+		t.Fatalf("store.Migrate() error = %v", err)
+	}
+	repo := store.NewRepo(db)
+	deviceID := uint64(551)
+	registeredAt := time.Now().Add(-time.Minute)
+	edge := &edgemodel.Edge{
+		Name: "edge-force", AccessKeyID: "upgrade-job-edge-force", SecretKeyHash: "hash",
+		Status: edgemodel.StatusOnline, DeviceID: &deviceID,
+		AgentVersion: "v0.10.1", LastRegisteredAt: &registeredAt,
+	}
+	if err := repo.Create(context.Background(), edge); err != nil {
+		t.Fatalf("repo.Create() error = %v", err)
+	}
+	devices := upgradeDeviceReader{rows: map[uint64]*devicemodel.Device{
+		deviceID: {ID: deviceID, Name: "device-force", OS: "linux", Arch: "amd64", Online: true},
+	}}
+	dispatcher := &controlledUpgradeDispatcher{}
+	uc := biz.NewUpgradeJobUsecase(
+		repo, repo, devices, nil, dispatcher, upgradeResolver{},
+		biz.UpgradeJobConfig{Concurrency: 1, VerifyInterval: time.Millisecond, VerifyTimeout: time.Second}, nil,
+	)
+	job, err := uc.Create(context.Background(), biz.CreateUpgradeJobInput{
+		EdgeIDs: []uint64{edge.ID}, TargetVersion: "v0.10.2", ForceReinstall: true,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	queuedRegistrationAt := time.Now()
+	if err := repo.SetAgentVersion(context.Background(), edge.ID, "v0.10.2"); err != nil {
+		t.Fatalf("SetAgentVersion() error = %v", err)
+	}
+	if err := repo.MarkRegistered(context.Background(), edge.ID, queuedRegistrationAt); err != nil {
+		t.Fatalf("MarkRegistered() error = %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		uc.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("upgrade coordinator did not stop")
+		}
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(dispatcher.appliedIDs()) == 1 {
+			_, items, err := uc.Get(context.Background(), job.ID)
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if len(items) != 1 || items[0].BaselineRegisteredAt == nil || !items[0].BaselineRegisteredAt.Equal(queuedRegistrationAt) {
+				t.Fatalf("force reinstall dispatch baseline = %+v", items)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("force reinstall was short-circuited instead of being dispatched")
+}
+
 func TestRetryUpgradeJobRejectsDeviceRemovedFromCluster(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open("file:upgrade-job-retry-cluster?mode=memory&cache=shared"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
@@ -193,7 +266,7 @@ func TestRetryUpgradeJobRejectsDeviceRemovedFromCluster(t *testing.T) {
 	if err != nil || len(items) != 1 {
 		t.Fatalf("Get() items = %+v, error = %v", items, err)
 	}
-	if err := repo.MarkUpgradeItemDispatching(context.Background(), items[0].ID, time.Now()); err != nil {
+	if err := repo.MarkUpgradeItemDispatching(context.Background(), items[0].ID, &baseline, time.Now()); err != nil {
 		t.Fatalf("MarkUpgradeItemDispatching() error = %v", err)
 	}
 	if err := repo.MarkUpgradeItemFailed(context.Background(), items[0].ID, edgemodel.UpgradeJobItemStatusFailed,
@@ -293,6 +366,10 @@ func TestUpgradeJobRunWaitsForCurrentBatchBeforeDispatchingNext(t *testing.T) {
 	if got := dispatcher.appliedIDs(); len(got) != 2 {
 		t.Fatalf("next batch dispatched before current batch converged: %v", got)
 	}
+	queuedRegistrationAt := time.Now()
+	if err := repo.MarkRegistered(context.Background(), edges[2].ID, queuedRegistrationAt); err != nil {
+		t.Fatalf("MarkRegistered(second batch while queued) error = %v", err)
+	}
 	current, items, err := uc.Get(context.Background(), job.ID)
 	if err != nil {
 		t.Fatalf("Get(current batch) error = %v", err)
@@ -311,6 +388,15 @@ func TestUpgradeJobRunWaitsForCurrentBatchBeforeDispatchingNext(t *testing.T) {
 
 	allApplied := waitForApplied(3)
 	lastEdgeID := allApplied[2]
+	time.Sleep(25 * time.Millisecond)
+	current, items, err = uc.Get(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("Get(second batch waiting) error = %v", err)
+	}
+	if items[2].Status != edgemodel.UpgradeJobItemStatusWaitingRegistration ||
+		items[2].BaselineRegisteredAt == nil || !items[2].BaselineRegisteredAt.Equal(queuedRegistrationAt) {
+		t.Fatalf("queued registration was treated as an upgrade result: job=%+v item=%+v", current, items[2])
+	}
 	if err := repo.SetAgentVersion(context.Background(), lastEdgeID, "v0.10.2"); err != nil {
 		t.Fatalf("SetAgentVersion(second batch) error = %v", err)
 	}

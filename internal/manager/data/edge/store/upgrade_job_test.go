@@ -47,8 +47,16 @@ func TestUpgradeJobLifecycleAndRetry(t *testing.T) {
 	}
 
 	completedAt := baseline.Add(2 * time.Minute)
-	if err := repo.MarkUpgradeItemDispatching(ctx, items[0].ID, baseline.Add(time.Minute)); err != nil {
+	firstDispatchBaseline := baseline.Add(30 * time.Second)
+	if err := repo.MarkUpgradeItemDispatching(ctx, items[0].ID, &firstDispatchBaseline, baseline.Add(time.Minute)); err != nil {
 		t.Fatalf("MarkUpgradeItemDispatching(first) error = %v", err)
+	}
+	_, dispatchedItems, err := repo.GetUpgradeJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetUpgradeJob(dispatched) error = %v", err)
+	}
+	if len(dispatchedItems) != 3 || dispatchedItems[0].BaselineRegisteredAt == nil || !dispatchedItems[0].BaselineRegisteredAt.Equal(firstDispatchBaseline) {
+		t.Fatalf("dispatch baseline was not refreshed: items=%+v", dispatchedItems)
 	}
 	if err := repo.MarkUpgradeItemWaiting(ctx, items[0].ID, completedAt.Add(time.Minute)); err != nil {
 		t.Fatalf("MarkUpgradeItemWaiting(first) error = %v", err)
@@ -56,7 +64,7 @@ func TestUpgradeJobLifecycleAndRetry(t *testing.T) {
 	if err := repo.MarkUpgradeItemSucceeded(ctx, items[0].ID, "v0.10.2", &completedAt, completedAt); err != nil {
 		t.Fatalf("MarkUpgradeItemSucceeded(first) error = %v", err)
 	}
-	if err := repo.MarkUpgradeItemDispatching(ctx, items[1].ID, baseline.Add(time.Minute)); err != nil {
+	if err := repo.MarkUpgradeItemDispatching(ctx, items[1].ID, &baseline, baseline.Add(time.Minute)); err != nil {
 		t.Fatalf("MarkUpgradeItemDispatching(second) error = %v", err)
 	}
 	if err := repo.MarkUpgradeItemFailed(ctx, items[1].ID, model.UpgradeJobItemStatusFailed,
@@ -118,10 +126,10 @@ func TestRecoverUpgradeJobsRequeuesInterruptedDispatch(t *testing.T) {
 	if _, err := repo.ClaimNextUpgradeJob(ctx, time.Now()); err != nil {
 		t.Fatalf("ClaimNextUpgradeJob() error = %v", err)
 	}
-	if err := repo.MarkUpgradeItemDispatching(ctx, items[0].ID, time.Now()); err != nil {
+	if err := repo.MarkUpgradeItemDispatching(ctx, items[0].ID, nil, time.Now()); err != nil {
 		t.Fatalf("MarkUpgradeItemDispatching() error = %v", err)
 	}
-	if err := repo.MarkUpgradeItemDispatching(ctx, items[1].ID, time.Now()); err != nil {
+	if err := repo.MarkUpgradeItemDispatching(ctx, items[1].ID, nil, time.Now()); err != nil {
 		t.Fatalf("MarkUpgradeItemDispatching(waiting) error = %v", err)
 	}
 	if err := repo.MarkUpgradeItemWaiting(ctx, items[1].ID, time.Now().Add(time.Minute)); err != nil {
@@ -155,7 +163,7 @@ func TestRequeueUpgradeJobResetsStrandedDispatch(t *testing.T) {
 	if _, err := repo.ClaimNextUpgradeJob(ctx, time.Now()); err != nil {
 		t.Fatalf("ClaimNextUpgradeJob() error = %v", err)
 	}
-	if err := repo.MarkUpgradeItemDispatching(ctx, items[0].ID, time.Now()); err != nil {
+	if err := repo.MarkUpgradeItemDispatching(ctx, items[0].ID, nil, time.Now()); err != nil {
 		t.Fatalf("MarkUpgradeItemDispatching() error = %v", err)
 	}
 	if err := repo.RequeueUpgradeJob(ctx, job.ID, time.Now()); err != nil {

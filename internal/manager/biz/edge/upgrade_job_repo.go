@@ -29,7 +29,7 @@ type UpgradeJobRepo interface {
 	ClaimNextUpgradeJob(ctx context.Context, now time.Time) (*model.UpgradeJob, error)
 	SetUpgradeJobCurrentBatch(ctx context.Context, jobID uint64, batchNumber int, now time.Time) error
 	ListUpgradeJobItems(ctx context.Context, jobID uint64, statuses ...string) ([]*model.UpgradeJobItem, error)
-	MarkUpgradeItemDispatching(ctx context.Context, itemID uint64, now time.Time) error
+	MarkUpgradeItemDispatching(ctx context.Context, itemID uint64, baselineRegisteredAt *time.Time, now time.Time) error
 	MarkUpgradeItemWaiting(ctx context.Context, itemID uint64, deadline time.Time) error
 	MarkUpgradeItemSucceeded(ctx context.Context, itemID uint64, observedVersion string, observedRegisteredAt *time.Time, now time.Time) error
 	MarkUpgradeItemFailed(ctx context.Context, itemID uint64, status, code, message, observedVersion string, observedRegisteredAt *time.Time, now time.Time) error

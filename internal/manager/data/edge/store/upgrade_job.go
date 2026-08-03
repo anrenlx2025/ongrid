@@ -160,17 +160,19 @@ func (r *Repo) ListUpgradeJobItems(ctx context.Context, jobID uint64, statuses .
 	return items, nil
 }
 
-func (r *Repo) MarkUpgradeItemDispatching(ctx context.Context, itemID uint64, now time.Time) error {
+func (r *Repo) MarkUpgradeItemDispatching(ctx context.Context, itemID uint64, baselineRegisteredAt *time.Time, now time.Time) error {
 	res := r.db.WithContext(ctx).Model(&model.UpgradeJobItem{}).
 		Where("id = ? AND status = ?", itemID, model.UpgradeJobItemStatusQueued).
 		Updates(map[string]any{
-			"status":        model.UpgradeJobItemStatusDispatching,
-			"attempt":       gorm.Expr("attempt + 1"),
-			"error_code":    "",
-			"error_message": "",
-			"started_at":    now,
-			"finished_at":   nil,
-			"updated_at":    now,
+			"status":                   model.UpgradeJobItemStatusDispatching,
+			"attempt":                  gorm.Expr("attempt + 1"),
+			"error_code":               "",
+			"error_message":            "",
+			"baseline_registered_at":   baselineRegisteredAt,
+			"verification_deadline_at": nil,
+			"started_at":               now,
+			"finished_at":              nil,
+			"updated_at":               now,
 		})
 	if res.Error != nil {
 		return res.Error
