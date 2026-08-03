@@ -39,6 +39,11 @@ type Edge struct {
 	Description   string `gorm:"size:255;not null;default:''"`
 
 	LastSeenAt *time.Time `gorm:"column:last_seen_at"`
+	// LastRegisteredAt records the most recent completed register_edge
+	// handshake. Unlike LastSeenAt it is not refreshed by heartbeats, so
+	// callers can prove that an upgrade caused a fresh agent session before
+	// treating the reported version as converged.
+	LastRegisteredAt *time.Time `gorm:"column:last_registered_at"`
 	// AgentVersion is the binary semver the edge agent self-reported on
 	// its most recent register_edge handshake (e.g. "0.7.43"). Empty
 	// string for edges registered before the field was introduced or

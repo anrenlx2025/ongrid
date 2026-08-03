@@ -117,6 +117,73 @@ func TestAssignEnrollmentDeviceIsIdempotentAndRejectsAutomaticMove(t *testing.T)
 	}
 }
 
+func TestDeviceClusterMembershipIsExclusiveAndKubernetesOwned(t *testing.T) {
+	uc := newUC(t)
+	ctx := context.Background()
+	clusterA, _ := uc.CreateNode(ctx, string(model.NodeTypeCluster), "bare-metal-a", `{"source":"manual"}`)
+	clusterB, _ := uc.CreateNode(ctx, string(model.NodeTypeCluster), "bare-metal-b", `{"source":"manual"}`)
+	k8sCluster, _ := uc.CreateNode(ctx, string(model.NodeTypeCluster), "k8s", `{"source":"kubernetes"}`)
+	device, _ := uc.CreateNode(ctx, string(model.NodeTypeDevice), "host-a", "")
+
+	first, err := uc.CreateRelation(ctx, device.ID, clusterA.ID, model.RelMemberOf, `{"source":"manual"}`)
+	if err != nil {
+		t.Fatalf("CreateRelation(first): %v", err)
+	}
+	repeated, err := uc.CreateRelation(ctx, device.ID, clusterA.ID, model.RelMemberOf, `{"source":"manual"}`)
+	if err != nil || repeated.ID != first.ID {
+		t.Fatalf("CreateRelation(idempotent) = %+v, %v; want relation %d", repeated, err, first.ID)
+	}
+	if _, err := uc.CreateRelation(ctx, device.ID, clusterB.ID, model.RelMemberOf, `{"source":"manual"}`); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("CreateRelation(second cluster) error = %v, want ErrConflict", err)
+	}
+
+	k8sDevice, _ := uc.CreateNode(ctx, string(model.NodeTypeDevice), "host-k8s", "")
+	if _, err := uc.CreateRelation(ctx, k8sDevice.ID, k8sCluster.ID, model.RelMemberOf, `{"source":"manual"}`); !errors.Is(err, errs.ErrInvalid) {
+		t.Fatalf("CreateRelation(manual to k8s) error = %v, want ErrInvalid", err)
+	}
+	if _, err := uc.CreateRelation(ctx, k8sDevice.ID, clusterA.ID, model.RelMemberOf, `{"source":"kubernetes"}`); !errors.Is(err, errs.ErrInvalid) {
+		t.Fatalf("CreateRelation(k8s to manual) error = %v, want ErrInvalid", err)
+	}
+	if _, err := uc.CreateRelation(ctx, k8sDevice.ID, k8sCluster.ID, model.RelMemberOf, `{"source":"kubernetes"}`); err != nil {
+		t.Fatalf("CreateRelation(k8s membership): %v", err)
+	}
+	if _, err := uc.CreateRelation(ctx, k8sDevice.ID, clusterA.ID, model.RelMemberOf, `{"source":"manual"}`); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("CreateRelation(k8s device to manual cluster) error = %v, want ErrConflict", err)
+	}
+}
+
+type clusterDeleteGuardStub struct {
+	blockedID uint64
+}
+
+func (g clusterDeleteGuardStub) ValidateClusterDelete(_ context.Context, clusterNodeID uint64) error {
+	if clusterNodeID == g.blockedID {
+		return errs.ErrConflict
+	}
+	return nil
+}
+
+func TestDeleteClusterEnforcesRelationsAndDependentGuards(t *testing.T) {
+	uc := newUC(t)
+	ctx := context.Background()
+	cluster, _ := uc.CreateNode(ctx, string(model.NodeTypeCluster), "bare-metal", `{"source":"manual"}`)
+	device, _ := uc.CreateNode(ctx, string(model.NodeTypeDevice), "host", "")
+	relation, err := uc.CreateRelation(ctx, device.ID, cluster.ID, model.RelMemberOf, `{"source":"manual"}`)
+	if err != nil {
+		t.Fatalf("CreateRelation: %v", err)
+	}
+	if err := uc.DeleteNode(ctx, cluster.ID); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("DeleteNode(with relation) error = %v, want ErrConflict", err)
+	}
+	if err := uc.DeleteRelation(ctx, relation.ID); err != nil {
+		t.Fatalf("DeleteRelation: %v", err)
+	}
+	uc.AddClusterDeleteGuard(clusterDeleteGuardStub{blockedID: cluster.ID})
+	if err := uc.DeleteNode(ctx, cluster.ID); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("DeleteNode(blocked dependency) error = %v, want ErrConflict", err)
+	}
+}
+
 func TestValidateEnrollmentClusterRejectsKubernetesOwnedNode(t *testing.T) {
 	uc := newUC(t)
 	ctx := context.Background()
@@ -126,6 +193,33 @@ func TestValidateEnrollmentClusterRejectsKubernetesOwnedNode(t *testing.T) {
 	}
 	if err := uc.ValidateEnrollmentCluster(ctx, cluster.ID); !errors.Is(err, errs.ErrInvalid) {
 		t.Fatalf("ValidateEnrollmentCluster error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestValidateUpgradeClusterRequiresEveryRequestedMember(t *testing.T) {
+	uc := newUC(t)
+	ctx := context.Background()
+	cluster, err := uc.CreateNode(ctx, string(model.NodeTypeCluster), "bare-metal-prod", `{"source":"manual"}`)
+	if err != nil {
+		t.Fatalf("CreateNode(cluster): %v", err)
+	}
+	member, err := uc.CreateNode(ctx, string(model.NodeTypeDevice), "member", "")
+	if err != nil {
+		t.Fatalf("CreateNode(member): %v", err)
+	}
+	outsider, err := uc.CreateNode(ctx, string(model.NodeTypeDevice), "outsider", "")
+	if err != nil {
+		t.Fatalf("CreateNode(outsider): %v", err)
+	}
+	if _, err := uc.CreateRelation(ctx, member.ID, cluster.ID, model.RelMemberOf, `{"source":"manual"}`); err != nil {
+		t.Fatalf("CreateRelation(member): %v", err)
+	}
+
+	if err := uc.ValidateUpgradeCluster(ctx, cluster.ID, []uint64{member.ID}); err != nil {
+		t.Fatalf("ValidateUpgradeCluster(member) error = %v", err)
+	}
+	if err := uc.ValidateUpgradeCluster(ctx, cluster.ID, []uint64{member.ID, outsider.ID}); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("ValidateUpgradeCluster(outsider) error = %v, want ErrConflict", err)
 	}
 }
 

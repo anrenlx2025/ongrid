@@ -57,6 +57,15 @@ func (r *EnrollmentRepo) ListProfiles(ctx context.Context, filter biz.Enrollment
 	return profiles, total, nil
 }
 
+func (r *EnrollmentRepo) CountActiveProfilesForCluster(ctx context.Context, clusterNodeID uint64, now time.Time) (int64, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&model.EnrollmentProfile{}).
+		Where("cluster_node_id = ? AND assignment_mode = ? AND status = ? AND expires_at > ? AND used_count < max_uses",
+			clusterNodeID, model.EnrollmentModeCluster, model.EnrollmentStatusActive, now).
+		Count(&count).Error
+	return count, err
+}
+
 func (r *EnrollmentRepo) RevokeProfile(ctx context.Context, id uint64) error {
 	res := r.db.WithContext(ctx).Model(&model.EnrollmentProfile{}).
 		Where("id = ? AND status = ?", id, model.EnrollmentStatusActive).
@@ -74,6 +83,27 @@ func (r *EnrollmentRepo) RevokeProfile(ctx context.Context, id uint64) error {
 		}
 	}
 	return nil
+}
+
+// DeleteProfile removes the profile and its enrollment claim records in one
+// transaction. The independently issued Edge identities are not deleted.
+func (r *EnrollmentRepo) DeleteProfile(ctx context.Context, id uint64) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var profile model.EnrollmentProfile
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id").
+			Where("id = ?", id).
+			First(&profile).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrNotFound
+			}
+			return err
+		}
+		if err := tx.Where("profile_id = ?", id).Delete(&model.Enrollment{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&profile).Error
+	})
 }
 
 func (r *EnrollmentRepo) Claim(

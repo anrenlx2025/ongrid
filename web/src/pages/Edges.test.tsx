@@ -174,7 +174,7 @@ describe("EdgesPage", () => {
     const clusterLink = within(row).getByRole("link", {
       name: "所属集群 bare-metal-prod",
     });
-    expect(clusterLink).toHaveAttribute("href", "/topology");
+    expect(clusterLink).toHaveAttribute("href", "/clusters/501");
     expect(
       within(clusterLink).getByText("集群 · bare-metal-prod"),
     ).toBeInTheDocument();
@@ -433,6 +433,58 @@ describe("EdgesPage", () => {
       await within(dialog).findByText(/--enrollment-token=oen_reusable_token/),
     ).toBeInTheDocument();
     expect(within(dialog).getAllByText(/--tls-insecure/)).toHaveLength(2);
+  });
+
+  it("直接删除已有安装批次", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let deletedProfile = 0;
+    server.use(
+      http.get("/api/v1/topology/nodes", () =>
+        HttpResponse.json({ items: [], total: 0 }),
+      ),
+      http.get("/api/v1/edge-enrollment-profiles", () =>
+        HttpResponse.json({
+          items: [
+            {
+              id: 7,
+              name: "待删除批次",
+              assignment_mode: "batch_only",
+              expires_at: "2026-08-01T00:00:00Z",
+              max_uses: 100,
+              used_count: 0,
+              status: "active",
+              created_at: "2026-07-31T00:00:00Z",
+            },
+          ],
+          total: 1,
+          page: 1,
+          page_size: 100,
+        }),
+      ),
+      http.delete("/api/v1/edge-enrollment-profiles/:id", ({ params }) => {
+        deletedProfile = Number(params.id);
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+
+    try {
+      render(
+        <MemoryRouter>
+          <EdgesPage />
+        </MemoryRouter>,
+      );
+      await screen.findByText("bare-metal-1");
+      await user.click(screen.getByRole("button", { name: "批量安装设备" }));
+      const dialog = await screen.findByRole("dialog", { name: "批量安装 Edge" });
+      await within(dialog).findByText("待删除批次");
+      await user.click(within(dialog).getByRole("button", { name: "删除" }));
+
+      await waitFor(() => expect(deletedProfile).toBe(7));
+      expect(within(dialog).queryByText("待删除批次")).not.toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
   });
 
   it("没有已有集群时可直接新建并绑定批量安装命令", async () => {

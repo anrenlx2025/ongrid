@@ -126,6 +126,31 @@ type fakeSvc struct {
 	fetchManifest int             // FetchPackage.ManifestFiles to report
 }
 
+type fakeUpgradeJobSvc struct {
+	createdInput biz.CreateUpgradeJobInput
+	job          *model.UpgradeJob
+	items        []*model.UpgradeJobItem
+	retriedID    uint64
+}
+
+func (f *fakeUpgradeJobSvc) Create(_ context.Context, in biz.CreateUpgradeJobInput) (*model.UpgradeJob, error) {
+	f.createdInput = in
+	return f.job, nil
+}
+
+func (f *fakeUpgradeJobSvc) List(_ context.Context, _ biz.UpgradeJobListFilter) ([]*model.UpgradeJob, int64, error) {
+	return []*model.UpgradeJob{f.job}, 1, nil
+}
+
+func (f *fakeUpgradeJobSvc) Get(_ context.Context, _ uint64) (*model.UpgradeJob, []*model.UpgradeJobItem, error) {
+	return f.job, f.items, nil
+}
+
+func (f *fakeUpgradeJobSvc) Retry(_ context.Context, id uint64) (*model.UpgradeJob, error) {
+	f.retriedID = id
+	return f.job, nil
+}
+
 func (f *fakeSvc) Create(_ context.Context, _ string, createdBy *uint64) (*biz.CreateResult, error) {
 	f.lastCreatedBy = createdBy
 	return f.createResp, f.createErr
@@ -426,6 +451,39 @@ func (fakePkgResolver) ResolveBundle(_ string, _ string) (string, string, string
 	return "https://example/ongrid-edge", strings.Repeat("a", 64), "v9.9.9", nil
 }
 
+type fakePkgCatalogResolver struct{ fakePkgResolver }
+
+func (fakePkgCatalogResolver) CurrentBundles() (BundleCatalog, error) {
+	return BundleCatalog{
+		ManagerVersion: "v9.9.9",
+		Items: []BundleInfo{
+			{Arch: "linux-amd64", Version: "v9.9.9", Available: true, Bytes: 42, SHA256: strings.Repeat("a", 64)},
+			{Arch: "linux-arm64", Version: "v9.9.9", Available: false, Error: "bundle file is missing"},
+		},
+	}, nil
+}
+
+func TestListEdgeBundles(t *testing.T) {
+	h := NewHandler(&fakeSvc{}, newFakeDeviceRepo(), nil)
+	h.SetPackageResolver(fakePkgCatalogResolver{})
+	router := buildRouter(h, tenantctx.Tenant{UserID: 1, Role: "user"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge-bundles", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var catalog BundleCatalog
+	if err := json.Unmarshal(w.Body.Bytes(), &catalog); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if catalog.ManagerVersion != "v9.9.9" || len(catalog.Items) != 2 || !catalog.Items[0].Available || catalog.Items[1].Available {
+		t.Fatalf("catalog = %+v", catalog)
+	}
+}
+
 func postJSON(router http.Handler, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -584,5 +642,69 @@ func TestBatchUpgradePackage_NotWired(t *testing.T) {
 	}
 	if len(svc.fetchIDs) != 0 {
 		t.Errorf("fetch should not run when resolver missing; got %v", svc.fetchIDs)
+	}
+}
+
+func TestCreateUpgradeJobPersistsCallerAndScope(t *testing.T) {
+	now := time.Date(2026, 7, 31, 9, 30, 0, 0, time.UTC)
+	jobSvc := &fakeUpgradeJobSvc{job: &model.UpgradeJob{
+		ID: 41, TargetVersion: "v0.10.2", Status: model.UpgradeJobStatusQueued,
+		BatchSize: 10, CurrentBatch: 0, TotalBatches: 1,
+		Total: 2, Pending: 2, CreatedAt: now, UpdatedAt: now,
+	}}
+	h := NewHandler(&fakeSvc{}, newFakeDeviceRepo(), nil)
+	h.SetUpgradeJobService(jobSvc)
+	router := buildRouter(h, tenantctx.Tenant{UserID: 77, Role: "admin"})
+
+	w := postJSON(router, "/v1/edge-upgrade-jobs", `{"edge_ids":[67,68],"target_version":"v0.10.2","cluster_node_id":101}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", w.Code, w.Body.String())
+	}
+	if jobSvc.createdInput.CreatedBy == nil || *jobSvc.createdInput.CreatedBy != 77 || jobSvc.createdInput.ClusterNodeID == nil || *jobSvc.createdInput.ClusterNodeID != 101 {
+		t.Fatalf("created input = %+v", jobSvc.createdInput)
+	}
+	if len(jobSvc.createdInput.EdgeIDs) != 2 || jobSvc.createdInput.TargetVersion != "v0.10.2" {
+		t.Fatalf("created input = %+v", jobSvc.createdInput)
+	}
+	var body upgradeJobDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.ID != 41 || body.Pending != 2 || body.Status != model.UpgradeJobStatusQueued ||
+		body.BatchSize != 10 || body.CurrentBatch != 0 || body.TotalBatches != 1 {
+		t.Fatalf("response = %+v", body)
+	}
+}
+
+func TestGetAndRetryUpgradeJob(t *testing.T) {
+	now := time.Date(2026, 7, 31, 9, 30, 0, 0, time.UTC)
+	jobSvc := &fakeUpgradeJobSvc{
+		job: &model.UpgradeJob{ID: 42, TargetVersion: "v0.10.2", Status: model.UpgradeJobStatusFailed,
+			BatchSize: 10, CurrentBatch: 1, TotalBatches: 1, Total: 1, Failed: 1, CreatedAt: now, UpdatedAt: now},
+		items: []*model.UpgradeJobItem{{ID: 5, JobID: 42, EdgeID: 68, DeviceName: "ubuntu-x86", BatchNumber: 1,
+			Status: model.UpgradeJobItemStatusFailed, ErrorCode: "fetch_failed", CreatedAt: now, UpdatedAt: now}},
+	}
+	h := NewHandler(&fakeSvc{}, newFakeDeviceRepo(), nil)
+	h.SetUpgradeJobService(jobSvc)
+	router := buildRouter(h, tenantctx.Tenant{UserID: 1, Role: "admin"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge-upgrade-jobs/42", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get status = %d; body=%s", w.Code, w.Body.String())
+	}
+	var detail upgradeJobDetailResp
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if detail.Job.ID != 42 || detail.Job.CurrentBatch != 1 || detail.Job.TotalBatches != 1 ||
+		len(detail.Items) != 1 || detail.Items[0].DeviceName != "ubuntu-x86" || detail.Items[0].BatchNumber != 1 {
+		t.Fatalf("detail = %+v", detail)
+	}
+
+	retry := postJSON(router, "/v1/edge-upgrade-jobs/42/retry", `{}`)
+	if retry.Code != http.StatusAccepted || jobSvc.retriedID != 42 {
+		t.Fatalf("retry status=%d retriedID=%d body=%s", retry.Code, jobSvc.retriedID, retry.Body.String())
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	biz "github.com/ongridio/ongrid/internal/manager/biz/topology"
 	model "github.com/ongridio/ongrid/internal/manager/model/topology"
@@ -20,7 +21,45 @@ func NewRelationRepo(db *gorm.DB) *RelationRepo { return &RelationRepo{db: db} }
 var _ biz.RelationRepo = (*RelationRepo)(nil)
 
 func (r *RelationRepo) Create(ctx context.Context, rel *model.Relation) error {
-	return r.db.WithContext(ctx).Create(rel).Error
+	if rel == nil {
+		return errs.ErrInvalid
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var endpoints []*model.Node
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id IN ?", []uint64{rel.SrcID, rel.DstID}).
+			Order("id ASC").
+			Find(&endpoints).Error; err != nil {
+			return err
+		}
+		if len(endpoints) != 2 {
+			return errs.ErrNotFound
+		}
+		byID := make(map[uint64]*model.Node, len(endpoints))
+		for _, endpoint := range endpoints {
+			byID[endpoint.ID] = endpoint
+		}
+		if rel.Type == model.RelMemberOf &&
+			byID[rel.SrcID].Type == string(model.NodeTypeDevice) &&
+			byID[rel.DstID].Type == string(model.NodeTypeCluster) {
+			var existing model.Relation
+			err := tx.Model(&model.Relation{}).
+				Joins("JOIN nodes AS cluster_nodes ON cluster_nodes.id = relations.dst_id AND cluster_nodes.deleted_at IS NULL").
+				Where("relations.src_id = ? AND relations.type = ? AND cluster_nodes.type = ?", rel.SrcID, model.RelMemberOf, model.NodeTypeCluster).
+				Order("relations.id ASC").
+				First(&existing).Error
+			switch {
+			case err == nil && existing.DstID == rel.DstID:
+				*rel = existing
+				return nil
+			case err == nil:
+				return errs.ErrConflict
+			case !errors.Is(err, gorm.ErrRecordNotFound):
+				return err
+			}
+		}
+		return tx.Create(rel).Error
+	})
 }
 
 func (r *RelationRepo) Update(ctx context.Context, id uint64, propsJSON string) error {

@@ -61,6 +61,9 @@ func (r *fakeEdgeRepo) UpdateSecretHash(_ context.Context, _ uint64, _ string) e
 func (r *fakeEdgeRepo) UpdateStatus(_ context.Context, _ uint64, _ string, _ time.Time) error {
 	return nil
 }
+func (r *fakeEdgeRepo) MarkRegistered(_ context.Context, _ uint64, _ time.Time) error {
+	return nil
+}
 func (r *fakeEdgeRepo) UpdateRoles(_ context.Context, _ uint64, _ uint8) error      { return nil }
 func (r *fakeEdgeRepo) UpdateName(_ context.Context, _ uint64, _ string) error      { return nil }
 func (r *fakeEdgeRepo) SetDeviceID(_ context.Context, _ uint64, _ uint64) error     { return nil }

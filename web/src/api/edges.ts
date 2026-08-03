@@ -1,27 +1,32 @@
-import { request } from './client';
+import { request } from "./client";
 
-export type EdgeStatus = 'online' | 'offline' | 'unknown';
+export type EdgeStatus = "online" | "offline" | "unknown";
 
 // EdgeRole drives the sidebar 设备 sub-menu and AI prompt routing.
 // Backend stores a bit field; the wire shape is an array of these names.
 // One device can carry multiple roles (e.g. a hyper-converged box that's
 // both server + storage).
-export type EdgeRole = 'server' | 'storage' | 'network' | 'database';
+export type EdgeRole = "server" | "storage" | "network" | "database";
 
-export const EDGE_ROLES: EdgeRole[] = ['server', 'storage', 'network', 'database'];
+export const EDGE_ROLES: EdgeRole[] = [
+  "server",
+  "storage",
+  "network",
+  "database",
+];
 
 export const EDGE_ROLE_LABELS: Record<EdgeRole, string> = {
-  server: '服务器',
-  storage: '存储',
-  network: '网络设备',
-  database: '数据库',
+  server: "服务器",
+  storage: "存储",
+  network: "网络设备",
+  database: "数据库",
 };
 
 export const EDGE_ROLE_LABELS_EN: Record<EdgeRole, string> = {
-  server: 'Server',
-  storage: 'Storage',
-  network: 'Network',
-  database: 'Database',
+  server: "Server",
+  storage: "Storage",
+  network: "Network",
+  database: "Database",
 };
 
 export type Edge = {
@@ -33,6 +38,9 @@ export type Edge = {
   roles: EdgeRole[];
   access_key_id: string;
   last_seen_at: string | null;
+  // Updated only after a complete register_edge handshake. Heartbeats do not
+  // change it, so upgrade flows can verify that a fresh agent session came up.
+  last_registered_at?: string | null;
   created_at?: string;
   updated_at?: string;
   host_info?: Record<string, unknown> | string | null;
@@ -54,7 +62,10 @@ export type UpgradeAgentResponse = {
 };
 
 export function upgradeEdgeAgent(id: number, url: string, sha256: string) {
-  return request<UpgradeAgentResponse>('POST', `/edges/${id}/upgrade`, { url, sha256 });
+  return request<UpgradeAgentResponse>("POST", `/edges/${id}/upgrade`, {
+    url,
+    sha256,
+  });
 }
 
 // one-button upgrade. Server resolves the bundle (URL + sha)
@@ -69,8 +80,15 @@ export type UpgradePackageResponse = {
   apply_error?: string;
 };
 
-export function upgradeEdgePackage(id: number, opts?: { arch?: string; version?: string }) {
-  return request<UpgradePackageResponse>('POST', `/edges/${id}/upgrade-package`, opts ?? {});
+export function upgradeEdgePackage(
+  id: number,
+  opts?: { arch?: string; version?: string },
+) {
+  return request<UpgradePackageResponse>(
+    "POST",
+    `/edges/${id}/upgrade-package`,
+    opts ?? {},
+  );
 }
 
 // --- batch fleet operations ---------------------------------------
@@ -97,18 +115,153 @@ export type BatchResponse = {
 
 // Batch one-button bundle upgrade. Manager resolves url+sha once from
 // the shared arch+version, then fans out fetch_package + apply_package.
-export function batchUpgradeEdgePackage(ids: number[], opts?: { arch?: string; version?: string }) {
-  return request<BatchResponse>('POST', '/edges/batch/upgrade-package', { ids, ...(opts ?? {}) });
+export function batchUpgradeEdgePackage(
+  ids: number[],
+  opts?: { arch?: string; version?: string },
+) {
+  return request<BatchResponse>("POST", "/edges/batch/upgrade-package", {
+    ids,
+    ...(opts ?? {}),
+  });
+}
+
+export type EdgeUpgradeBundle = {
+  arch: "linux-amd64" | "linux-arm64";
+  version: string;
+  available: boolean;
+  bytes?: number;
+  sha256?: string;
+  modified_at?: string;
+  error?: string;
+};
+
+export type EdgeUpgradeBundleCatalog = {
+  manager_version: string;
+  items: EdgeUpgradeBundle[];
+};
+
+// Read-only metadata for the manager-version bundles. Missing artifacts are
+// returned as available=false rows so callers can block affected architectures
+// before triggering an upgrade.
+export function listEdgeUpgradeBundles() {
+  return request<EdgeUpgradeBundleCatalog>("GET", "/edge-bundles");
+}
+
+export type EdgeUpgradeJobStatus =
+  "queued" | "running" | "succeeded" | "partial_failed" | "failed";
+
+export type EdgeUpgradeJobItemStatus =
+  | "queued"
+  | "dispatching"
+  | "waiting_registration"
+  | "succeeded"
+  | "failed"
+  | "timed_out"
+  | "skipped";
+
+export type EdgeUpgradeJob = {
+  id: number;
+  cluster_node_id?: number;
+  target_version: string;
+  status: EdgeUpgradeJobStatus;
+  force_reinstall: boolean;
+  batch_size: number;
+  current_batch: number;
+  total_batches: number;
+  total: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  pending: number;
+  created_by?: number;
+  started_at?: string;
+  finished_at?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type EdgeUpgradeJobItem = {
+  id: number;
+  job_id: number;
+  edge_id: number;
+  device_id?: number;
+  edge_name: string;
+  device_name: string;
+  arch: string;
+  from_version: string;
+  target_version: string;
+  batch_number: number;
+  status: EdgeUpgradeJobItemStatus;
+  attempt: number;
+  error_code?: string;
+  error_message?: string;
+  observed_version?: string;
+  baseline_registered_at?: string;
+  observed_registered_at?: string;
+  verification_deadline_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type EdgeUpgradeJobDetail = {
+  job: EdgeUpgradeJob;
+  items: EdgeUpgradeJobItem[];
+};
+
+export function createEdgeUpgradeJob(input: {
+  edge_ids: number[];
+  target_version: string;
+  cluster_node_id?: number;
+  force_reinstall?: boolean;
+}) {
+  return request<EdgeUpgradeJob>("POST", "/edge-upgrade-jobs", input);
+}
+
+export function listEdgeUpgradeJobs(params?: {
+  clusterNodeId?: number;
+  page?: number;
+  pageSize?: number;
+}) {
+  const query = new URLSearchParams();
+  if (params?.clusterNodeId)
+    query.set("cluster_node_id", String(params.clusterNodeId));
+  if (params?.page) query.set("page", String(params.page));
+  if (params?.pageSize) query.set("page_size", String(params.pageSize));
+  const suffix = query.toString();
+  return request<{
+    items: EdgeUpgradeJob[];
+    total: number;
+    page: number;
+    page_size: number;
+  }>("GET", `/edge-upgrade-jobs${suffix ? `?${suffix}` : ""}`);
+}
+
+export function getEdgeUpgradeJob(id: number) {
+  return request<EdgeUpgradeJobDetail>("GET", `/edge-upgrade-jobs/${id}`);
+}
+
+export function retryEdgeUpgradeJob(id: number) {
+  return request<EdgeUpgradeJob>("POST", `/edge-upgrade-jobs/${id}/retry`, {});
 }
 
 // Batch custom upgrade — the same URL + sha256 dispatched to every id.
-export function batchUpgradeEdgeAgent(ids: number[], url: string, sha256: string) {
-  return request<BatchResponse>('POST', '/edges/batch/upgrade', { ids, url, sha256 });
+export function batchUpgradeEdgeAgent(
+  ids: number[],
+  url: string,
+  sha256: string,
+) {
+  return request<BatchResponse>("POST", "/edges/batch/upgrade", {
+    ids,
+    url,
+    sha256,
+  });
 }
 
 // Batch soft-delete.
 export function batchDeleteEdges(ids: number[]) {
-  return request<BatchResponse>('POST', '/edges/batch/delete', { ids });
+  return request<BatchResponse>("POST", "/edges/batch/delete", { ids });
 }
 
 export type EdgeProcess = {
@@ -127,12 +280,18 @@ export type EdgeProcessesResp = {
 
 // Reads top-N processes via tunnel RPC. sort_by = 'cpu' | 'mem'; default
 // mem (Monitor panel's primary use case is "what's eating memory").
-export function listEdgeProcesses(id: number, opts?: { topN?: number; sortBy?: 'cpu' | 'mem' }) {
+export function listEdgeProcesses(
+  id: number,
+  opts?: { topN?: number; sortBy?: "cpu" | "mem" },
+) {
   const q = new URLSearchParams();
-  if (opts?.topN) q.set('top_n', String(opts.topN));
-  if (opts?.sortBy) q.set('sort_by', opts.sortBy);
+  if (opts?.topN) q.set("top_n", String(opts.topN));
+  if (opts?.sortBy) q.set("sort_by", opts.sortBy);
   const qs = q.toString();
-  return request<EdgeProcessesResp>('GET', `/edges/${id}/processes${qs ? `?${qs}` : ''}`);
+  return request<EdgeProcessesResp>(
+    "GET",
+    `/edges/${id}/processes${qs ? `?${qs}` : ""}`,
+  );
 }
 
 export type CreateEdgeResponse = {
@@ -143,7 +302,7 @@ export type CreateEdgeResponse = {
   created_at: string;
 };
 
-export type EnrollmentAssignmentMode = 'batch_only' | 'cluster';
+export type EnrollmentAssignmentMode = "batch_only" | "cluster";
 
 export type EdgeEnrollmentProfile = {
   id: number;
@@ -153,7 +312,7 @@ export type EdgeEnrollmentProfile = {
   expires_at: string;
   max_uses: number;
   used_count: number;
-  status: 'active' | 'revoked' | 'expired' | 'exhausted';
+  status: "active" | "revoked" | "expired" | "exhausted";
   created_at: string;
 };
 
@@ -190,16 +349,16 @@ export type MetricsResponse = {
 export function listEdges(params?: { roles?: string }) {
   const qs = params?.roles
     ? `?${new URLSearchParams({ roles: params.roles }).toString()}`
-    : '';
-  return request<{ items: Edge[]; total: number }>('GET', `/edges${qs}`);
+    : "";
+  return request<{ items: Edge[]; total: number }>("GET", `/edges${qs}`);
 }
 
 export function getEdge(id: string | number) {
-  return request<Edge>('GET', `/edges/${encodeURIComponent(String(id))}`);
+  return request<Edge>("GET", `/edges/${encodeURIComponent(String(id))}`);
 }
 
 export function createEdge(input: { name: string }) {
-  return request<CreateEdgeResponse>('POST', '/edges', input);
+  return request<CreateEdgeResponse>("POST", "/edges", input);
 }
 
 export function createEdgeEnrollmentProfile(input: {
@@ -210,34 +369,39 @@ export function createEdgeEnrollmentProfile(input: {
   max_uses: number;
 }) {
   return request<CreateEdgeEnrollmentProfileResponse>(
-    'POST',
-    '/edge-enrollment-profiles',
+    "POST",
+    "/edge-enrollment-profiles",
     input,
   );
 }
 
-export function listEdgeEnrollmentProfiles(params?: { page?: number; pageSize?: number }) {
+export function listEdgeEnrollmentProfiles(params?: {
+  page?: number;
+  pageSize?: number;
+}) {
   const qs = new URLSearchParams();
-  if (params?.page) qs.set('page', String(params.page));
-  if (params?.pageSize) qs.set('page_size', String(params.pageSize));
+  if (params?.page) qs.set("page", String(params.page));
+  if (params?.pageSize) qs.set("page_size", String(params.pageSize));
   const suffix = qs.toString();
-  return request<{ items: EdgeEnrollmentProfile[]; total: number; page: number; page_size: number }>(
-    'GET',
-    `/edge-enrollment-profiles${suffix ? `?${suffix}` : ''}`,
-  );
+  return request<{
+    items: EdgeEnrollmentProfile[];
+    total: number;
+    page: number;
+    page_size: number;
+  }>("GET", `/edge-enrollment-profiles${suffix ? `?${suffix}` : ""}`);
 }
 
-export function revokeEdgeEnrollmentProfile(id: number) {
-  return request<void>('POST', `/edge-enrollment-profiles/${id}/revoke`);
+export function deleteEdgeEnrollmentProfile(id: number) {
+  return request<void>("DELETE", `/edge-enrollment-profiles/${id}`);
 }
 
 export function deleteEdge(id: string | number) {
-  return request<void>('DELETE', `/edges/${encodeURIComponent(String(id))}`);
+  return request<void>("DELETE", `/edges/${encodeURIComponent(String(id))}`);
 }
 
 export function rotateSecret(id: string | number) {
   return request<RotateSecretResponse>(
-    'POST',
+    "POST",
     `/edges/${encodeURIComponent(String(id))}/rotate-secret`,
   );
 }
@@ -249,7 +413,7 @@ export function rotateSecret(id: string | number) {
 // reported its host_info at least once); otherwise this rejects.
 export function setEdgeRoles(deviceId: number | string, roles: EdgeRole[]) {
   return request<void>(
-    'PATCH',
+    "PATCH",
     `/devices/${encodeURIComponent(String(deviceId))}/roles`,
     { roles },
   );
@@ -262,10 +426,10 @@ export function getMetrics(
   const qs = new URLSearchParams({
     from: params.from,
     to: params.to,
-    resolution: params.resolution ?? 'raw',
+    resolution: params.resolution ?? "raw",
   }).toString();
   return request<MetricsResponse>(
-    'GET',
+    "GET",
     `/edges/${encodeURIComponent(String(id))}/metrics?${qs}`,
   );
 }
@@ -299,5 +463,5 @@ export function promQueryRange(input: {
     end: input.to,
     step: input.step,
   }).toString();
-  return request<PromRangeResp>('GET', `/metrics/query_range?${qs}`);
+  return request<PromRangeResp>("GET", `/metrics/query_range?${qs}`);
 }

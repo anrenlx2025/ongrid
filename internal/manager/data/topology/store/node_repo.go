@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	biz "github.com/ongridio/ongrid/internal/manager/biz/topology"
 	model "github.com/ongridio/ongrid/internal/manager/model/topology"
@@ -92,14 +93,25 @@ func (r *NodeRepo) Count(ctx context.Context, f biz.NodeListFilter) (int64, erro
 }
 
 func (r *NodeRepo) Delete(ctx context.Context, id uint64) error {
-	res := r.db.WithContext(ctx).Where("id = ?", id).Delete(&model.Node{})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return errs.ErrNotFound
-	}
-	return nil
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var node model.Node
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).First(&node).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrNotFound
+			}
+			return err
+		}
+		var references int64
+		if err := tx.Model(&model.Relation{}).
+			Where("src_id = ? OR dst_id = ?", id, id).
+			Count(&references).Error; err != nil {
+			return err
+		}
+		if references > 0 {
+			return errs.ErrConflict
+		}
+		return tx.Delete(&node).Error
+	})
 }
 
 func applyNodeFilter(q *gorm.DB, f biz.NodeListFilter) *gorm.DB {

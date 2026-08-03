@@ -26,6 +26,7 @@ type EnrollmentHTTPService interface {
 	CreateProfile(ctx context.Context, in biz.CreateEnrollmentProfileInput) (*biz.CreateEnrollmentProfileResult, error)
 	ListProfiles(ctx context.Context, filter biz.EnrollmentProfileListFilter) ([]*model.EnrollmentProfile, int64, error)
 	RevokeProfile(ctx context.Context, id uint64) error
+	DeleteProfile(ctx context.Context, id uint64) error
 	Enroll(ctx context.Context, in biz.EnrollInput) (*biz.EnrollResult, error)
 }
 
@@ -43,12 +44,15 @@ func (h *EnrollmentHandler) SetAuthz(authz AuthzMW) { h.authz = authz }
 
 func (h *EnrollmentHandler) RegisterProtected(r chi.Router) {
 	write := h.requireAdmin
+	destroy := h.requireAdmin
 	if h.authz != nil {
 		write = h.authz.Require("edge:*", "write")
+		destroy = h.authz.Require("edge:*", "delete")
 	}
 	r.With(write).Post("/v1/edge-enrollment-profiles", h.createProfile)
 	r.With(write).Get("/v1/edge-enrollment-profiles", h.listProfiles)
 	r.With(write).Post("/v1/edge-enrollment-profiles/{id}/revoke", h.revokeProfile)
+	r.With(destroy).Delete("/v1/edge-enrollment-profiles/{id}", h.deleteProfile)
 }
 
 // RegisterInternal exposes only the capability-token bootstrap endpoint. It
@@ -176,6 +180,23 @@ func (h *EnrollmentHandler) revokeProfile(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := h.svc.RevokeProfile(r.Context(), id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteProfile godoc
+// @Summary 删除非 Kubernetes Edge 批量安装配置
+// @Success 204
+// @Router /api/v1/edge-enrollment-profiles/{id} [delete]
+func (h *EnrollmentHandler) deleteProfile(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseUint(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id == 0 {
+		writeErr(w, errors.Join(errs.ErrInvalid, err))
+		return
+	}
+	if err := h.svc.DeleteProfile(r.Context(), id); err != nil {
 		writeErr(w, err)
 		return
 	}

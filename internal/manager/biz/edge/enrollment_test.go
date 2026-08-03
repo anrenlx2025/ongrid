@@ -2,16 +2,19 @@ package edge
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	model "github.com/ongridio/ongrid/internal/manager/model/edge"
+	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 )
 
 type enrollmentRepoStub struct {
-	profile *model.EnrollmentProfile
-	edge    *model.Edge
+	profile             *model.EnrollmentProfile
+	edge                *model.Edge
+	activeClusterCounts map[uint64]int64
 }
 
 func (r *enrollmentRepoStub) CreateProfile(context.Context, *model.EnrollmentProfile) error {
@@ -26,7 +29,13 @@ func (r *enrollmentRepoStub) ListProfiles(context.Context, EnrollmentProfileList
 	return nil, 0, nil
 }
 
+func (r *enrollmentRepoStub) CountActiveProfilesForCluster(_ context.Context, clusterNodeID uint64, _ time.Time) (int64, error) {
+	return r.activeClusterCounts[clusterNodeID], nil
+}
+
 func (r *enrollmentRepoStub) RevokeProfile(context.Context, uint64) error { return nil }
+
+func (r *enrollmentRepoStub) DeleteProfile(context.Context, uint64) error { return nil }
 
 func (r *enrollmentRepoStub) Claim(context.Context, string, string, string, *model.Edge, time.Time) (*model.EnrollmentProfile, *model.Enrollment, *model.Edge, bool, error) {
 	return r.profile, &model.Enrollment{ID: 1, ProfileID: r.profile.ID, EdgeID: r.edge.ID}, r.edge, true, nil
@@ -68,5 +77,17 @@ func TestEnrollWithoutPluginSeederStillReturnsCredentials(t *testing.T) {
 	}
 	if result.EdgeID != 42 || result.AccessKey != "access-key" || result.SecretKey == "" {
 		t.Fatalf("Enroll() result = %#v", result)
+	}
+}
+
+func TestValidateClusterDeleteRejectsActiveEnrollmentProfile(t *testing.T) {
+	repo := &enrollmentRepoStub{activeClusterCounts: map[uint64]int64{101: 1}}
+	uc := NewEnrollmentUsecase(repo, nil, nil, EnrollmentConfig{}, nil)
+
+	if err := uc.ValidateClusterDelete(context.Background(), 101); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("ValidateClusterDelete(active) error = %v, want ErrConflict", err)
+	}
+	if err := uc.ValidateClusterDelete(context.Background(), 102); err != nil {
+		t.Fatalf("ValidateClusterDelete(empty) error = %v", err)
 	}
 }

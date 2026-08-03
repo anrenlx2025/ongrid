@@ -82,6 +82,24 @@ func TestSQLiteRoundTrip(t *testing.T) {
 	if got3.LastSeenAt == nil || !got3.LastSeenAt.Equal(when) {
 		t.Errorf("last_seen_at = %v, want %v", got3.LastSeenAt, when)
 	}
+	if got3.LastRegisteredAt != nil {
+		t.Errorf("heartbeat-style status update changed LastRegisteredAt = %v", got3.LastRegisteredAt)
+	}
+
+	registeredAt := when.Add(time.Minute)
+	if err := repo.MarkRegistered(ctx, e.ID, registeredAt); err != nil {
+		t.Fatalf("MarkRegistered: %v", err)
+	}
+	registered, err := repo.GetByID(ctx, e.ID)
+	if err != nil {
+		t.Fatalf("GetByID after MarkRegistered: %v", err)
+	}
+	if registered.LastRegisteredAt == nil || !registered.LastRegisteredAt.Equal(registeredAt) {
+		t.Errorf("last_registered_at = %v, want %v", registered.LastRegisteredAt, registeredAt)
+	}
+	if registered.LastSeenAt == nil || !registered.LastSeenAt.Equal(registeredAt) {
+		t.Errorf("last_seen_at = %v, want %v", registered.LastSeenAt, registeredAt)
+	}
 
 	// UpdateSecretHash
 	if err := repo.UpdateSecretHash(ctx, e.ID, "new-hash"); err != nil {

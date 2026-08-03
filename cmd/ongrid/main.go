@@ -818,8 +818,10 @@ func main() {
 	if edgeBundleDir == "" {
 		edgeBundleDir = "/usr/share/ongrid/edge-bundles"
 	}
+	var edgeBundleResolver *managerserveredge.FileBundleResolver
 	if _, err := os.Stat(edgeBundleDir); err == nil {
-		edgeHandler.SetPackageResolver(managerserveredge.NewFileBundleResolver(edgeBundleDir, version, cfg.PublicURL))
+		edgeBundleResolver = managerserveredge.NewFileBundleResolver(edgeBundleDir, version, cfg.PublicURL)
+		edgeHandler.SetPackageResolver(edgeBundleResolver)
 	} else {
 		log.Warn("edge bundle dir missing; package upgrade endpoint will 503",
 			slog.String("dir", edgeBundleDir), slog.Any("err", err))
@@ -837,7 +839,27 @@ func main() {
 	topologyUC := managerbiztopology.NewUsecase(
 		topologyNodeRepo, topologyRelationRepo, topologyRelationTypeRepo, topologyNodeTypeRepo, log,
 	)
+	topologyUC.AddClusterDeleteGuard(managerbizedge.NewUpgradeJobClusterDeleteGuard(edgeRepo))
 	topologyHandler := managerservertopology.NewHandler(topologyUC)
+
+	// Persistent package rollout coordinator. It owns job/item records and
+	// continues dispatch + registration verification after the initiating
+	// browser disconnects. When bundles are unavailable the legacy endpoints
+	// keep their existing degraded behavior and job creation stays unwired.
+	var edgeUpgradeJobUC *managerbizedge.UpgradeJobUsecase
+	if edgeBundleResolver != nil {
+		edgeUpgradeJobUC = managerbizedge.NewUpgradeJobUsecase(
+			edgeRepo,
+			edgeRepo,
+			deviceRepo,
+			topologyUC,
+			edgeSvc,
+			edgeBundleResolver,
+			managerbizedge.UpgradeJobConfig{},
+			log.With(slog.String("comp", "edge-upgrade-job")),
+		)
+		edgeHandler.SetUpgradeJobService(managersvcedge.NewUpgradeJobs(edgeUpgradeJobUC))
+	}
 
 	// Non-Kubernetes fleet enrollment: a short-lived reusable profile issues
 	// one independent Edge identity per host. Cluster assignment is delegated
@@ -854,6 +876,7 @@ func main() {
 	edgeEnrollmentHandler := managerserveredge.NewEnrollmentHandler(edgeEnrollmentSvc)
 	edgeEnrollmentHandler.SetAuthz(authzMW)
 	edgeUC.SetEnrollmentFinalizer(edgeEnrollmentUC)
+	topologyUC.AddClusterDeleteGuard(edgeEnrollmentUC)
 
 	// device→topology mirror. Plug the topology UC into edge UC
 	// so the register flow drops a `nodes` row alongside each new
@@ -2394,6 +2417,12 @@ func main() {
 	// eg.Go(func() error { return metricIngester.Start(egCtx) })
 	eg.Go(func() error { return apiServer.Start(egCtx) })
 	eg.Go(func() error { return metricsServer.Start(egCtx) })
+	if edgeUpgradeJobUC != nil {
+		eg.Go(func() error {
+			edgeUpgradeJobUC.Run(egCtx)
+			return nil
+		})
+	}
 
 	// ADR-026: DB pool sampler ticks every 10s. database/sql.DBStats is
 	// the canonical source for OpenConnections / InUse / Idle / WaitCount
