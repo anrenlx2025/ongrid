@@ -93,7 +93,8 @@ func (m *memSessions) GetSession(_ context.Context, id string) (*model.Session, 
 	if !ok {
 		return nil, errs.ErrNotFound
 	}
-	return s, nil
+	cp := *s
+	return &cp, nil
 }
 func (m *memSessions) ListSessions(_ context.Context, _ uint64, _, _ int, _ *uint64) ([]*model.Session, error) {
 	return nil, nil
@@ -167,6 +168,25 @@ func (m *memSessions) UpdateToolCallResult(_ context.Context, id string, status 
 }
 func (m *memSessions) SumTokensSince(_ context.Context, _ time.Time) (biz.TokenSums, error) {
 	return biz.TokenSums{}, nil
+}
+
+func TestMemSessions_GetSessionReturnsSnapshot(t *testing.T) {
+	store := newMemSessions(&model.Session{ID: "session-1"})
+
+	row, err := store.GetSession(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	now := time.Now().UTC()
+	row.ClosedAt = &now
+
+	stored, err := store.GetSession(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("GetSession after mutating snapshot: %v", err)
+	}
+	if stored.ClosedAt != nil {
+		t.Fatalf("stored ClosedAt = %v after mutating snapshot, want nil", stored.ClosedAt)
+	}
 }
 
 var idCounter atomic.Int64
