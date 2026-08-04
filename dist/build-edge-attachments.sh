@@ -69,8 +69,17 @@ mongodb_exporter=${MONGODB_EXPORTER_VERSION}
 release_tag=${IDENTIFIER}
 EOF
             (cd "$stage" && sha256sum TARGET DEPENDENCIES "${deps[@]}" > MANIFEST.sha256)
+            archive_files=(TARGET DEPENDENCIES MANIFEST.sha256 "${deps[@]}")
+            chmod 0644 "$stage/TARGET" "$stage/DEPENDENCIES" "$stage/MANIFEST.sha256"
+            TZ=UTC touch -t 200001010000.00 "${archive_files[@]/#/$stage/}"
             output="$OUT_DIR/edge-deps-${target}.tar.xz"
-            tar -C "$stage" -cf - . | xz -T0 -9 -c > "$output"
+            if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+                tar --format=ustar --owner=0 --group=0 --numeric-owner \
+                    -C "$stage" -cf - "${archive_files[@]}"
+            else
+                COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root \
+                    -C "$stage" -cf - "${archive_files[@]}"
+            fi | xz -T0 --block-size=64MiB -9 -c > "$output"
             write_sidecar "$output"
             ;;
         edge)

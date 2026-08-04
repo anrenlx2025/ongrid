@@ -207,6 +207,7 @@ preflight_runtime_images() {
 
 EDGE_STAGE_DIR=""
 EDGE_BACKUP_DIR=""
+EDGE_SWAP_COMPLETE=0
 prepare_edge_assets() {
     local source_dir="$SCRIPT_DIR/edge" edge_bin edge_arch
     [[ -d "$source_dir" ]] || return 0
@@ -241,6 +242,14 @@ on_upgrade_error() {
     local exit_code=$? line=$1
     if [[ -n "${EDGE_STAGE_DIR:-}" && -d "${EDGE_STAGE_DIR:-}" ]]; then
         rm -rf "$EDGE_STAGE_DIR"
+    fi
+    if [[ "${EDGE_SWAP_COMPLETE:-0}" == 1 && -n "${EDGE_BACKUP_DIR:-}" ]]; then
+        if ongrid_restore_edge_directory "$INSTALL_DIR" "$EDGE_BACKUP_DIR"; then
+            EDGE_BACKUP_DIR=""
+            EDGE_SWAP_COMPLETE=0
+        else
+            log_error "automatic Edge rollback failed; previous assets remain under $EDGE_BACKUP_DIR"
+        fi
     fi
     log_error "upgrade failed at line $line (exit $exit_code)"
 }
@@ -539,10 +548,16 @@ if [[ -n "$EDGE_STAGE_DIR" ]]; then
     if [[ -d "$INSTALL_DIR/edge" ]]; then
         EDGE_BACKUP_DIR=$(mktemp -d "$INSTALL_DIR/.edge-backup.XXXXXX")
         mv "$INSTALL_DIR/edge" "$EDGE_BACKUP_DIR/edge"
+        EDGE_SWAP_COMPLETE=1
     fi
     if ! mv "$EDGE_STAGE_DIR" "$INSTALL_DIR/edge"; then
-        if [[ -n "$EDGE_BACKUP_DIR" && -d "$EDGE_BACKUP_DIR/edge" ]]; then
-            mv "$EDGE_BACKUP_DIR/edge" "$INSTALL_DIR/edge"
+        if [[ "$EDGE_SWAP_COMPLETE" == 1 ]]; then
+            if ongrid_restore_edge_directory "$INSTALL_DIR" "$EDGE_BACKUP_DIR"; then
+                EDGE_BACKUP_DIR=""
+                EDGE_SWAP_COMPLETE=0
+            else
+                log_error "previous Edge assets remain under $EDGE_BACKUP_DIR"
+            fi
         fi
         log_error "could not atomically install the prepared Edge assets"
         exit 1
@@ -624,6 +639,7 @@ HEALTH_OK=0
 for i in $(seq 1 45); do
     if curl -fsSk "https://localhost:${ONGRID_HTTP_PORT}/healthz" >/dev/null 2>&1; then
         HEALTH_OK=1
+        EDGE_SWAP_COMPLETE=0
         log_info "ongrid healthy (took ~$((i*2))s)"
         break
     fi
@@ -681,8 +697,11 @@ if [[ $HEALTH_OK -eq 1 ]]; then
     # is healthy the old served Edge tree is no longer needed; verified direct
     # downloads remain in /var/cache/ongrid for later installs/upgrades.
     if [[ -n "$EDGE_BACKUP_DIR" && -d "$EDGE_BACKUP_DIR" ]]; then
-        rm -rf "$EDGE_BACKUP_DIR"
-        EDGE_BACKUP_DIR=""
+        if rm -rf "$EDGE_BACKUP_DIR"; then
+            EDGE_BACKUP_DIR=""
+        else
+            log_warn "could not remove successful-upgrade Edge backup: $EDGE_BACKUP_DIR"
+        fi
     fi
 
     # (3) Cap release tarballs in $INSTALL_DIR — keep the two newest

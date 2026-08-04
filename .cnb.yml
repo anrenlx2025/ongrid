@@ -39,7 +39,7 @@ $:
             description: Checksum-verified direct downloads for Ongrid Edge installation.
             latest: false
         - name: Upload CNB Release attachments
-          image: cnbcool/attachments:latest
+          image: cnbcool/attachments@sha256:37c2d53fed9accee6ea0a509a05a4d05e4b36af37d5319451c2284e287b9e935
           settings:
             attachments:
               - ./dist/out/edge-attachments/*

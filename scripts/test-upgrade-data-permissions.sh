@@ -191,6 +191,30 @@ grep -Fq '[ERROR] failed to restore the existing stack' "$tmp_dir/restore-error.
     || fail "Compose recovery failure did not produce an error"
 docker_should_fail=0
 
+edge_install_dir="$tmp_dir/edge install"
+edge_backup_dir="$tmp_dir/edge backup"
+mkdir -p "$edge_install_dir/edge" "$edge_backup_dir/edge"
+printf 'new edge\n' >"$edge_install_dir/edge/version"
+printf 'old edge\n' >"$edge_backup_dir/edge/version"
+ongrid_restore_edge_directory "$edge_install_dir" "$edge_backup_dir" \
+    || fail "Edge rollback helper rejected a valid backup"
+grep -Fqx 'old edge' "$edge_install_dir/edge/version" \
+    || fail "Edge rollback helper did not restore the previous directory"
+[[ ! -e "$edge_backup_dir" ]] \
+    || fail "Edge rollback helper left an empty backup directory behind"
+
+missing_backup="$tmp_dir/missing edge backup"
+mkdir -p "$missing_backup"
+printf 'current edge\n' >"$edge_install_dir/edge/version"
+if ongrid_restore_edge_directory "$edge_install_dir" "$missing_backup" \
+    >"$tmp_dir/edge-restore.out" 2>"$tmp_dir/edge-restore.log"; then
+    fail "Edge rollback helper accepted a missing backup"
+fi
+grep -Fqx 'current edge' "$edge_install_dir/edge/version" \
+    || fail "failed Edge rollback removed the current directory"
+grep -Fq '[ERROR] previous Edge directory is missing' "$tmp_dir/edge-restore.log" \
+    || fail "missing Edge backup did not produce an actionable error"
+
 : >"$docker_log"
 chown_should_fail=1
 stat_owner_state=wrong
@@ -219,6 +243,8 @@ grep -Fq 'ongrid_repair_data_permissions_or_restore' "$upgrade_script" \
     || fail "upgrade.sh does not use the tested repair-and-recovery path"
 grep -Fq 'ongrid_restore_existing_stack "$INSTALL_DIR"' "$upgrade_script" \
     || fail "upgrade.sh does not restore the existing stack after preparation failure"
+grep -Fq 'ongrid_restore_edge_directory "$INSTALL_DIR" "$EDGE_BACKUP_DIR"' "$upgrade_script" \
+    || fail "upgrade.sh does not restore the previous Edge directory after a post-swap failure"
 for persistent_dir in mysql prometheus loki tempo grafana skills pages workspace tools; do
     if grep -Eq "chown -R .*ONGRID_DATA_DIR/${persistent_dir}" "$upgrade_script"; then
         fail "upgrade.sh directly recurses through $persistent_dir outside the repair helper"

@@ -9,6 +9,10 @@ BASE_URL=${3:?release download base URL}
 PLUGIN_IMAGE=${4:?attachments plugin image}
 shift 4
 (( $# > 0 )) || { echo "publish-cnb-attachments: no files supplied" >&2; exit 2; }
+[[ "$PLUGIN_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || {
+    echo "publish-cnb-attachments: plugin image must be pinned by sha256 digest" >&2
+    exit 2
+}
 
 : "${CNB_TOKEN:?CNB_TOKEN with repo-contents read/write permission is required}"
 API_ENDPOINT=${CNB_API_ENDPOINT:-https://api.cnb.cool}

@@ -28,6 +28,8 @@ Manager 当前通过本地 `/opt/ongrid/edge` 同时提供 Edge 网络安装器�
 
 每个归档附带外部 `.sha256`，内部还包含 `TARGET`、`DEPENDENCIES` 和 `MANIFEST.sha256`。发布命令发现该 Release 已存在全部预期附件时直接复用；只存在部分附件时失败，禁止悄悄覆盖不可变内容。只有依赖版本集合或布局发生变化才创建新的公共依赖 Release。
 
+公共依赖归档使用固定顺序、时间戳、owner/group 和压缩块大小生成，确保相同输入重复构建得到相同 SHA-256。发布命令会先检查完整的既有 Release，在下载上游依赖或执行 Go 构建前直接跳过，因此能够继续复用修复前已经发布的不可变附件。附件上传器必须固定到经过审核的镜像 digest，禁止把 CNB 发布令牌交给可变 tag。
+
 ### 2. 自研 Edge 跟随 Ongrid 版本
 
 每个 Ongrid Release 只新增：
@@ -53,12 +55,14 @@ GitHub 的 `Release` workflow 在每个 `vMAJOR.MINOR.PATCH` tag 上自动执行
 `install.sh` 和 `upgrade.sh` 执行以下步骤：
 
 1. 从公共依赖 Release 下载目标架构归档，从当前 Ongrid Release 下载 `ongrid-edge`；
-2. 校验两个附件的外部 SHA-256，并校验依赖归档内部 manifest 和目标架构；
+2. 将 sidecar 中的 SHA-256 和文件名严格绑定到当前附件，并校验依赖归档内部 manifest 和目标架构；
 3. 把校验通过的附件保存在 `/var/cache/ongrid/edge-artifacts`，重复安装或升级直接复用；
 4. 在安装目录同一文件系统的隐藏 staging 目录中生成原有单文件布局和 ADR-024 bundle；
 5. 全部成功后再原子替换 `/opt/ongrid/edge`。
 
 升级预取发生在停止旧 Compose 栈之前。网络不可达、附件缺失、checksum 不符或架构不匹配时，旧服务和旧 `/edge` 目录保持不变。
+
+完成 `/edge` 原子替换后、健康检查成功前发生错误时，错误处理会恢复交换前的 Edge 目录；健康检查仅超时时保留并输出备份路径，供运维人员手工判断和回滚。
 
 Manager、Nginx 和 Edge 设备继续使用既有 `/edge/` URL、文件名、manifest 与 apply 流程，不感知外部附件来源。
 

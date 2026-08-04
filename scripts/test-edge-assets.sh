@@ -33,6 +33,21 @@ MONGODB_EXPORTER_VERSION=8 \
 EDGE_BIN_ROOT="$bin_root" \
     bash "$build_script" edge vtest "$attachments" linux-amd64
 
+# Immutable dependency archives must be byte-reproducible. Otherwise a rerun
+# rebuilds a different sidecar and cannot reuse an already complete Release.
+rebuilt_attachments="$tmp_dir/attachments-rebuilt"
+sleep 2
+EDGE_BIN_ROOT="$bin_root" \
+PROMTAIL_VERSION=1 OTELCOL_VERSION=2 NODE_EXPORTER_VERSION=3 \
+PROCESS_EXPORTER_VERSION=4 MYSQLD_EXPORTER_VERSION=5 \
+POSTGRES_EXPORTER_VERSION=6 REDIS_EXPORTER_VERSION=7 \
+MONGODB_EXPORTER_VERSION=8 \
+    bash "$build_script" deps edge-deps-test "$rebuilt_attachments" linux-amd64
+cmp -s \
+    "$attachments/edge-deps-linux-amd64.tar.xz" \
+    "$rebuilt_attachments/edge-deps-linux-amd64.tar.xz" \
+    || fail "identical dependency inputs produced different immutable archives"
+
 (cd "$attachments" && sha256sum -c edge-deps-linux-amd64.tar.xz.sha256)
 (cd "$attachments" && sha256sum -c ongrid-edge-linux-amd64-vtest.sha256)
 
@@ -111,5 +126,22 @@ if FAKE_CURL_LOG="$tmp_dir/bad-curl.log" \
     bash "$fetch_script" "$tmp_dir/bad-dest" vtest linux-amd64 >/dev/null 2>&1; then
     fail "tampered direct binary passed checksum verification"
 fi
+
+# The sidecar must describe the file currently being verified. Pointing the
+# Edge sidecar at the already downloaded dependency archive must not allow a
+# modified Edge binary to pass.
+cp "$attachments/edge-deps-linux-amd64.tar.xz.sha256" \
+    "$fixture_root/vtest/ongrid-edge-linux-amd64-vtest.sha256"
+if FAKE_CURL_LOG="$tmp_dir/wrong-name-curl.log" \
+    FAKE_RELEASE_ROOT="$fixture_root" \
+    PATH="$fake_bin:$PATH" \
+    ONGRID_EDGE_DEPS_TAG=edge-deps-test \
+    ONGRID_EDGE_ARTIFACT_CACHE_DIR="$tmp_dir/wrong-name-cache" \
+    ONGRID_EDGE_ARTIFACT_BASE_URL=https://cnb.test/repo/-/releases/download \
+    bash "$fetch_script" "$tmp_dir/wrong-name-dest" vtest linux-amd64 >/dev/null 2>&1; then
+    fail "checksum sidecar for another attachment verified a tampered Edge binary"
+fi
+[[ ! -e "$tmp_dir/wrong-name-dest/ongrid-edge-linux-amd64" ]] \
+    || fail "tampered Edge binary was staged after sidecar filename mismatch"
 
 printf 'edge attachment tests passed\n'

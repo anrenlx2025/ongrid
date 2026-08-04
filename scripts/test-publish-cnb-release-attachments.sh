@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 publisher="$repo_root/scripts/publish-cnb-release-attachments.sh"
+plugin_image=cnbcool/attachments@sha256:37c2d53fed9accee6ea0a509a05a4d05e4b36af37d5319451c2284e287b9e935
 tmp_dir=$(mktemp -d "$repo_root/.tmp-test-cnb-attachments.XXXXXX")
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -43,8 +44,16 @@ run_publisher() {
     CNB_TOKEN=test-token \
         bash "$publisher" vtest ongridio/ongrid-edge \
         https://cnb.test/ongridio/ongrid-edge/-/releases/download \
-        cnbcool/attachments:latest "$tmp_dir/files/one" "$tmp_dir/files/two"
+        "$plugin_image" "$tmp_dir/files/one" "$tmp_dir/files/two"
 }
+
+if CNB_TOKEN=test-token PATH="$tmp_dir/bin:$PATH" \
+    bash "$publisher" vtest ongridio/ongrid-edge \
+    https://cnb.test/ongridio/ongrid-edge/-/releases/download \
+    cnbcool/attachments:latest "$tmp_dir/files/one" >/dev/null 2>&1; then
+    echo "mutable attachment uploader image was accepted" >&2
+    exit 1
+fi
 
 # A complete immutable release is reused without invoking the uploader.
 : > "$tmp_dir/curl.log"
@@ -77,7 +86,7 @@ fi
 rm -f "$tmp_dir/uploaded"
 FAKE_PRESENT= run_publisher
 grep -Fq 'PLUGIN_TAG=vtest' "$tmp_dir/docker.log"
-grep -Fq 'cnbcool/attachments:latest' "$tmp_dir/docker.log"
+grep -Fq "$plugin_image" "$tmp_dir/docker.log"
 [[ $(wc -l < "$tmp_dir/curl.log" | tr -d ' ') == 4 ]]
 
 echo "CNB attachment publisher tests passed"
