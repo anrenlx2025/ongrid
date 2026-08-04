@@ -32,8 +32,16 @@ fi
 
 stage="$tmp_dir/stage/ongrid-vtest-linux-amd64"
 out="$tmp_dir/out"
+edge_bin_root="$tmp_dir/edge-bin"
+mkdir -p "$edge_bin_root/linux-test"
+for binary in \
+  ongrid-edge promtail otelcol-contrib node_exporter process_exporter \
+  mysqld_exporter postgres_exporter redis_exporter mongodb_exporter; do
+  printf '%s test payload\n' "$binary" >"$edge_bin_root/linux-test/$binary"
+done
 PACKAGE_TARGET=linux-amd64 \
 EDGE_TARGETS=linux-test \
+EDGE_BIN_ROOT="$edge_bin_root" \
 ONGRID_EDGE_DEPS_TAG=edge-deps-test \
 ONGRID_BUNDLE_EMBEDDING_MODEL=0 \
   bash "$repo_root/dist/package.sh" vtest "$stage" "$out" \
@@ -73,7 +81,13 @@ for forbidden in \
   ongrid-vtest-linux-amd64/prometheus/prometheus.yml \
   ongrid-vtest-linux-amd64/edge/ongrid-edge-linux-test \
   ongrid-vtest-linux-amd64/edge/promtail-linux-test \
-  ongrid-vtest-linux-amd64/edge/otelcol-contrib-linux-test; do
+  ongrid-vtest-linux-amd64/edge/otelcol-contrib-linux-test \
+  ongrid-vtest-linux-amd64/edge/node_exporter-linux-test \
+  ongrid-vtest-linux-amd64/edge/process_exporter-linux-test \
+  ongrid-vtest-linux-amd64/edge/mysqld_exporter-linux-test \
+  ongrid-vtest-linux-amd64/edge/postgres_exporter-linux-test \
+  ongrid-vtest-linux-amd64/edge/redis_exporter-linux-test \
+  ongrid-vtest-linux-amd64/edge/mongodb_exporter-linux-test; do
   if grep -Fq "$forbidden" "$tmp_dir/archive.list"; then
     echo "release package contains removed path: $forbidden" >&2
     exit 1

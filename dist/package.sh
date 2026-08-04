@@ -182,10 +182,11 @@ fi
 # installer downloads checksum-verified CNB Release attachments instead. The opt-in
 # remains for air-gapped/private rebuilds and keeps the old file layout intact.
 EDGE_TARGETS="${EDGE_TARGETS:-linux-amd64}"
+EDGE_BIN_ROOT="${EDGE_BIN_ROOT:-${REPO_ROOT}/bin}"
 BUNDLE_EDGE_ASSETS="${ONGRID_BUNDLE_EDGE_ASSETS:-0}"
 if [[ "$BUNDLE_EDGE_ASSETS" == "1" ]]; then
 for target in ${EDGE_TARGETS}; do
-    src="${REPO_ROOT}/bin/${target}/ongrid-edge"
+    src="${EDGE_BIN_ROOT}/${target}/ongrid-edge"
     dst="${STAGE_DIR}/edge/ongrid-edge-${target}"
     if [ -f "$src" ]; then
         cp "$src" "$dst"
@@ -200,7 +201,7 @@ done
 # promtail (logs plugin) ships next to ongrid-edge so install-edge.sh can
 # install it under /usr/local/lib/ongrid-edge/promtail.
 for target in ${EDGE_TARGETS}; do
-    src="${REPO_ROOT}/bin/${target}/promtail"
+    src="${EDGE_BIN_ROOT}/${target}/promtail"
     dst="${STAGE_DIR}/edge/promtail-${target}"
     if [ -f "$src" ]; then
         cp "$src" "$dst"
@@ -216,7 +217,7 @@ done
 # Linux-only: upstream doesn't publish darwin builds in the contrib stream;
 # darwin edges will see the traces plugin disabled (warned by install-edge.sh).
 for target in ${EDGE_TARGETS}; do
-    src="${REPO_ROOT}/bin/${target}/otelcol-contrib"
+    src="${EDGE_BIN_ROOT}/${target}/otelcol-contrib"
     dst="${STAGE_DIR}/edge/otelcol-contrib-${target}"
     if [ -f "$src" ]; then
         cp "$src" "$dst"
@@ -233,7 +234,7 @@ done
 # a metric source and Monitor stays empty until an operator manually
 # installs node_exporter.
 for target in ${EDGE_TARGETS}; do
-    src="${REPO_ROOT}/bin/${target}/node_exporter"
+    src="${EDGE_BIN_ROOT}/${target}/node_exporter"
     dst="${STAGE_DIR}/edge/node_exporter-${target}"
     if [ -f "$src" ]; then
         cp "$src" "$dst"
@@ -248,7 +249,7 @@ done
 # timeline" PromQL panel). Same systemd-managed deploy model as
 # node_exporter. Without this, the process timeline panel stays empty.
 for target in ${EDGE_TARGETS}; do
-    src="${REPO_ROOT}/bin/${target}/process_exporter"
+    src="${EDGE_BIN_ROOT}/${target}/process_exporter"
     dst="${STAGE_DIR}/edge/process_exporter-${target}"
     if [ -f "$src" ]; then
         cp "$src" "$dst"
@@ -263,7 +264,7 @@ done
 # subprocesses; the manager stores only the edge-local secret file path.
 for exporter in mysqld_exporter postgres_exporter redis_exporter mongodb_exporter; do
     for target in ${EDGE_TARGETS}; do
-        src="${REPO_ROOT}/bin/${target}/${exporter}"
+        src="${EDGE_BIN_ROOT}/${target}/${exporter}"
         dst="${STAGE_DIR}/edge/${exporter}-${target}"
         if [ -f "$src" ]; then
             cp "$src" "$dst"

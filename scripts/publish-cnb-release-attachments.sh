@@ -25,9 +25,19 @@ for file in "$@"; do
     fi
     [[ -s "$file" ]] || { echo "publish-cnb-attachments: missing $file" >&2; exit 1; }
     files+=("$file")
-    if curl -fsSIL -o /dev/null "$BASE_URL/$TAG/$(basename "$file")"; then
-        present=$((present + 1))
+    asset_url="$BASE_URL/$TAG/$(basename "$file")"
+    if ! probe_status=$(curl -sSIL -o /dev/null -w '%{http_code}' "$asset_url"); then
+        echo "publish-cnb-attachments: cannot inspect $asset_url" >&2
+        exit 1
     fi
+    case "$probe_status" in
+        200) present=$((present + 1)) ;;
+        404) ;;
+        *)
+            echo "publish-cnb-attachments: cannot inspect $asset_url (HTTP $probe_status)" >&2
+            exit 1
+            ;;
+    esac
 done
 
 if (( present == ${#files[@]} )); then

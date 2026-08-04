@@ -16,9 +16,15 @@ set -euo pipefail
 url=${!#}
 name=${url##*/}
 printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
-if [[ -f "$FAKE_UPLOAD_STATE" || ",${FAKE_PRESENT:-}," == *",$name,"* ]]; then
+if [[ -n ${FAKE_PROBE_STATUS:-} ]]; then
+    printf '%s' "$FAKE_PROBE_STATUS"
     exit 0
 fi
+if [[ -f "$FAKE_UPLOAD_STATE" || ",${FAKE_PRESENT:-}," == *",$name,"* ]]; then
+    [[ " $* " != *" -w "* ]] || printf '200'
+    exit 0
+fi
+[[ " $* " != *" -w "* ]] || { printf '404'; exit 0; }
 exit 22
 EOF
 cat > "$tmp_dir/bin/docker" <<'EOF'
@@ -54,6 +60,16 @@ if FAKE_PRESENT=one run_publisher >/dev/null 2>&1; then
     exit 1
 fi
 [[ ! -s "$tmp_dir/docker.log" ]] || { echo "partial release invoked uploader" >&2; exit 1; }
+
+# A transient/remote HTTP error must fail closed instead of being treated as
+# an empty Release that is safe to populate.
+: > "$tmp_dir/curl.log"
+: > "$tmp_dir/docker.log"
+if FAKE_PROBE_STATUS=503 run_publisher >/dev/null 2>&1; then
+    echo "CNB probe error was treated as a missing attachment" >&2
+    exit 1
+fi
+[[ ! -s "$tmp_dir/docker.log" ]] || { echo "probe error invoked uploader" >&2; exit 1; }
 
 # An empty release uploads once and verifies both resulting direct URLs.
 : > "$tmp_dir/curl.log"
