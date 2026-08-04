@@ -10,10 +10,57 @@ command -v ruby >/dev/null 2>&1 || { echo "ruby is required" >&2; exit 1; }
 ruby -ryaml -e '
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
 jobs = workflow.fetch("jobs")
+
+manager = jobs.fetch("manager-image")
+raise "manager platform jobs must run on their native matrix runner" unless manager.fetch("runs-on") == "${{ matrix.runner }}"
+matrix = manager.fetch("strategy").fetch("matrix").fetch("include")
+platforms = matrix.map { |entry| [entry.fetch("arch"), entry.fetch("platform"), entry.fetch("runner")] }.sort
+expected_platforms = [
+  ["amd64", "linux/amd64", "ubuntu-24.04"],
+  ["arm64", "linux/arm64", "ubuntu-24.04-arm"]
+].sort
+raise "manager must build amd64 and arm64 on native runners" unless platforms == expected_platforms
+manager_publish = manager.fetch("steps").find { |step| step["name"] == "Publish native manager platform digest" }
+raise "missing native manager platform publish step" unless manager_publish
+raise "manager platform publish must call its Make target" unless manager_publish.fetch("run").include?("make docker-push-cloud-manager-platform")
+manager_upload = manager.fetch("steps").find { |step| step["name"] == "Upload manager platform digest" }
+raise "missing manager digest artifact upload" unless manager_upload
+raise "manager digest upload path must match the Make digest directory" unless manager_upload.fetch("with").fetch("path").start_with?("dist/release-digests/")
+
+web = jobs.fetch("web-image")
+web_publish = web.fetch("steps").find { |step| step["name"] == "Publish Web image" }
+raise "Web image publish must call its Make target" unless web_publish&.fetch("run")&.include?("make docker-push-cloud-web")
+
+k8s_edge_image = jobs.fetch("k8s-edge-image")
+k8s_edge_publish = k8s_edge_image.fetch("steps").find { |step| step["name"] == "Publish Kubernetes Edge image" }
+raise "Kubernetes Edge image publish must call its Make target" unless k8s_edge_publish&.fetch("run")&.include?("make docker-push-k8s-edge")
+
+image = jobs.fetch("image")
+image_needs = Array(image.fetch("needs"))
+raise "image finalization must wait for all parallel image builds" unless image_needs.sort == ["k8s-edge-image", "manager-image", "web-image"]
+download = image.fetch("steps").find { |step| step["name"] == "Download manager platform digests" }
+raise "missing manager digest artifact download" unless download
+raise "manager digest download must merge both matrix artifacts" unless download.fetch("with").fetch("merge-multiple") == true
+raise "manager digest download path must match the Make digest directory" unless download.fetch("with").fetch("path") == "dist/release-digests"
+merge = image.fetch("steps").find { |step| step["name"] == "Merge manager multi-arch manifest" }
+raise "manager manifest merge must call its Make target" unless merge&.fetch("run")&.include?("make docker-merge-cloud-manager")
+verify = image.fetch("steps").find { |step| step["name"] == "Verify multi-arch manifests" }
+raise "release images must be verified after manifest merge" unless verify&.fetch("run")&.include?("make verify-release-images")
+helm = image.fetch("steps").find { |step| step["name"] == "Publish Helm chart" }
+raise "Helm publish must call its Make target" unless helm&.fetch("run")&.include?("make publish-k8s-chart")
+
+[manager, web, k8s_edge_image, image].each do |job|
+  qemu = job.fetch("steps").any? { |step| step["uses"]&.start_with?("docker/setup-qemu-action@") }
+  raise "optimized image jobs must not install QEMU" if qemu
+  direct_docker = job.fetch("steps").any? { |step| step["run"]&.match?(/\bdocker buildx build\b/) }
+  raise "release workflow must use Make targets instead of direct docker builds" if direct_docker
+end
+
 edge = jobs.fetch("edge-release")
 raise "edge-release must wait for image publication" unless edge.fetch("needs") == "image"
 
 build = jobs.fetch("build")
+raise "package build must wait for finalized release images" unless build.fetch("needs") == "image"
 raise "release must build one universal package without an architecture matrix" if build.key?("strategy")
 build_step = build.fetch("steps").find { |step| step["name"] == "Build universal Linux package" }
 raise "missing universal package build step" unless build_step
@@ -41,6 +88,13 @@ release_run = publish_release.fetch("run")
 raise "GitHub Release still publishes architecture-specific server packages" if release_run.match?(/linux-(amd64|arm64)/)
 raise "GitHub Release does not publish the universal server package" unless release_run.include?("linux.tar.xz")
 ' "$workflow"
+
+grep -Eq '^RELEASE_IMAGE_DIGEST_DIR \?= dist/release-digests$' "$makefile" \
+    || { echo "Makefile manager digest directory does not match the workflow artifacts" >&2; exit 1; }
+grep -Fq 'FROM --platform=$BUILDPLATFORM node:20-alpine AS builder' "$repo_root/deploy/Dockerfile.web" \
+    || { echo "Web builder still runs once per emulated target architecture" >&2; exit 1; }
+[[ $(grep -Fc 'FROM --platform=$BUILDPLATFORM' "$repo_root/deploy/Dockerfile.ongrid-edge") -eq 5 ]] \
+    || { echo "Edge build/download stages are not all pinned to the native build platform" >&2; exit 1; }
 
 if grep -Fq 'cnbcool/attachments:latest' "$makefile"; then
     echo "release configuration uses a mutable attachment uploader image" >&2
