@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	devicemodel "github.com/ongridio/ongrid/internal/manager/model/device"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
+	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 )
 
 // roleAdmin mirrors iam/model.RoleAdmin without crossing the BC boundary
@@ -45,6 +47,8 @@ func NewHandler(uc *devicebiz.Usecase) *Handler { return &Handler{uc: uc} }
 //	PATCH /v1/devices/{id}/roles (admin)
 //	DELETE /v1/devices/{id} (admin)
 //	GET /v1/devices/{id}/edges (any authed) — junction edges
+//	GET /v1/devices/{id}/network (any authed) — verified network profile
+//	GET /v1/network-discovery/candidates (any authed)
 func (h *Handler) Register(r chi.Router) {
 	r.Get("/v1/devices", h.list)
 	r.Get("/v1/devices/{id}", h.get)
@@ -52,6 +56,12 @@ func (h *Handler) Register(r chi.Router) {
 	r.With(h.requireAdmin).Patch("/v1/devices/{id}/roles", h.updateRoles)
 	r.With(h.requireAdmin).Delete("/v1/devices/{id}", h.delete)
 	r.Get("/v1/devices/{id}/edges", h.listEdges)
+	r.Get("/v1/devices/{id}/network", h.getNetworkDevice)
+	if h.uc.NetworkDiscovery() != nil {
+		r.Get("/v1/network-discovery/candidates", h.listNetworkCandidates)
+		r.With(h.requireAdmin).Post("/v1/network-discovery/candidates/{id}/snmp-scan", h.scanNetworkCandidate)
+		r.With(h.requireAdmin).Post("/v1/network-discovery/candidates/{id}/promote", h.promoteNetworkCandidate)
+	}
 }
 
 // requireAdmin is a thin middleware that 403s non-admin callers.
@@ -118,6 +128,52 @@ type edgeLinkRow struct {
 	DeviceID  uint64    `json:"device_id"`
 	Type      string    `json:"type"` // host | discovered
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type networkCandidateItem struct {
+	ID               uint64          `json:"id"`
+	ObserverEdgeID   uint64          `json:"observer_edge_id"`
+	ObserverEdgeName string          `json:"observer_edge_name,omitempty"`
+	ObserverHostID   *uint64         `json:"observer_host_device_id,omitempty"`
+	ObserverHostName string          `json:"observer_host_name,omitempty"`
+	ObservationKey   string          `json:"observation_key"`
+	IPAddress        string          `json:"ip_address,omitempty"`
+	MAC              string          `json:"mac,omitempty"`
+	InterfaceName    string          `json:"interface_name,omitempty"`
+	Source           string          `json:"source"`
+	SourceData       json.RawMessage `json:"source_data,omitempty"`
+	Interfaces       json.RawMessage `json:"interfaces,omitempty"`
+	Links            json.RawMessage `json:"links,omitempty"`
+	Status           string          `json:"status"`
+	Confidence       uint8           `json:"confidence"`
+	PromotedDeviceID *uint64         `json:"promoted_device_id,omitempty"`
+	FirstSeenAt      time.Time       `json:"first_seen_at"`
+	LastSeenAt       time.Time       `json:"last_seen_at"`
+}
+
+type networkDeviceDetailItem struct {
+	DeviceID           uint64          `json:"device_id"`
+	DeviceKind         string          `json:"device_kind"`
+	Vendor             string          `json:"vendor,omitempty"`
+	Model              string          `json:"model,omitempty"`
+	SerialNumber       string          `json:"serial_number,omitempty"`
+	ManagementAddress  string          `json:"management_address,omitempty"`
+	SysName            string          `json:"sys_name,omitempty"`
+	SysDescription     string          `json:"sys_description,omitempty"`
+	SNMPEngineID       string          `json:"snmp_engine_id,omitempty"`
+	LLDPChassisID      string          `json:"lldp_chassis_id,omitempty"`
+	BridgeBaseMAC      string          `json:"bridge_base_mac,omitempty"`
+	ReachabilityStatus string          `json:"reachability_status"`
+	LastReachableAt    *time.Time      `json:"last_reachable_at,omitempty"`
+	DiscoverySource    string          `json:"discovery_source,omitempty"`
+	ScannerEdgeID      uint64          `json:"scanner_edge_id,omitempty"`
+	ScannerEdgeName    string          `json:"scanner_edge_name,omitempty"`
+	ScannerHostID      *uint64         `json:"scanner_host_device_id,omitempty"`
+	ScannerHostName    string          `json:"scanner_host_name,omitempty"`
+	LastObservedAt     *time.Time      `json:"last_observed_at,omitempty"`
+	SourceData         json.RawMessage `json:"source_data,omitempty"`
+	Interfaces         json.RawMessage `json:"interfaces,omitempty"`
+	Links              json.RawMessage `json:"links,omitempty"`
 }
 
 // --- handlers ---
@@ -302,6 +358,135 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
+func (h *Handler) getNetworkDevice(w http.ResponseWriter, r *http.Request) {
+	if _, ok := tenantctx.From(r.Context()); !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	discovery := h.uc.NetworkDiscovery()
+	if discovery == nil {
+		writeErr(w, errs.ErrNotWiredYet)
+		return
+	}
+	detail, err := discovery.GetNetworkDeviceDetail(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	item := networkDeviceDetailItem{
+		DeviceID: detail.Profile.DeviceID, DeviceKind: detail.Profile.DeviceKind,
+		Vendor: detail.Profile.Vendor, Model: detail.Profile.Model,
+		SerialNumber: detail.Profile.SerialNumber, ManagementAddress: detail.Profile.ManagementAddress,
+		SysName: detail.Profile.SysName, SysDescription: detail.Profile.SysDescription,
+		SNMPEngineID: detail.Profile.SnmpEngineID, LLDPChassisID: detail.Profile.LldpChassisID,
+		BridgeBaseMAC: detail.Profile.BridgeBaseMAC, ReachabilityStatus: detail.Profile.ReachabilityStatus,
+		LastReachableAt: detail.Profile.LastReachableAt,
+	}
+	if candidate := detail.Candidate; candidate != nil {
+		lastObserved := candidate.LastSeenAt
+		item.DiscoverySource = candidate.Source
+		item.ScannerEdgeID = candidate.ObserverEdgeID
+		item.ScannerEdgeName = candidate.ObserverEdgeName
+		item.ScannerHostID = candidate.ObserverHostDeviceID
+		item.ScannerHostName = candidate.ObserverHostName
+		item.LastObservedAt = &lastObserved
+		item.SourceData = json.RawMessage(defaultJSON(candidate.SourceDataJSON))
+		item.Interfaces = json.RawMessage(defaultJSONArray(candidate.InterfacesJSON))
+		item.Links = json.RawMessage(defaultJSONArray(candidate.LinksJSON))
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (h *Handler) listNetworkCandidates(w http.ResponseWriter, r *http.Request) {
+	if _, ok := tenantctx.From(r.Context()); !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	q := r.URL.Query()
+	filter := devicebiz.NetworkCandidateFilter{Status: strings.TrimSpace(q.Get("status"))}
+	if s := q.Get("limit"); s != "" {
+		filter.Limit, _ = strconv.Atoi(s)
+	}
+	if s := q.Get("offset"); s != "" {
+		filter.Offset, _ = strconv.Atoi(s)
+	}
+	rows, total, err := h.uc.ListNetworkCandidates(r.Context(), filter)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	items := make([]networkCandidateItem, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, networkCandidateToItem(row))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total})
+}
+
+func (h *Handler) promoteNetworkCandidate(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var in struct {
+		Name string `json:"name"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, errors.Join(errs.ErrInvalid, err))
+			return
+		}
+	}
+	device, err := h.uc.NetworkDiscovery().PromoteCandidate(r.Context(), id, in.Name)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, devToItem(device))
+}
+
+func (h *Handler) scanNetworkCandidate(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var in struct {
+		Name                string `json:"name"`
+		Address             string `json:"address"`
+		Port                uint16 `json:"port"`
+		Version             string `json:"version"`
+		Community           string `json:"community"`
+		Username            string `json:"username"`
+		AuthProtocol        string `json:"auth_protocol"`
+		AuthSecret          string `json:"auth_secret"`
+		PrivacyProtocol     string `json:"privacy_protocol"`
+		PrivacySecret       string `json:"privacy_secret"`
+		TimeoutMilliseconds int    `json:"timeout_ms"`
+		Retries             int    `json:"retries"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
+		writeErr(w, errors.Join(errs.ErrInvalid, err))
+		return
+	}
+	device, err := h.uc.NetworkDiscovery().ScanAndPromoteCandidate(r.Context(), id, tunnel.ProbeNetworkSNMPRequest{
+		Address: in.Address, Port: in.Port, Version: in.Version, Community: in.Community,
+		Username: in.Username, AuthProtocol: in.AuthProtocol, AuthSecret: in.AuthSecret,
+		PrivacyProtocol: in.PrivacyProtocol, PrivacySecret: in.PrivacySecret,
+		TimeoutMilliseconds: in.TimeoutMilliseconds, Retries: in.Retries,
+	}, in.Name)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, devToItem(device))
+}
+
 // --- helpers ---
 
 func devToItem(d *devicemodel.Device) deviceItem {
@@ -327,6 +512,35 @@ func devToItem(d *devicemodel.Device) deviceItem {
 		CreatedAt:      d.CreatedAt,
 		NodeID:         d.NodeID,
 	}
+}
+
+func networkCandidateToItem(c *devicemodel.NetworkDiscoveryCandidate) networkCandidateItem {
+	return networkCandidateItem{
+		ID: c.ID, ObserverEdgeID: c.ObserverEdgeID, ObserverEdgeName: c.ObserverEdgeName,
+		ObserverHostID: c.ObserverHostDeviceID, ObserverHostName: c.ObserverHostName,
+		ObservationKey: c.ObservationKey,
+		IPAddress:      c.IPAddress, MAC: c.MAC, InterfaceName: c.InterfaceName,
+		Source: c.Source, SourceData: json.RawMessage(defaultJSON(c.SourceDataJSON)),
+		Interfaces: json.RawMessage(defaultJSONArray(c.InterfacesJSON)), Links: json.RawMessage(defaultJSONArray(c.LinksJSON)),
+		Status: c.Status, Confidence: c.Confidence, PromotedDeviceID: c.PromotedDeviceID,
+		FirstSeenAt: c.FirstSeenAt, LastSeenAt: c.LastSeenAt,
+	}
+}
+
+func defaultJSON(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || trimmed == "null" {
+		return "{}"
+	}
+	return trimmed
+}
+
+func defaultJSONArray(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || trimmed == "null" {
+		return "[]"
+	}
+	return trimmed
 }
 
 func relType(t devicemodel.EdgeDeviceRelationType) string {

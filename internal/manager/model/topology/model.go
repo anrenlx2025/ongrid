@@ -248,6 +248,7 @@ const (
 	RelReplicatesTo = "replicates_to"
 	RelMonitors     = "monitors"
 	RelRoutesTo     = "routes_to"
+	RelConnectedTo  = "connected_to"
 )
 
 // BuiltinRelationTypes is the six-row seed set mandates. The
@@ -314,6 +315,16 @@ func BuiltinRelationTypes() []RelationType {
 			Direction:         string(DirectionSrcToDst),
 			SemanticsTag:      string(SemanticsTraffic),
 			Description:       "src 把流量打到 dst（lb → service, gateway → backend）；上游故障导致下游不可达。",
+		},
+		{
+			Name:              RelConnectedTo,
+			DisplayName:       "连接到",
+			DisplayNameEN:     "Connected to",
+			Builtin:           true,
+			PropagatesFailure: false,
+			Direction:         string(DirectionBidirectional),
+			SemanticsTag:      string(SemanticsObservation),
+			Description:       "两个设备之间存在已确认的网络连接；双向展示，不直接传播故障。",
 		},
 	}
 }

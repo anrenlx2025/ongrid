@@ -32,6 +32,13 @@ type Collector interface {
 	GetProcessList(ctx context.Context, topN int, sortBy string) (tunnel.GetProcessListResponse, error)
 }
 
+// NetworkDiscoveryCollector is optional so existing custom collectors remain
+// source-compatible. When implemented, the agent periodically reports
+// passive gateway/ARP/LLDP observations as candidates to the manager.
+type NetworkDiscoveryCollector interface {
+	CollectNetworkDiscovery(ctx context.Context) (tunnel.NetworkDiscoveryRequest, error)
+}
+
 // CollectorOutput is one logical collection result for one source.
 //
 // HostPoint is the 8-field fast path consumed by the legacy
@@ -57,6 +64,9 @@ type Config struct {
 	MetricsInterval time.Duration // default 10s
 	// MetricsBatchSize is how many points to buffer before push.
 	MetricsBatchSize int // default 30 (5min at 10s)
+	// NetworkDiscoveryInterval controls passive gateway/ARP/LLDP reports.
+	// Zero uses one minute. The collector is optional and read-only.
+	NetworkDiscoveryInterval time.Duration
 
 	// AgentVersion is reported on register_edge (optional).
 	AgentVersion string
@@ -96,7 +106,8 @@ type Agent struct {
 	// piggyback on each heartbeat. Wired post-construction (SetPluginHealthFn)
 	// because the plugin supervisor is built after the Agent in main; guarded
 	// by mu so the heartbeat goroutine reads it race-free.
-	pluginHealthFn func() []tunnel.PluginHealthWire
+	pluginHealthFn              func() []tunnel.PluginHealthWire
+	networkDiscoveryUnsupported bool
 }
 
 // SetPluginHealthFn wires the plugin-health provider used by the heartbeat
@@ -201,6 +212,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.Go(func() error { return a.heartbeatLoop(egCtx) })
 	eg.Go(func() error { return a.metricsLoop(egCtx) })
+	if discovery, ok := a.collector.(NetworkDiscoveryCollector); ok {
+		eg.Go(func() error { return a.networkDiscoveryLoop(egCtx, discovery) })
+	}
 	// One extra goroutine watches the upgrade-staged signal — return a
 	// sentinel error (NOT nil) so errgroup.WithContext cancels egCtx and
 	// the heartbeat / metrics loops unwind. Returning nil leaves the
@@ -227,6 +241,56 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (a *Agent) networkDiscoveryLoop(ctx context.Context, discovery NetworkDiscoveryCollector) error {
+	interval := a.cfg.NetworkDiscoveryInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+			if a.EdgeID() == 0 {
+				continue
+			}
+			a.mu.RLock()
+			unsupported := a.networkDiscoveryUnsupported
+			a.mu.RUnlock()
+			if unsupported {
+				continue
+			}
+			rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			in, err := discovery.CollectNetworkDiscovery(rctx)
+			cancel()
+			if err != nil {
+				a.log.Warn("agent: network discovery collect failed", slog.Any("err", err))
+				continue
+			}
+			if len(in.Candidates) == 0 {
+				continue
+			}
+			in.EdgeID = a.EdgeID()
+			var resp tunnel.NetworkDiscoveryResponse
+			rctx, cancel = context.WithTimeout(ctx, 15*time.Second)
+			err = a.client.Call(rctx, tunnel.MethodPushNetworkDiscovery, in, &resp)
+			cancel()
+			if err != nil {
+				if strings.Contains(err.Error(), "no such rpc: "+tunnel.MethodPushNetworkDiscovery) {
+					a.mu.Lock()
+					a.networkDiscoveryUnsupported = true
+					a.mu.Unlock()
+					a.log.Debug("agent: manager does not support network discovery")
+					continue
+				}
+				a.log.Warn("agent: network discovery push failed", slog.Any("err", err))
+			}
+		}
+	}
 }
 
 // errUpgradeRequested is the sentinel returned from the upgrade-watch
@@ -270,6 +334,14 @@ func (a *Agent) writeHealthMarker() {
 // MethodExecuteSkill dispatcher (skill framework) — adding a new skill
 // only requires writing one Executor file and registering it in init().
 func (a *Agent) registerHandlers() {
+	a.client.RegisterHandler(tunnel.MethodProbeNetworkSNMP,
+		func(ctx context.Context, _ tunnel.Session, _ string, body []byte) ([]byte, error) {
+			var req tunnel.ProbeNetworkSNMPRequest
+			if err := jsonDecode(body, &req); err != nil {
+				return nil, err
+			}
+			return jsonEncode(ProbeNetworkSNMP(ctx, req), nil)
+		})
 	a.client.RegisterHandler(tunnel.MethodGetHostLoad,
 		func(ctx context.Context, _ tunnel.Session, _ string, _ []byte) ([]byte, error) {
 			return jsonEncode(a.collector.GetHostLoad(ctx))
@@ -371,6 +443,7 @@ func (a *Agent) registerEdge(ctx context.Context) error {
 	}
 	a.mu.Lock()
 	a.edgeID = resp.EdgeID
+	a.networkDiscoveryUnsupported = false
 	a.mu.Unlock()
 	a.log.Info("agent: registered with cloud",
 		slog.Uint64("edge_id", resp.EdgeID),

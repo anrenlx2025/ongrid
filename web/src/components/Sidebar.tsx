@@ -30,6 +30,7 @@ import {
   Plug,
   ShipWheel,
   Boxes,
+  Network,
 } from 'lucide-react';
 import { Avatar } from './Avatar';
 import { AgentBadge } from './AgentBadge';
@@ -408,8 +409,13 @@ export function Sidebar() {
         </NavSection>
 
         <CollapsibleSection storageKey="resources" title={tr('基础设施', 'Infrastructure')} defaultOpen>
-          <SidebarNavItem to="/devices" icon={HardDrive} label={tr('设备', 'Devices')} />
+          <SidebarNavItem to="/devices" icon={HardDrive} label={tr('设备', 'Devices')} exactQuery />
           <SidebarNavItem to="/clusters" icon={Boxes} label={tr('集群', 'Clusters')} />
+          <SidebarNavItem
+            to="/devices?roles=network"
+            icon={Network}
+            label={tr('网络设备', 'Network devices')}
+          />
           <SidebarNavItem to="/kubernetes" icon={ShipWheel} label="Kubernetes" />
           <SidebarNavItem to="/topology" icon={Share2} label={tr('拓扑', 'Topology')} />
         </CollapsibleSection>
@@ -744,6 +750,7 @@ function SidebarNavItem({
   icon: Icon,
   label,
   exact,
+  exactQuery,
   disabled,
   muted,
   level,
@@ -753,6 +760,7 @@ function SidebarNavItem({
   icon: IconType;
   label: string;
   exact?: boolean;
+  exactQuery?: boolean;
   disabled?: boolean;
   muted?: boolean;
   // level 1 = 一级（首页 / 仪表盘）不缩进；默认 2 = 二级，缩 ml-2 比之前 ml-3 更紧凑。
@@ -798,6 +806,8 @@ function SidebarNavItem({
     // Every query key in `to` must match the current URL. Extra query keys on
     // the current page are ignored so a filtered tab can still highlight.
     isActive = paramsEqualOnDefinedKeys(targetParams!, currentParams);
+  } else if (exactQuery) {
+    isActive = location.search === '';
   } else if (exact) {
     isActive = location.pathname === targetPath;
   } else {

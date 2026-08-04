@@ -145,7 +145,7 @@ export default function KubernetesPage() {
 
   return (
     <>
-      <main className="anim-fade flex flex-1 flex-col overflow-hidden">
+      <main className="anim-fade flex min-w-0 flex-1 flex-col overflow-hidden">
         <PageHeader
           title={tr('Kubernetes 集群', 'Kubernetes clusters')}
           subtitle={tr(
@@ -168,7 +168,7 @@ export default function KubernetesPage() {
           }
         />
 
-        <div className="flex-1 overflow-y-auto px-6 py-6">
+        <div className="min-w-0 flex-1 overflow-y-auto px-6 py-6">
           {error && (
             <div className="mb-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">
               {tr('加载失败：', 'Load failed: ')}
@@ -176,7 +176,7 @@ export default function KubernetesPage() {
             </div>
           )}
 
-          <div className="overflow-x-auto rounded-xl border border-zinc-800/60 bg-zinc-900/40">
+          <div className="w-full min-w-0 max-w-full overflow-x-auto rounded-xl border border-zinc-800/60 bg-zinc-900/40">
             <table className="min-w-[820px] w-full text-sm">
               <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
                 <tr>
@@ -185,7 +185,7 @@ export default function KubernetesPage() {
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('状态', 'Status')}</th>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('Controller Edge', 'Controller edge')}</th>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('最近同步', 'Last sync')}</th>
-                  <th className="px-4 py-2.5 text-right">{tr('操作', 'Actions')}</th>
+                  <th className="sticky right-0 z-20 min-w-[340px] border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-right">{tr('操作', 'Actions')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/40">
@@ -242,7 +242,7 @@ export default function KubernetesPage() {
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
                         {relativeTime(clusterSyncTime(cluster))}
                       </td>
-                      <td className="px-4 py-2.5 text-right" onClick={(ev) => ev.stopPropagation()}>
+                      <td className="sticky right-0 z-10 min-w-[340px] border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-right" onClick={(ev) => ev.stopPropagation()}>
                         <div className="inline-flex items-center justify-end gap-1">
                           <Link
                             to={`/kubernetes/${cluster.id}`}
@@ -1007,7 +1007,7 @@ export function KubernetesClusterDetailPage() {
                     </Button>
                   </div>
                 )}
-                <div className="overflow-x-auto">
+                <div className="w-full min-w-0 max-w-full overflow-x-auto">
                   {activeTab === 'nodes' && (
                     <NodesTable
                       items={filteredNodes}
@@ -3001,7 +3001,7 @@ function NodesTable({
           <th className="whitespace-nowrap px-4 py-2.5 text-left">CPU</th>
           <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('内存', 'Memory')}</th>
           <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('最近同步', 'Last sync')}</th>
-          {actions && <th className="whitespace-nowrap px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
+          {actions && <th className="sticky right-0 z-20 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
         </tr>
       </thead>
       <tbody className="divide-y divide-zinc-800/40">
@@ -3031,7 +3031,7 @@ function NodesTable({
               <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-zinc-400">{formatKubernetesMemory(resourceValue(item.capacity, 'memory'))}</td>
               <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">{relativeTime(item.last_seen_at)}</td>
               {actions && (
-                <td className="whitespace-nowrap px-4 py-2.5 text-right">
+                <td className="sticky right-0 z-10 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-right">
                   <ResourceRowActions issue={issue} actions={actions} />
                 </td>
               )}
@@ -3101,7 +3101,7 @@ function WorkloadsTable({
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('进度', 'Progress')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('状态', 'Status')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('最近同步', 'Last sync')}</th>
-            {actions && <th className="whitespace-nowrap px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
+            {actions && <th className="sticky right-0 z-20 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-zinc-800/40">
@@ -3149,7 +3149,7 @@ function WorkloadsTable({
                   </td>
                   <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">{relativeTime(item.last_seen_at)}</td>
                   {actions && (
-                    <td className="whitespace-nowrap px-4 py-2.5 text-right">
+                    <td className="sticky right-0 z-10 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-right">
                       <ResourceRowActions issue={issue} actions={actions} />
                     </td>
                   )}
@@ -3271,7 +3271,7 @@ function PodsTable({
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('重启', 'Restarts')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('原因', 'Reason')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('最近同步', 'Last sync')}</th>
-            {actions && <th className="whitespace-nowrap px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
+            {actions && <th className="sticky right-0 z-20 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-zinc-800/40">
@@ -3290,7 +3290,7 @@ function PodsTable({
                 <td className="max-w-[220px] truncate px-4 py-2.5 text-zinc-400">{item.reason || '—'}</td>
                 <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">{relativeTime(item.last_seen_at)}</td>
                 {actions && (
-                  <td className="whitespace-nowrap px-4 py-2.5 text-right">
+                  <td className="sticky right-0 z-10 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-right">
                     <ResourceRowActions issue={issue} actions={actions} />
                   </td>
                 )}
@@ -3352,7 +3352,7 @@ function EventsTable({
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('次数', 'Count')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('最近事件', 'Last event')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('同步', 'Synced')}</th>
-            {actions && <th className="whitespace-nowrap px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
+            {actions && <th className="sticky right-0 z-20 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-zinc-800/40">
@@ -3373,7 +3373,7 @@ function EventsTable({
                 </td>
                 <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">{relativeTime(item.last_seen_at)}</td>
                 {actions && (
-                  <td className="whitespace-nowrap px-4 py-2.5 text-right">
+                  <td className="sticky right-0 z-10 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-right">
                     {issue ? <ResourceRowActions issue={issue} actions={actions} /> : <span className="text-zinc-600">—</span>}
                   </td>
                 )}

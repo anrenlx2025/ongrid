@@ -409,3 +409,86 @@ message KubernetesActionResponse {
     int32 skipped_pod_count = 16 [json_name = "skipped_pod_count"];
     repeated KubernetesActionPodResult skipped_pods = 17 [json_name = "skipped_pods"];
 }
+
+// ============================================================
+// edge → cloud：网络邻居发现候选
+// geminio method: "push_network_discovery"
+// ============================================================
+
+message NetworkDiscoveryRequest {
+    uint64 edge_id = 1 [json_name = "edge_id"];
+    int64 observed_at = 2 [json_name = "observed_at"];
+    repeated NetworkDiscoveryCandidate candidates = 3 [json_name = "candidates"];
+}
+
+message NetworkDiscoveryCandidate {
+    string ip_address = 1 [json_name = "ip_address"];
+    string mac = 2 [json_name = "mac"];
+    string interface_name = 3 [json_name = "interface_name"];
+    string source = 4 [json_name = "source"];
+    string lldp_chassis_id = 5 [json_name = "lldp_chassis_id"];
+    string lldp_chassis_subtype = 6 [json_name = "lldp_chassis_subtype"];
+    string snmp_engine_id = 7 [json_name = "snmp_engine_id"];
+    string snmp_chassis_id = 8 [json_name = "snmp_chassis_id"];
+    string snmp_chassis_subtype = 9 [json_name = "snmp_chassis_subtype"];
+    string vendor = 10 [json_name = "vendor"];
+    string model = 11 [json_name = "model"];
+    string serial_number = 12 [json_name = "serial_number"];
+    string bridge_base_mac = 13 [json_name = "bridge_base_mac"];
+    string sys_name = 14 [json_name = "sys_name"];
+    string sys_description = 15 [json_name = "sys_description"];
+    map<string, string> source_data = 16 [json_name = "source_data"];
+    repeated NetworkInterfaceReport interfaces = 17 [json_name = "interfaces"];
+    repeated NetworkLinkReport links = 18 [json_name = "links"];
+}
+
+message NetworkInterfaceReport {
+    int32 if_index = 1 [json_name = "if_index"];
+    string name = 2 [json_name = "name"];
+    string mac = 3 [json_name = "mac"];
+    string interface_kind = 4 [json_name = "interface_kind"];
+    string description = 5 [json_name = "description"];
+    string admin_status = 6 [json_name = "admin_status"];
+    string oper_status = 7 [json_name = "oper_status"];
+    repeated string addresses = 8 [json_name = "addresses"];
+}
+
+message NetworkLinkReport {
+    string remote_chassis_id = 1 [json_name = "remote_chassis_id"];
+    string remote_chassis_subtype = 2 [json_name = "remote_chassis_subtype"];
+    string local_interface_name = 3 [json_name = "local_interface_name"];
+    string remote_interface_name = 4 [json_name = "remote_interface_name"];
+    string link_kind = 5 [json_name = "link_kind"];
+}
+
+message NetworkDiscoveryResponse {
+    int32 accepted = 1 [json_name = "accepted"];
+}
+
+// cloud -> edge: read-only SNMP identity verification for a discovery candidate
+// geminio method: "probe_network_snmp"
+message ProbeNetworkSNMPRequest {
+    string address = 1 [json_name = "address"];
+    uint32 port = 2 [json_name = "port"];
+    string version = 3 [json_name = "version"];
+    string community = 4 [json_name = "community"];
+    string username = 5 [json_name = "username"];
+    string auth_protocol = 6 [json_name = "auth_protocol"];
+    string auth_secret = 7 [json_name = "auth_secret"];
+    string privacy_protocol = 8 [json_name = "privacy_protocol"];
+    string privacy_secret = 9 [json_name = "privacy_secret"];
+    int32 timeout_milliseconds = 10 [json_name = "timeout_ms"];
+    int32 retries = 11 [json_name = "retries"];
+}
+
+message ProbeNetworkSNMPResponse {
+    bool ok = 1 [json_name = "ok"];
+    string error = 2 [json_name = "error"];
+    string ip_address = 3 [json_name = "ip_address"];
+    string sys_name = 4 [json_name = "sys_name"];
+    string sys_description = 5 [json_name = "sys_description"];
+    string sys_object_id = 6 [json_name = "sys_object_id"];
+    string snmp_engine_id = 7 [json_name = "snmp_engine_id"];
+    repeated NetworkInterfaceReport interfaces = 8 [json_name = "interfaces"];
+    repeated NetworkLinkReport links = 9 [json_name = "links"];
+}

@@ -18,10 +18,15 @@ import {
   Check,
   ExternalLink,
   TerminalSquare,
+  ShieldCheck,
+  Network,
+  Boxes,
+  HardDrive,
+  Server,
 } from "lucide-react";
 import { StatusPill } from "@/components/StatusPill";
 import { Modal } from "@/components/Modal";
-import { Chip } from "@/components/ui";
+import { Button, Chip } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { openMetricDrilldown } from "@/lib/drilldown";
 import { relativeTime } from "@/lib/format";
@@ -59,7 +64,17 @@ import {
   type TopologyNode,
   type TopologyRelation,
 } from "@/api/topology";
-import { deleteDevice, listDevices, type Device } from "@/api/devices";
+import {
+  deleteDevice,
+  getNetworkDeviceDetail,
+  listDevices,
+  listNetworkCandidates,
+  scanNetworkCandidate,
+  type Device,
+  type NetworkDiscoveryCandidate,
+  type NetworkDeviceDetail,
+  type NetworkSNMPScanInput,
+} from "@/api/devices";
 import {
   filterVisibleDeviceEdges,
   isK8sControllerEdge,
@@ -203,6 +218,51 @@ function asEdgeRoles(roles: string[] | undefined): EdgeRole[] {
   return roles.filter((r): r is EdgeRole => EDGE_ROLES.includes(r as EdgeRole));
 }
 
+function isManagedNetworkDevice(device: Device): boolean {
+  return device.os?.trim().toLowerCase() === "network";
+}
+
+function DeviceTypeIcon({
+  device,
+  attachments,
+}: {
+  device: Device;
+  attachments: K8sEdgeAttachment[];
+}) {
+  const { tr } = useI18n();
+  const iconClass = "h-[13px] w-[13px] shrink-0";
+
+  if (isManagedNetworkDevice(device)) {
+    return (
+      <span title={tr("网络设备", "Network device")} className="text-sky-400">
+        <Network className={iconClass} aria-hidden />
+      </span>
+    );
+  }
+  if (attachments.length > 0) {
+    return (
+      <span
+        title={tr("Kubernetes 设备", "Kubernetes device")}
+        className="text-emerald-400"
+      >
+        <Boxes className={iconClass} aria-hidden />
+      </span>
+    );
+  }
+  if (device.roles?.includes("storage")) {
+    return (
+      <span title={tr("存储设备", "Storage device")} className="text-amber-400">
+        <HardDrive className={iconClass} aria-hidden />
+      </span>
+    );
+  }
+  return (
+    <span title={tr("主机设备", "Host device")} className="text-zinc-400">
+      <Server className={iconClass} aria-hidden />
+    </span>
+  );
+}
+
 export default function EdgesPage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -215,12 +275,23 @@ export default function EdgesPage() {
     const v = new URLSearchParams(location.search).get("roles")?.trim() ?? "";
     return v;
   }, [location.search]);
+  const discoveryView = useMemo(
+    () => new URLSearchParams(location.search).get("view") === "network-discovery",
+    [location.search],
+  );
   const headerTitle = (() => {
     const pair = ROLE_FILTER_TITLES[rolesFilter];
     return pair ? tr(pair[0], pair[1]) : tr("设备", "Devices");
   })();
 
   const [devices, setDevices] = useState<DeviceRow[]>([]);
+  const [networkDetails, setNetworkDetails] = useState<
+    Record<number, NetworkDeviceDetail>
+  >({});
+  const loadingNetworkDetailIDs = useRef(new Set<number>());
+  const compactNetworkTable =
+    rolesFilter === "network" && devices.every(isManagedNetworkDevice);
+  const [candidates, setCandidates] = useState<NetworkDiscoveryCandidate[]>([]);
   const [k8sAttachments, setK8sAttachments] =
     useState<K8sEdgeAttachmentMap | null>(null);
   const [loading, setLoading] = useState(true);
@@ -261,9 +332,16 @@ export default function EdgesPage() {
   const [batchUpgradeOpen, setBatchUpgradeOpen] = useState(false);
   // True while any batch RPC is in flight (disables the toolbar buttons).
   const [batchBusy, setBatchBusy] = useState(false);
+  const [snmpTarget, setSnmpTarget] = useState<NetworkDiscoveryCandidate | null>(null);
 
   const refresh = useCallback(async () => {
     try {
+      if (discoveryView) {
+        const candidateResp = await listNetworkCandidates();
+        setCandidates(candidateResp.items ?? []);
+        setError(null);
+        return;
+      }
       const [deviceResp, edgeResp, attachments, topologyClustersByNodeID] =
         await Promise.all([
           listDevices(rolesFilter ? { roles: rolesFilter } : undefined),
@@ -284,14 +362,24 @@ export default function EdgesPage() {
       const items = (deviceResp.items ?? [])
         .map((d) => ({
           ...d,
-          hostEdge: edgeByDeviceID.get(d.id),
+          // Discovery links identify which Edge observed a network device;
+          // they do not make that Edge the device's host runtime.
+          hostEdge: isManagedNetworkDevice(d)
+            ? undefined
+            : edgeByDeviceID.get(d.id),
           topologyClusters: d.node_id
             ? (topologyClustersByNodeID.get(d.node_id) ?? [])
             : [],
         }))
         .filter(
           (device) => device.hostEdge || !controllerDeviceIDs.has(device.id),
-        );
+        )
+        .sort((a, b) => {
+          const kindOrder =
+            Number(isManagedNetworkDevice(a)) -
+            Number(isManagedNetworkDevice(b));
+          return kindOrder || b.id - a.id;
+        });
       setDevices(items);
       setK8sAttachments(attachments);
       // Drop any selected ids that no longer appear (deleted / filtered out)
@@ -315,12 +403,42 @@ export default function EdgesPage() {
     } finally {
       setLoading(false);
     }
-  }, [rolesFilter, tr]);
+  }, [discoveryView, rolesFilter, tr]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
   usePoll(refresh, 10_000);
+
+  useEffect(() => {
+    if (rolesFilter !== "network") return;
+    const missing = devices.filter(
+      (device) =>
+        isManagedNetworkDevice(device) &&
+        !networkDetails[device.id] &&
+        !loadingNetworkDetailIDs.current.has(device.id),
+    );
+    if (missing.length === 0) return;
+    missing.forEach((device) => loadingNetworkDetailIDs.current.add(device.id));
+    void Promise.allSettled(
+      missing.map(async (device) => ({
+        id: device.id,
+        detail: await getNetworkDeviceDetail(device.id),
+      })),
+    ).then((results) => {
+      const loaded: Record<number, NetworkDeviceDetail> = {};
+      results.forEach((result, index) => {
+        const id = missing[index].id;
+        loadingNetworkDetailIDs.current.delete(id);
+        if (result.status === "fulfilled") {
+          loaded[result.value.id] = result.value.detail;
+        }
+      });
+      if (Object.keys(loaded).length > 0) {
+        setNetworkDetails((current) => ({ ...current, ...loaded }));
+      }
+    });
+  }, [devices, networkDetails, rolesFilter]);
 
   async function onCreate(name: string) {
     const created: CreateEdgeResponse = await createEdge({ name });
@@ -582,17 +700,16 @@ export default function EdgesPage() {
 
   return (
     <>
-      <main className="anim-fade flex flex-1 flex-col overflow-hidden">
+      <main className="anim-fade flex min-w-0 flex-1 flex-col overflow-hidden">
         <header className="app-header flex items-center justify-between border-b border-zinc-800/60 px-6 py-4">
           <div>
             <h1 className="text-base font-semibold text-zinc-100">
               {headerTitle}
             </h1>
             <p className="mt-0.5 text-xs text-zinc-500">
-              {tr(
-                `${devices.length} 台设备 · 每 10 秒自动刷新`,
-                `${devices.length} device(s) · auto-refresh every 10s`,
-              )}
+              {discoveryView
+                ? tr(`${candidates.length} 个候选 · 等待 SNMP 校验`, `${candidates.length} candidates · waiting for SNMP verification`)
+                : tr(`${devices.length} 台设备 · 每 10 秒自动刷新`, `${devices.length} device(s) · auto-refresh every 10s`)}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -607,27 +724,37 @@ export default function EdgesPage() {
               <TerminalSquare size={12} />{" "}
               {tr("WebSSH 会话", "WebSSH sessions")}
             </Link>
-            <button
-              type="button"
-              onClick={() => setBatchInstallOpen(true)}
-              disabled={!canMutate}
-              aria-label={tr("批量安装设备", "Batch install devices")}
-              className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Copy size={12} /> {tr("批量安装", "Batch install")}
-            </button>
-            <button
-              type="button"
-              onClick={() => setCreateOpen(true)}
-              aria-label={tr("新建设备", "New device")}
-              className="inline-flex items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90"
-            >
-              <Plus size={12} /> {tr("新建", "New")}
-            </button>
+            {!discoveryView && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setBatchInstallOpen(true)}
+                  disabled={!canMutate}
+                  aria-label={tr("批量安装设备", "Batch install devices")}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Copy size={12} /> {tr("批量安装", "Batch install")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCreateOpen(true)}
+                  aria-label={tr("新建设备", "New device")}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90"
+                >
+                  <Plus size={12} /> {tr("新建", "New")}
+                </button>
+              </>
+            )}
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto px-6 py-6">
+        <div className="min-w-0 flex-1 overflow-y-auto px-6 py-6">
+          {rolesFilter !== "network" && (
+            <div className="mb-4 flex items-center gap-1 border-b border-zinc-800/60">
+              <button type="button" onClick={() => navigate("/devices")} className={cn("border-b-2 px-3 py-2 text-[11px] font-medium", !discoveryView ? "border-accent text-zinc-100" : "border-transparent text-zinc-500 hover:text-zinc-300")}>{tr("全部设备", "All devices")}</button>
+              <button type="button" onClick={() => navigate("/devices?view=network-discovery")} className={cn("border-b-2 px-3 py-2 text-[11px] font-medium", discoveryView ? "border-accent text-zinc-100" : "border-transparent text-zinc-500 hover:text-zinc-300")}>{tr("网络发现", "Network discovery")}</button>
+            </div>
+          )}
           {error && (
             <div
               role="alert"
@@ -636,6 +763,15 @@ export default function EdgesPage() {
               {error}
             </div>
           )}
+
+          {discoveryView ? (
+            <NetworkDiscoveryTable
+              candidates={candidates}
+              loading={loading}
+              onConfigure={setSnmpTarget}
+              tr={tr}
+            />
+          ) : <>
 
           {selected.size > 0 && (
             <div className="mb-3 flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3 py-2 text-xs">
@@ -677,8 +813,45 @@ export default function EdgesPage() {
             </div>
           )}
 
-          <div className="overflow-x-auto rounded-xl border border-zinc-800/60 bg-zinc-900/40">
-            <table className="w-full min-w-[1260px] text-sm">
+          <div className="w-full min-w-0 max-w-full overflow-x-auto rounded-xl border border-zinc-800/60 bg-zinc-900/40">
+            <table
+              className={cn(
+                "min-w-full text-xs",
+                compactNetworkTable
+                  ? "w-full min-w-[1400px] table-auto"
+                  : "w-[1637px] table-fixed",
+              )}
+            >
+              {compactNetworkTable ? (
+                <colgroup>
+                  <col style={{ width: 40 }} />
+                  <col style={{ width: 60 }} />
+                  <col style={{ width: "calc((100% - 950px) * 0.3)" }} />
+                  <col style={{ width: 120 }} />
+                  <col style={{ width: "calc((100% - 950px) * 0.3)" }} />
+                  <col style={{ width: 150 }} />
+                  <col style={{ width: 160 }} />
+                  <col style={{ width: 110 }} />
+                  <col style={{ width: "calc((100% - 950px) * 0.4)" }} />
+                  <col style={{ width: 120 }} />
+                  <col style={{ width: 190 }} />
+                </colgroup>
+              ) : (
+                <colgroup>
+                  <col className="w-10" />
+                  <col className="w-[52px]" />
+                  <col className="w-[220px]" />
+                  <col className="w-[230px]" />
+                  <col className="w-[190px]" />
+                  <col className="w-[130px]" />
+                  <col className="w-[130px]" />
+                  <col className="w-[90px]" />
+                  <col className="w-[110px]" />
+                  <col className="w-[110px]" />
+                  <col className="w-[145px]" />
+                  <col className="w-[190px]" />
+                </colgroup>
+              )}
               <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
                 <tr>
                   <th className="px-2.5 py-2.5 text-left">
@@ -696,25 +869,57 @@ export default function EdgesPage() {
                     />
                   </th>
                   <th className="px-2.5 py-2.5 text-left">ID</th>
-                  <th className="min-w-[360px] px-2.5 py-2.5 text-left">
-                    {tr("名称", "Name")}
-                  </th>
-                  <th className="min-w-[220px] px-2.5 py-2.5 text-left">
-                    {tr("主机名", "Hostname")}
-                  </th>
-                  <th className="px-2.5 py-2.5 text-left">IP</th>
-                  <th className="px-2.5 py-2.5 text-left">
-                    {tr("角色", "Roles")}
-                  </th>
-                  <th className="px-2.5 py-2.5 text-left">
-                    {tr("状态", "Status")}
-                  </th>
-                  <th className="px-2.5 py-2.5 text-left">
-                    {tr("最后心跳", "Last heartbeat")}
-                  </th>
-                  <th className="px-2.5 py-2.5 text-left">Access Key</th>
-                  <th className="px-2.5 py-2.5 text-left">Edge</th>
-                  <th className="sticky right-0 min-w-[176px] border-l border-zinc-800/60 bg-zinc-950 px-2.5 py-2.5 text-left">
+                  {compactNetworkTable ? (
+                    <>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("名称", "Name")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("设备类型", "Device type")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("厂商 / 型号", "Vendor / model")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("管理地址", "Management address")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">MAC</th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("可达状态", "Reachability")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("扫描源", "Scanner")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("最后发现", "Last observed")}
+                      </th>
+                    </>
+                  ) : (
+                    <>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("名称", "Name")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("接入类型", "Access type")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("主机名", "Hostname")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">IP</th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("角色", "Roles")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("状态", "Status")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("最后心跳", "Last heartbeat")}
+                      </th>
+                      <th className="px-2.5 py-2.5 text-left">Access Key</th>
+                      <th className="px-2.5 py-2.5 text-left">Edge</th>
+                    </>
+                  )}
+                  <th className="sticky right-0 z-20 border-l border-zinc-800/60 bg-zinc-950 px-2.5 py-2.5 text-left">
                     {tr("操作", "Actions")}
                   </th>
                 </tr>
@@ -723,7 +928,7 @@ export default function EdgesPage() {
                 {loading && devices.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={11}
+                      colSpan={compactNetworkTable ? 11 : 12}
                       className="px-4 py-10 text-center text-zinc-500"
                     >
                       {tr("加载中…", "Loading…")}
@@ -732,7 +937,7 @@ export default function EdgesPage() {
                 ) : devices.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={11}
+                      colSpan={compactNetworkTable ? 11 : 12}
                       className="px-4 py-10 text-center text-zinc-500"
                     >
                       {rolesFilter
@@ -749,6 +954,7 @@ export default function EdgesPage() {
                 ) : (
                   devices.map((d) => {
                     const edge = d.hostEdge;
+                    const networkDevice = isManagedNetworkDevice(d);
                     const attachments = edge
                       ? (k8sAttachments?.[edge.id] ?? [])
                       : [];
@@ -758,6 +964,129 @@ export default function EdgesPage() {
                         (edge ? displayEdgeName(edge, attachments) : "") ||
                         d.name
                       : d.name || d.hostname || edge?.name || "";
+                    if (compactNetworkTable) {
+                      const detail = networkDetails[d.id];
+                      const reachability = detail?.reachability_status
+                        ?.trim()
+                        .toLowerCase();
+                      const reachable = ["reachable", "online", "up"].includes(
+                        reachability ?? "",
+                      );
+                      const unreachable = [
+                        "unreachable",
+                        "offline",
+                        "down",
+                      ].includes(reachability ?? "");
+                      const vendorModel = [detail?.vendor, detail?.model]
+                        .filter(Boolean)
+                        .join(" · ");
+                      const scanner =
+                        detail?.scanner_host_name ||
+                        detail?.scanner_edge_name ||
+                        "—";
+                      return (
+                        <tr
+                          key={d.id}
+                          className="cursor-pointer transition-colors hover:bg-zinc-900/40"
+                          onClick={() =>
+                            navigate(`/devices/${encodeURIComponent(d.id)}`)
+                          }
+                        >
+                          <td
+                            className="px-2.5 py-2.5"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <input
+                              type="checkbox"
+                              aria-label={tr(
+                                `选择 ${displayName}`,
+                                `Select ${displayName}`,
+                              )}
+                              className="h-3.5 w-3.5 accent-accent"
+                              checked={selected.has(d.id)}
+                              onChange={() => toggleOne(d.id)}
+                            />
+                          </td>
+                          <td className="truncate whitespace-nowrap px-2.5 py-2.5 font-mono text-xs text-zinc-400">
+                            {d.id}
+                          </td>
+                          <td className="px-2.5 py-2.5 font-medium text-zinc-100">
+                            <div className="flex min-w-0 items-center gap-1.5">
+                              <DeviceTypeIcon device={d} attachments={[]} />
+                              <span className="min-w-0 flex-1 truncate">
+                                {displayName}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="truncate whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
+                            {detail?.device_kind || "—"}
+                          </td>
+                          <td className="truncate whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
+                            {vendorModel || "—"}
+                          </td>
+                          <td className="truncate whitespace-nowrap px-2.5 py-2.5 font-mono text-zinc-400">
+                            {detail?.management_address || d.ip_address || "—"}
+                          </td>
+                          <td className="truncate whitespace-nowrap px-2.5 py-2.5 font-mono text-zinc-400">
+                            {detail?.bridge_base_mac || "—"}
+                          </td>
+                          <td className="whitespace-nowrap px-2.5 py-2.5">
+                            <span className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400">
+                              <span
+                                className={cn(
+                                  "h-1.5 w-1.5 rounded-full",
+                                  reachable
+                                    ? "bg-emerald-500"
+                                    : unreachable
+                                      ? "bg-red-500"
+                                      : "bg-zinc-500",
+                                )}
+                              />
+                              {reachable
+                                ? tr("可达", "Reachable")
+                                : unreachable
+                                  ? tr("不可达", "Unreachable")
+                                  : tr("未知", "Unknown")}
+                            </span>
+                          </td>
+                          <td className="truncate whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
+                            {scanner}
+                          </td>
+                          <td className="truncate whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
+                            {detail?.last_observed_at
+                              ? relativeTime(detail.last_observed_at)
+                              : "—"}
+                          </td>
+                          <td
+                            className="sticky right-0 z-10 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-900 px-2.5 py-2.5 text-left"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              onClick={() =>
+                                navigate(
+                                  `/devices/${encodeURIComponent(String(d.id))}?tab=topology`,
+                                )
+                              }
+                              className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+                            >
+                              <ExternalLink size={14} />
+                              {tr("查看拓扑", "View topology")}
+                            </button>
+                            <RowMenu
+                              onViewTopology={() =>
+                                navigate(
+                                  `/devices/${encodeURIComponent(String(d.id))}?tab=topology`,
+                                )
+                              }
+                              onDeleteDevice={() => void onDeleteDevice(d)}
+                              deviceOnline={false}
+                              upgradePackageBusy={false}
+                            />
+                          </td>
+                        </tr>
+                      );
+                    }
                     return (
                       <tr
                         key={d.id}
@@ -802,8 +1131,12 @@ export default function EdgesPage() {
                         <td className="truncate whitespace-nowrap px-2.5 py-2.5 font-mono text-xs text-zinc-400">
                           {d.id}
                         </td>
-                        <td className="min-w-[360px] px-2.5 py-2.5 text-zinc-100">
+                        <td className="px-2.5 py-2.5 font-medium text-zinc-100">
                           <div className="flex min-w-0 items-center gap-1.5">
+                            <DeviceTypeIcon
+                              device={d}
+                              attachments={attachments}
+                            />
                             <span className="min-w-0 flex-1 truncate">
                               {displayName || (
                                 <span className="italic text-zinc-500">
@@ -811,13 +1144,21 @@ export default function EdgesPage() {
                                 </span>
                               )}
                             </span>
+                          </div>
+                        </td>
+                        <td className="overflow-hidden px-2.5 py-2.5">
+                          {networkDevice ? (
+                            <span className="inline-flex items-center rounded border border-sky-500/25 bg-sky-500/10 px-1.5 py-[1px] text-[10px] font-normal leading-4 text-sky-300">
+                              SNMP
+                            </span>
+                          ) : (
                             <EdgeAccessMeta
                               attachments={attachments}
                               topologyClusters={d.topologyClusters}
                             />
-                          </div>
+                          )}
                         </td>
-                        <td className="max-w-[260px] min-w-[220px] truncate whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
+                        <td className="truncate whitespace-nowrap px-2.5 py-2.5 text-xs text-zinc-400">
                           {d.hostname ||
                             extractHostname(edge?.host_info) ||
                             "—"}
@@ -825,55 +1166,107 @@ export default function EdgesPage() {
                         <td className="truncate whitespace-nowrap px-2.5 py-2.5 font-mono text-xs text-zinc-400">
                           {d.ip_address || extractIP(edge?.host_info) || "—"}
                         </td>
+                        {!compactNetworkTable && (
+                          <>
+                            <td
+                              className={cn(
+                                "whitespace-nowrap px-2.5 py-2.5",
+                                !managedByK8s &&
+                                  !networkDevice &&
+                                  "cursor-pointer",
+                              )}
+                              title={
+                                networkDevice
+                                  ? tr(
+                                      "网络设备角色由发现流程维护",
+                                      "Network device role is managed by discovery",
+                                    )
+                                  : managedByK8s
+                                  ? tr(
+                                      "Kubernetes 托管设备请在集群页管理",
+                                      "Manage Kubernetes-managed devices from the cluster page",
+                                    )
+                                  : tr("点击分配角色", "Click to assign roles")
+                              }
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                if (managedByK8s || networkDevice) return;
+                                setRolesEditTarget(d);
+                              }}
+                            >
+                              <RoleChips
+                                roles={asEdgeRoles(d.roles)}
+                                editable={!networkDevice}
+                              />
+                            </td>
+                            <td className="whitespace-nowrap px-2.5 py-2.5">
+                              {networkDevice ? (
+                                <span className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
+                                  {tr("已验证", "Verified")}
+                                </span>
+                              ) : (
+                                <StatusPill
+                                  status={d.online ? "online" : "offline"}
+                                />
+                              )}
+                            </td>
+                            <td className="truncate whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
+                              {!networkDevice && d.last_seen_at
+                                ? relativeTime(d.last_seen_at)
+                                : "—"}
+                            </td>
+                            <td className="truncate whitespace-nowrap px-2.5 py-2.5 font-mono text-xs text-zinc-400">
+                              {!networkDevice && edge ? (
+                                <span className="rounded bg-zinc-800/60 px-1.5 py-0.5">
+                                  {edge.access_key_id.slice(0, 8)}…
+                                </span>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                            <td className="overflow-visible whitespace-nowrap px-2.5 py-2.5 font-mono text-xs text-zinc-400">
+                              {networkDevice ? (
+                                <span className="text-zinc-600">—</span>
+                              ) : (
+                                <AgentVersionCell
+                                  agentVersion={edge?.agent_version}
+                                  managerVersion={managerVersion}
+                                />
+                              )}
+                            </td>
+                          </>
+                        )}
                         <td
-                          className={cn(
-                            "whitespace-nowrap px-2.5 py-2.5",
-                            !managedByK8s && "cursor-pointer",
-                          )}
-                          title={
-                            managedByK8s
-                              ? tr(
-                                  "Kubernetes 托管设备请在集群页管理",
-                                  "Manage Kubernetes-managed devices from the cluster page",
-                                )
-                              : tr("点击分配角色", "Click to assign roles")
-                          }
-                          onClick={(ev) => {
-                            ev.stopPropagation();
-                            if (managedByK8s) return;
-                            setRolesEditTarget(d);
-                          }}
-                        >
-                          <RoleChips roles={asEdgeRoles(d.roles)} />
-                        </td>
-                        <td className="whitespace-nowrap px-2.5 py-2.5">
-                          <StatusPill
-                            status={d.online ? "online" : "offline"}
-                          />
-                        </td>
-                        <td className="truncate whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
-                          {d.last_seen_at ? relativeTime(d.last_seen_at) : "—"}
-                        </td>
-                        <td className="truncate whitespace-nowrap px-2.5 py-2.5 font-mono text-xs text-zinc-400">
-                          {edge ? (
-                            <span className="rounded bg-zinc-800/60 px-1.5 py-0.5">
-                              {edge.access_key_id.slice(0, 8)}…
-                            </span>
-                          ) : (
-                            "—"
-                          )}
-                        </td>
-                        <td className="truncate whitespace-nowrap px-2.5 py-2.5 font-mono text-xs text-zinc-400">
-                          <AgentVersionCell
-                            agentVersion={edge?.agent_version}
-                            managerVersion={managerVersion}
-                          />
-                        </td>
-                        <td
-                          className="sticky right-0 min-w-[176px] whitespace-nowrap border-l border-zinc-800/60 bg-zinc-900 px-2.5 py-2.5 text-left"
+                          className="sticky right-0 z-10 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-900 px-2.5 py-2.5 text-left"
                           onClick={(ev) => ev.stopPropagation()}
                         >
-                          {managedByK8s ? (
+                          {networkDevice ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  navigate(
+                                    `/devices/${encodeURIComponent(String(d.id))}?tab=topology`,
+                                  )
+                                }
+                                className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+                              >
+                                <ExternalLink size={14} />
+                                {tr("查看拓扑", "View topology")}
+                              </button>
+                              <RowMenu
+                                onViewTopology={() =>
+                                  navigate(
+                                    `/devices/${encodeURIComponent(String(d.id))}?tab=topology`,
+                                  )
+                                }
+                                onDeleteDevice={() => void onDeleteDevice(d)}
+                                deviceOnline={false}
+                                upgradePackageBusy={false}
+                              />
+                            </>
+                          ) : managedByK8s ? (
                             <ShellButton device={d} canMutate={canMutate} />
                           ) : (
                             <>
@@ -942,6 +1335,7 @@ export default function EdgesPage() {
               </tbody>
             </table>
           </div>
+          </>}
         </div>
       </main>
 
@@ -988,7 +1382,7 @@ export default function EdgesPage() {
         />
       )}
       {batchUpgradeOpen && (
-        <BatchUpgradeModal
+      <BatchUpgradeModal
           count={selectedHostEdgeIds.length}
           onClose={() => setBatchUpgradeOpen(false)}
           onSubmit={async (url, sha256) => {
@@ -1009,6 +1403,18 @@ export default function EdgesPage() {
               setBatchBusy(false);
             }
           }}
+        />
+      )}
+      {snmpTarget && (
+        <SNMPScanModal
+          candidate={snmpTarget}
+          onClose={() => setSnmpTarget(null)}
+          onComplete={() => {
+            setSnmpTarget(null);
+            void refresh();
+            navigate("/devices");
+          }}
+          tr={tr}
         />
       )}
       {toast && (
@@ -1105,6 +1511,128 @@ function ClusterChipLink({
         </span>
       </Chip>
     </Link>
+  );
+}
+
+function NetworkDiscoveryTable({
+  candidates,
+  loading,
+  onConfigure,
+  tr,
+}: {
+  candidates: NetworkDiscoveryCandidate[];
+  loading: boolean;
+  onConfigure(candidate: NetworkDiscoveryCandidate): void;
+  tr: (zh: string, en: string) => string;
+}) {
+  const sourceLabel = (source: string) => {
+    switch (source.toLowerCase()) {
+      case "arp": return tr("ARP 邻居", "ARP neighbor");
+      case "gateway": return tr("默认网关", "Default gateway");
+      case "lldp": return tr("LLDP 邻居", "LLDP neighbor");
+      case "snmp": return tr("SNMP 校验", "SNMP verification");
+      default: return source || tr("未知来源", "Unknown source");
+    }
+  };
+  return (
+    <div className="overflow-x-auto rounded-xl border border-zinc-800/60 bg-zinc-900/40">
+      <table className="w-full min-w-[1040px] text-xs">
+        <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
+          <tr>
+            <th className="px-3 py-2.5 text-left">IP</th>
+            <th className="px-3 py-2.5 text-left">MAC</th>
+            <th className="px-3 py-2.5 text-left">{tr("扫描源", "Scanner")}</th>
+            <th className="px-3 py-2.5 text-left">{tr("发现方式", "Method")}</th>
+            <th className="px-3 py-2.5 text-left">{tr("置信度", "Confidence")}</th>
+            <th className="px-3 py-2.5 text-left">{tr("状态", "Status")}</th>
+            <th className="px-3 py-2.5 text-left">{tr("最后发现", "Last seen")}</th>
+            <th className="px-3 py-2.5 text-right">{tr("操作", "Actions")}</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-zinc-800/40">
+          {loading && candidates.length === 0 ? (
+            <tr><td colSpan={8} className="px-4 py-10 text-center text-zinc-500">{tr("加载中…", "Loading…")}</td></tr>
+          ) : candidates.length === 0 ? (
+            <tr><td colSpan={8} className="px-4 py-10 text-center text-zinc-500">{tr("暂未发现候选网络设备。", "No network candidates discovered yet.")}</td></tr>
+          ) : candidates.map((candidate) => {
+            const verified = candidate.status === "snmp_verified";
+            const promoted = candidate.status === "promoted";
+            return (
+              <tr key={candidate.id} className="hover:bg-zinc-900/60">
+                <td className="px-3 py-3 font-mono text-xs text-zinc-200">{candidate.ip_address || "—"}</td>
+                <td className="px-3 py-3 font-mono text-xs text-zinc-400">{candidate.mac || "—"}</td>
+                <td className="min-w-[220px] px-3 py-2.5 text-zinc-400">
+                  <div className="truncate text-xs font-medium text-zinc-300">{candidate.observer_host_name || tr("未知 Host", "Unknown host")}</div>
+                  <div className="truncate text-[10px] leading-4 text-zinc-600">{candidate.observer_edge_name || `Edge #${candidate.observer_edge_id}`} · Host</div>
+                </td>
+                <td className="min-w-[180px] whitespace-nowrap px-3 py-2.5 text-xs text-zinc-400">{sourceLabel(candidate.source)}{candidate.interface_name ? ` · ${candidate.interface_name}` : ""}</td>
+                <td className="whitespace-nowrap px-3 py-2.5 text-xs text-zinc-400">{candidate.confidence}%</td>
+                <td className="min-w-[132px] whitespace-nowrap px-3 py-2.5">
+                  <span className={cn("rounded border px-1.5 py-0.5 text-[11px]", promoted ? "border-emerald-500/30 text-emerald-300" : verified ? "border-sky-500/30 text-sky-300" : "border-zinc-700 text-zinc-400")}>
+                    {promoted ? tr("已加入设备", "Added") : verified ? tr("SNMP 已验证", "SNMP verified") : tr("待验证", "Awaiting verification")}
+                  </span>
+                </td>
+                <td className="whitespace-nowrap px-3 py-2.5 text-xs text-zinc-500">{candidate.last_seen_at ? relativeTime(candidate.last_seen_at) : "—"}</td>
+                <td className="whitespace-nowrap px-3 py-2.5 text-right">
+                  {!promoted && <Button variant="ghost" className="whitespace-nowrap" onClick={() => onConfigure(candidate)}><ShieldCheck size={13} />{tr("配置 SNMP", "Configure SNMP")}</Button>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SNMPScanModal({
+  candidate,
+  onClose,
+  onComplete,
+  tr,
+}: {
+  candidate: NetworkDiscoveryCandidate;
+  onClose(): void;
+  onComplete(): void;
+  tr: (zh: string, en: string) => string;
+}) {
+  const [input, setInput] = useState<NetworkSNMPScanInput>({
+    version: "v2c",
+    address: candidate.ip_address ?? "",
+    port: 161,
+    community: "",
+    timeout_ms: 3000,
+    retries: 1,
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const set = <K extends keyof NetworkSNMPScanInput>(key: K, value: NetworkSNMPScanInput[K]) => setInput((prev) => ({ ...prev, [key]: value }));
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      await scanNetworkCandidate(candidate.id, input);
+      onComplete();
+    } catch (err) {
+      setError((err as Error).message || tr("SNMP 校验失败", "SNMP verification failed"));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal open onClose={onClose} title={tr("验证网络设备", "Verify network device")} size="lg" footer={<div className="flex justify-end gap-2"><Button onClick={onClose}>{tr("取消", "Cancel")}</Button><Button variant="primary" disabled={busy} onClick={() => void submit()}><ShieldCheck size={13} />{busy ? tr("校验中…", "Verifying…") : tr("校验并加入设备", "Verify and add")}</Button></div>}>
+      <div className="space-y-4 text-xs">
+        <p className="text-zinc-400">{tr("只有 SNMP 读取成功后，候选设备才会进入全部设备和正式拓扑。凭证不会保存。", "The candidate enters All devices and the formal topology only after a successful SNMP read. Credentials are not stored.")}</p>
+        {error && <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-red-300">{error}</div>}
+        <div className="grid grid-cols-2 gap-3">
+          <label className="text-zinc-400">{tr("设备名称", "Device name")}<input value={input.name ?? ""} onChange={(e) => set("name", e.target.value)} placeholder={tr("可选，默认使用 sysName", "Optional, defaults to sysName")} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100" /></label>
+          <label className="text-zinc-400">{tr("地址", "Address")}<input value={input.address ?? ""} onChange={(e) => set("address", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 font-mono text-zinc-100" /></label>
+          <label className="text-zinc-400">{tr("版本", "Version")}<select value={input.version} onChange={(e) => set("version", e.target.value as "v2c" | "v3")} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100"><option value="v2c">SNMP v2c</option><option value="v3">SNMP v3</option></select></label>
+          <label className="text-zinc-400">Port<input type="number" value={input.port ?? 161} onChange={(e) => set("port", Number(e.target.value))} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 font-mono text-zinc-100" /></label>
+        </div>
+        {input.version === "v2c" ? <label className="block text-zinc-400">Community<input value={input.community ?? ""} onChange={(e) => set("community", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 font-mono text-zinc-100" /></label> : <div className="grid grid-cols-2 gap-3"><label className="text-zinc-400">Username<input value={input.username ?? ""} onChange={(e) => set("username", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100" /></label><label className="text-zinc-400">Auth protocol<input value={input.auth_protocol ?? "none"} onChange={(e) => set("auth_protocol", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100" /></label><label className="text-zinc-400">Auth secret<input type="password" value={input.auth_secret ?? ""} onChange={(e) => set("auth_secret", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100" /></label><label className="text-zinc-400">Privacy protocol<input value={input.privacy_protocol ?? "none"} onChange={(e) => set("privacy_protocol", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100" /></label><label className="text-zinc-400">Privacy secret<input type="password" value={input.privacy_secret ?? ""} onChange={(e) => set("privacy_secret", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100" /></label></div>}
+      </div>
+    </Modal>
   );
 }
 
@@ -1418,7 +1946,13 @@ function BatchUpgradeModal({
 // RoleChips renders the roles bit set as small color-coded chips. Empty
 // list shows a "未分类" placeholder. The wrapping <td> is what's clickable;
 // these chips are non-interactive on their own.
-function RoleChips({ roles }: { roles: EdgeRole[] }) {
+function RoleChips({
+  roles,
+  editable = true,
+}: {
+  roles: EdgeRole[];
+  editable?: boolean;
+}) {
   const { tr } = useI18n();
   // The wrapping <td> is what's clickable — these chips are visual
   // indicators only. The dashed "+" chip exists to ADVERTISE the
@@ -1446,12 +1980,14 @@ function RoleChips({ roles }: { roles: EdgeRole[] }) {
           {tr(EDGE_ROLE_LABELS[r], EDGE_ROLE_LABELS_EN[r])}
         </span>
       ))}
-      <span
-        className="inline-flex items-center rounded border border-dashed border-zinc-700 px-1 py-0.5 text-[11px] text-zinc-500 hover:border-accent hover:text-accent"
-        aria-label={tr("编辑角色", "Edit roles")}
-      >
-        <Plus size={10} />
-      </span>
+      {editable && (
+        <span
+          className="inline-flex items-center rounded border border-dashed border-zinc-700 px-1 py-0.5 text-[11px] text-zinc-500 hover:border-accent hover:text-accent"
+          aria-label={tr("编辑角色", "Edit roles")}
+        >
+          <Plus size={10} />
+        </span>
+      )}
     </span>
   );
 }
@@ -1728,7 +2264,7 @@ function RowMenu({
   onUpgradePackage,
   upgradePackageBusy,
 }: {
-  onAssignRoles(): void;
+  onAssignRoles?: () => void;
   onViewTopology(): void;
   onDeleteDevice(): void;
   deviceOnline: boolean;
@@ -1798,16 +2334,18 @@ function RowMenu({
           <div className="px-3 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500">
             {tr("设备操作", "Device actions")}
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              setOpen(false);
-              onAssignRoles();
-            }}
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800"
-          >
-            <Plus size={13} /> {tr("分配角色", "Assign roles")}
-          </button>
+          {onAssignRoles && (
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onAssignRoles();
+              }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800"
+            >
+              <Plus size={13} /> {tr("分配角色", "Assign roles")}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {

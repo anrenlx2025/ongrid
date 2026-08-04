@@ -91,8 +91,12 @@ type fakeRepo struct {
 	orphanDevices   []*devicemodel.Device
 }
 
-func (r *fakeRepo) FindOrCreateByFingerprint(context.Context, *devicemodel.Device) (*devicemodel.Device, error) {
-	return nil, nil
+func (r *fakeRepo) FindOrCreateByFingerprint(_ context.Context, seed *devicemodel.Device) (*devicemodel.Device, error) {
+	if seed.ID == 0 {
+		seed.ID = 42
+	}
+	r.byID[seed.ID] = seed
+	return seed, nil
 }
 
 func (r *fakeRepo) RebindFingerprint(context.Context, string, string) error { return nil }
@@ -157,9 +161,11 @@ func (r *fakeRepo) ListWithoutLiveEdges(context.Context, int) ([]*devicemodel.De
 type fakeLinks struct {
 	rows     []*devicemodel.EdgeDevice
 	unlinked [][3]uint64
+	linked   [][2]uint64
 }
 
-func (l *fakeLinks) Link(context.Context, uint64, uint64, devicemodel.EdgeDeviceRelationType) error {
+func (l *fakeLinks) Link(_ context.Context, edgeID, deviceID uint64, _ devicemodel.EdgeDeviceRelationType) error {
+	l.linked = append(l.linked, [2]uint64{edgeID, deviceID})
 	return nil
 }
 

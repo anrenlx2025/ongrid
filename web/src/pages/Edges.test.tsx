@@ -231,7 +231,7 @@ describe("EdgesPage", () => {
       "bg-indigo-500/10",
       "text-indigo-300",
     );
-    expect(screen.getByRole("table")).toHaveClass("w-full", "min-w-[1260px]");
+    expect(screen.getByRole("table")).toHaveClass("min-w-full", "table-fixed");
   });
 
   it("点击 K8s 托管设备行进入设备详情，操作列只保留 WebSSH", async () => {
@@ -593,6 +593,117 @@ describe("EdgesPage", () => {
         /--enrollment-token=oen_first_cluster_token/,
       ),
     ).toBeInTheDocument();
+  });
+
+  it("按主机、Kubernetes、存储和网络设备展示类型图标", async () => {
+    server.use(
+      http.get("/api/v1/devices", () =>
+        HttpResponse.json({
+          items: [
+            { id: 17, name: "k8s-host", hostname: "k8s-host", roles: [], online: true },
+            { id: 19, name: "app-host", hostname: "app-host", roles: ["server"], online: true },
+            { id: 141, name: "storage-host", hostname: "storage-host", roles: ["storage"], online: true },
+            { id: 140, name: "core-switch", hostname: "core-switch", os: "network", roles: ["network"], online: false },
+          ],
+          total: 4,
+        }),
+      ),
+      http.get("/api/v1/edges", () =>
+        HttpResponse.json({
+          items: [
+            { id: 5, name: "k8s-edge", status: "online", roles: [], access_key_id: "ak-k8s", device_id: 17, agent_version: "dev" },
+            { id: 9, name: "app-edge", status: "online", roles: ["server"], access_key_id: "ak-app", device_id: 19, agent_version: "dev" },
+            { id: 12, name: "storage-edge", status: "online", roles: ["storage"], access_key_id: "ak-storage", device_id: 141, agent_version: "dev" },
+          ],
+          total: 3,
+        }),
+      ),
+      http.get("/api/v1/k8s/edge-attachments", () =>
+        HttpResponse.json({
+          items: [
+            { edge_id: 5, cluster_id: 1, cluster_name: "prod-k8s", node_name: "k8s-host", kind: "k8s-node" },
+          ],
+          total: 1,
+        }),
+      ),
+      http.get("/api/v1/topology/nodes", () =>
+        HttpResponse.json({ items: [], total: 0 }),
+      ),
+      http.get("/api/v1/topology/relations", () =>
+        HttpResponse.json({ items: [], total: 0 }),
+      ),
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/devices"]}>
+        <EdgesPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTitle("Kubernetes 设备")).toBeInTheDocument();
+    expect(screen.getByTitle("主机设备")).toBeInTheDocument();
+    expect(screen.getByTitle("存储设备")).toBeInTheDocument();
+    expect(screen.getByTitle("网络设备")).toBeInTheDocument();
+
+    const networkRow = screen.getAllByText("core-switch")[0].closest(
+      "tr",
+    ) as HTMLTableRowElement;
+    expect(within(networkRow).getByText("SNMP")).toBeInTheDocument();
+    expect(within(networkRow).getByText("查看拓扑")).toBeInTheDocument();
+    expect(within(networkRow).queryByText("查看图表")).not.toBeInTheDocument();
+    expect(within(networkRow).queryByText("终端")).not.toBeInTheDocument();
+  });
+
+  it("网络设备筛选展示资产字段并隐藏网络发现入口", async () => {
+    server.use(
+      http.get("/api/v1/devices", () =>
+        HttpResponse.json({
+          items: [
+            { id: 140, name: "core-switch", hostname: "core-switch", os: "network", arch: "network", ip_address: "10.20.0.3", roles: ["network"], online: false },
+          ],
+          total: 1,
+        }),
+      ),
+      http.get("/api/v1/edges", () => HttpResponse.json({ items: [], total: 0 })),
+      http.get("/api/v1/k8s/edge-attachments", () =>
+        HttpResponse.json({ items: [], total: 0 }),
+      ),
+      http.get("/api/v1/topology/nodes", () =>
+        HttpResponse.json({ items: [], total: 0 }),
+      ),
+      http.get("/api/v1/topology/relations", () =>
+        HttpResponse.json({ items: [], total: 0 }),
+      ),
+      http.get("/api/v1/devices/140/network", () =>
+        HttpResponse.json({
+          device_id: 140,
+          device_kind: "switch",
+          vendor: "Ongrid Labs",
+          model: "VirtualSwitch 24",
+          management_address: "10.20.0.3",
+          bridge_base_mac: "b2:94:4a:34:5b:fb",
+          reachability_status: "reachable",
+          scanner_host_name: "scanner-host",
+          last_observed_at: "2026-06-29T10:00:00Z",
+        }),
+      ),
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/devices?roles=network"]}>
+        <EdgesPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findAllByText("core-switch");
+    const table = screen.getByRole("table");
+    expect(table).toHaveClass("w-full", "min-w-[1400px]", "table-auto");
+    expect(table.querySelectorAll("col")).toHaveLength(11);
+    expect(screen.queryByRole("button", { name: "网络发现" })).not.toBeInTheDocument();
+    expect(await screen.findByText("Ongrid Labs · VirtualSwitch 24")).toBeInTheDocument();
+    expect(screen.getByText("b2:94:4a:34:5b:fb")).toBeInTheDocument();
+    expect(screen.getByText("可达")).toBeInTheDocument();
+    expect(screen.getByText("scanner-host")).toBeInTheDocument();
   });
 });
 

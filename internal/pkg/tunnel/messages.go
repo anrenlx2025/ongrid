@@ -18,17 +18,19 @@ import (
 // Method names used on the wire. Exposing them as constants keeps
 // callers spell-safe.
 const (
-	MethodRegisterEdge        = "register_edge"
-	MethodHeartbeat           = "heartbeat"
-	MethodPushHostMetrics     = "push_host_metrics"
-	MethodPushPromSamples     = "push_prom_samples"
-	MethodPushK8sInventory    = "push_k8s_inventory"
-	MethodDescribeK8sResource = "describe_k8s_resource"
-	MethodQueryK8sLogs        = "query_k8s_logs"
-	MethodExecuteK8sAction    = "execute_k8s_action"
-	MethodGetHostLoad         = "get_host_load"
-	MethodGetProcessList      = "get_process_list"
-	MethodGetNetstat          = "get_netstat"
+	MethodRegisterEdge         = "register_edge"
+	MethodHeartbeat            = "heartbeat"
+	MethodPushHostMetrics      = "push_host_metrics"
+	MethodPushPromSamples      = "push_prom_samples"
+	MethodPushNetworkDiscovery = "push_network_discovery"
+	MethodProbeNetworkSNMP     = "probe_network_snmp"
+	MethodPushK8sInventory     = "push_k8s_inventory"
+	MethodDescribeK8sResource  = "describe_k8s_resource"
+	MethodQueryK8sLogs         = "query_k8s_logs"
+	MethodExecuteK8sAction     = "execute_k8s_action"
+	MethodGetHostLoad          = "get_host_load"
+	MethodGetProcessList       = "get_process_list"
+	MethodGetNetstat           = "get_netstat"
 	// MethodExecuteSkill is the single dispatcher RPC for the skill
 	// framework. Edge agent registers one handler that looks up the
 	// skill key in its local registry — no per-skill wire method.
@@ -390,6 +392,88 @@ type PushPromSamplesRequest struct {
 // PushPromSamplesResponse reports how many samples the cloud accepted.
 type PushPromSamplesResponse struct {
 	Accepted int `json:"accepted"`
+}
+
+// NetworkDiscoveryRequest carries passive neighbor observations from an Edge.
+// ARP/gateway rows are candidates only; LLDP/SNMP identity fields allow the
+// manager to promote a candidate into a formal network Device.
+type NetworkDiscoveryRequest struct {
+	EdgeID     uint64                            `json:"edge_id,omitempty"`
+	ObservedAt int64                             `json:"observed_at"`
+	Candidates []NetworkDiscoveryCandidateReport `json:"candidates"`
+}
+
+type NetworkDiscoveryCandidateReport struct {
+	IPAddress          string                   `json:"ip_address,omitempty"`
+	MAC                string                   `json:"mac,omitempty"`
+	InterfaceName      string                   `json:"interface_name,omitempty"`
+	Source             string                   `json:"source"`
+	LLDPChassisID      string                   `json:"lldp_chassis_id,omitempty"`
+	LLDPChassisSubtype string                   `json:"lldp_chassis_subtype,omitempty"`
+	SNMPEngineID       string                   `json:"snmp_engine_id,omitempty"`
+	SNMPChassisID      string                   `json:"snmp_chassis_id,omitempty"`
+	SNMPChassisSubtype string                   `json:"snmp_chassis_subtype,omitempty"`
+	Vendor             string                   `json:"vendor,omitempty"`
+	Model              string                   `json:"model,omitempty"`
+	SerialNumber       string                   `json:"serial_number,omitempty"`
+	BridgeBaseMAC      string                   `json:"bridge_base_mac,omitempty"`
+	SysName            string                   `json:"sys_name,omitempty"`
+	SysDescription     string                   `json:"sys_description,omitempty"`
+	SourceData         map[string]string        `json:"source_data,omitempty"`
+	Interfaces         []NetworkInterfaceReport `json:"interfaces,omitempty"`
+	Links              []NetworkLinkReport      `json:"links,omitempty"`
+}
+
+type NetworkInterfaceReport struct {
+	IfIndex       int      `json:"if_index,omitempty"`
+	Name          string   `json:"name,omitempty"`
+	MAC           string   `json:"mac,omitempty"`
+	InterfaceKind string   `json:"interface_kind,omitempty"`
+	Description   string   `json:"description,omitempty"`
+	AdminStatus   string   `json:"admin_status,omitempty"`
+	OperStatus    string   `json:"oper_status,omitempty"`
+	Addresses     []string `json:"addresses,omitempty"`
+}
+
+type NetworkLinkReport struct {
+	RemoteChassisID      string `json:"remote_chassis_id,omitempty"`
+	RemoteChassisSubtype string `json:"remote_chassis_subtype,omitempty"`
+	LocalInterfaceName   string `json:"local_interface_name,omitempty"`
+	RemoteInterfaceName  string `json:"remote_interface_name,omitempty"`
+	LinkKind             string `json:"link_kind,omitempty"`
+}
+
+type NetworkDiscoveryResponse struct {
+	Accepted int `json:"accepted"`
+}
+
+// ProbeNetworkSNMPRequest carries one-shot read-only SNMP credentials from
+// the manager to the observing Edge. Credentials are never persisted in the
+// candidate row or returned in the response.
+type ProbeNetworkSNMPRequest struct {
+	Address             string `json:"address"`
+	Port                uint16 `json:"port,omitempty"`
+	Version             string `json:"version"` // v2c or v3
+	Community           string `json:"community,omitempty"`
+	Username            string `json:"username,omitempty"`
+	AuthProtocol        string `json:"auth_protocol,omitempty"`
+	AuthSecret          string `json:"auth_secret,omitempty"`
+	PrivacyProtocol     string `json:"privacy_protocol,omitempty"`
+	PrivacySecret       string `json:"privacy_secret,omitempty"`
+	TimeoutMilliseconds int    `json:"timeout_ms,omitempty"`
+	Retries             int    `json:"retries,omitempty"`
+}
+
+type ProbeNetworkSNMPResponse struct {
+	OK             bool                     `json:"ok"`
+	Error          string                   `json:"error,omitempty"`
+	IPAddress      string                   `json:"ip_address,omitempty"`
+	SysName        string                   `json:"sys_name,omitempty"`
+	SysDescription string                   `json:"sys_description,omitempty"`
+	SysObjectID    string                   `json:"sys_object_id,omitempty"`
+	SNMPEngineID   string                   `json:"snmp_engine_id,omitempty"`
+	Interfaces     []NetworkInterfaceReport `json:"interfaces,omitempty"`
+	Links          []NetworkLinkReport      `json:"links,omitempty"`
 }
 
 // ---------------------------------------------------------------------

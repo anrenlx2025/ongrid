@@ -51,6 +51,13 @@ type KubernetesInventoryIngester interface {
 	IngestInventory(ctx context.Context, edgeID uint64, in tunnel.KubernetesInventoryRequest) (acceptedNodes int, acceptedWorkloads int, acceptedPods int, acceptedEvents int, err error)
 }
 
+// NetworkDiscoveryIngester persists passive network-neighbor observations.
+// It is optional during rollout so managers can accept newer Edges before
+// the network discovery tables are wired into the runtime.
+type NetworkDiscoveryIngester interface {
+	IngestNetworkDiscovery(ctx context.Context, edgeID uint64, in tunnel.NetworkDiscoveryRequest) (accepted int, err error)
+}
+
 // EdgeAuthenticator is the credential surface needed by tunnel lifecycle and
 // register_edge. Declaring it at the consumer keeps reconnect recovery
 // testable without coupling Wiring to one concrete implementation.
@@ -82,10 +89,11 @@ type Wiring struct {
 	// metric/log/trace label. nil falls back to edge_id == device_id
 	// (correct for pre-launch data; explicitly resolving here is the
 	// future-proof path for multi-agent hosts).
-	DeviceResolver DeviceResolver
-	K8sRegistry    KubernetesRegistry
-	K8sInventory   KubernetesInventoryIngester
-	Log            *slog.Logger
+	DeviceResolver   DeviceResolver
+	K8sRegistry      KubernetesRegistry
+	K8sInventory     KubernetesInventoryIngester
+	NetworkDiscovery NetworkDiscoveryIngester
+	Log              *slog.Logger
 }
 
 // PluginConfigFetcher is the narrow surface frontierbound needs from
@@ -547,6 +555,27 @@ func Install(ctx context.Context, c *Client, w Wiring) error {
 		return json.Marshal(tunnel.PushPromSamplesResponse{Accepted: n})
 	}); err != nil {
 		return fmt.Errorf("frontierbound: register %q: %w", tunnel.MethodPushPromSamples, err)
+	}
+
+	if err := c.Register(ctx, tunnel.MethodPushNetworkDiscovery, func(rpcCtx context.Context, edgeID uint64, body []byte) ([]byte, error) {
+		var in tunnel.NetworkDiscoveryRequest
+		if err := json.Unmarshal(body, &in); err != nil {
+			return nil, fmt.Errorf("push_network_discovery: decode: %w", err)
+		}
+		canonicalEdgeID := c.canonicalizeEdgeID(edgeID)
+		if in.EdgeID != 0 && canonicalEdgeID != 0 && in.EdgeID != canonicalEdgeID {
+			return nil, fmt.Errorf("push_network_discovery: edge id mismatch")
+		}
+		if canonicalEdgeID == 0 || w.NetworkDiscovery == nil {
+			return json.Marshal(tunnel.NetworkDiscoveryResponse{Accepted: 0})
+		}
+		accepted, err := w.NetworkDiscovery.IngestNetworkDiscovery(rpcCtx, canonicalEdgeID, in)
+		if err != nil {
+			return nil, fmt.Errorf("push_network_discovery: %w", err)
+		}
+		return json.Marshal(tunnel.NetworkDiscoveryResponse{Accepted: accepted})
+	}); err != nil {
+		return fmt.Errorf("frontierbound: register %q: %w", tunnel.MethodPushNetworkDiscovery, err)
 	}
 
 	// get_plugin_configs: serve the edge its own plugin config snapshot

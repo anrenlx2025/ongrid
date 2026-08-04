@@ -36,6 +36,107 @@ export type DeviceEdgeLink = {
   created_at: string;
 };
 
+export type NetworkDiscoveryCandidate = {
+  id: number;
+  observer_edge_id: number;
+  observer_edge_name?: string;
+  observer_host_device_id?: number;
+  observer_host_name?: string;
+  observation_key: string;
+  ip_address?: string;
+  mac?: string;
+  interface_name?: string;
+  source: string;
+  source_data?: Record<string, string>;
+  interfaces?: unknown[];
+  links?: unknown[];
+  status: string;
+  confidence: number;
+  promoted_device_id?: number;
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
+export type NetworkSNMPScanInput = {
+  name?: string;
+  address?: string;
+  port?: number;
+  version: 'v2c' | 'v3';
+  community?: string;
+  username?: string;
+  auth_protocol?: string;
+  auth_secret?: string;
+  privacy_protocol?: string;
+  privacy_secret?: string;
+  timeout_ms?: number;
+  retries?: number;
+};
+
+export type NetworkInterface = {
+  if_index?: number;
+  name?: string;
+  mac?: string;
+  interface_kind?: string;
+  description?: string;
+  admin_status?: string;
+  oper_status?: string;
+  addresses?: string[];
+};
+
+export type NetworkLink = {
+  remote_chassis_id?: string;
+  remote_chassis_subtype?: string;
+  local_interface_name?: string;
+  remote_interface_name?: string;
+  link_kind?: string;
+};
+
+export type NetworkDeviceDetail = {
+  device_id: number;
+  device_kind: string;
+  vendor?: string;
+  model?: string;
+  serial_number?: string;
+  management_address?: string;
+  sys_name?: string;
+  sys_description?: string;
+  snmp_engine_id?: string;
+  lldp_chassis_id?: string;
+  bridge_base_mac?: string;
+  reachability_status: string;
+  last_reachable_at?: string;
+  discovery_source?: string;
+  scanner_edge_id?: number;
+  scanner_edge_name?: string;
+  scanner_host_device_id?: number;
+  scanner_host_name?: string;
+  last_observed_at?: string;
+  source_data?: Record<string, string>;
+  interfaces?: NetworkInterface[];
+  links?: NetworkLink[];
+};
+
+export function listNetworkCandidates(params?: { status?: string }) {
+  const qs = params?.status
+    ? `?${new URLSearchParams({ status: params.status }).toString()}`
+    : '';
+  return request<{ items: NetworkDiscoveryCandidate[]; total: number }>(
+    'GET',
+    `/network-discovery/candidates${qs}`,
+  );
+}
+
+export function scanNetworkCandidate(
+  id: string | number,
+  input: NetworkSNMPScanInput,
+) {
+  return request<Device>(
+    'POST',
+    `/network-discovery/candidates/${encodeURIComponent(String(id))}/snmp-scan`,
+    input,
+  );
+}
+
 export function listDevices(params?: { roles?: string }) {
   const qs = params?.roles
     ? `?${new URLSearchParams({ roles: params.roles }).toString()}`
@@ -45,6 +146,13 @@ export function listDevices(params?: { roles?: string }) {
 
 export function getDevice(id: string | number) {
   return request<Device>('GET', `/devices/${encodeURIComponent(String(id))}`);
+}
+
+export function getNetworkDeviceDetail(id: string | number) {
+  return request<NetworkDeviceDetail>(
+    'GET',
+    `/devices/${encodeURIComponent(String(id))}/network`,
+  );
 }
 
 export function deleteDevice(id: string | number) {

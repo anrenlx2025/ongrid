@@ -40,7 +40,15 @@ func Migrate(db *gorm.DB) error {
 			return err
 		}
 	}
-	if err := db.AutoMigrate(&model.Device{}, &model.EdgeDevice{}); err != nil {
+	if err := db.AutoMigrate(
+		&model.Device{},
+		&model.EdgeDevice{},
+		&model.DeviceNetwork{},
+		&model.NetworkDiscoveryCandidate{},
+		&model.NetworkIdentifier{},
+		&model.NetworkInterface{},
+		&model.NetworkLink{},
+	); err != nil {
 		return err
 	}
 	if err := dbx.BackfillDeleteMarker(db, model.Device{}.TableName()); err != nil {

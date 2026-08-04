@@ -23,6 +23,7 @@ import {
   Loader2,
   Plus,
   Trash2,
+  Network,
 } from 'lucide-react';
 import { StatusPill } from '@/components/StatusPill';
 import { cn } from '@/lib/cn';
@@ -42,11 +43,19 @@ import {
   type PluginRow,
 } from '@/api/integrations';
 import { ApiError } from '@/api/client';
-import { getDevice, listDeviceEdges, type Device } from '@/api/devices';
+import {
+  getDevice,
+  getNetworkDeviceDetail,
+  listDeviceEdges,
+  type Device,
+  type NetworkDeviceDetail,
+  type NetworkInterface,
+} from '@/api/devices';
 import { NodeNeighbors } from '@/components/topology/NodeNeighbors';
 import { tr as trInline, useI18n } from '@/i18n/locale';
 
 type Tab = 'metrics' | 'host' | 'plugins' | 'topology' | 'meta';
+type NetworkTab = 'overview' | 'interfaces' | 'topology' | 'meta';
 
 // Window + step align with the backend handler's 30s timeout ceiling. 6h /
 // 1m yields 360 buckets per panel — comfortably under recharts' practical
@@ -129,6 +138,8 @@ export default function EdgeDetailPage() {
   const [device, setDevice] = useState<Device | null>(null);
   const [edge, setEdge] = useState<Edge | null>(null);
   const [edgeErr, setEdgeErr] = useState<string | null>(null);
+  const [networkDetail, setNetworkDetail] = useState<NetworkDeviceDetail | null>(null);
+  const [networkDetailErr, setNetworkDetailErr] = useState<string | null>(null);
 
   const [panels, setPanels] = useState<Record<PanelKey, PanelData>>({
     cpu: EMPTY_PANEL,
@@ -203,7 +214,32 @@ export default function EdgeDetailPage() {
     };
   }, [edgeId, isDeviceRoute, tr]);
 
+  const isNetworkDevice = device?.os === 'network';
+
+  useEffect(() => {
+    if (!isNetworkDevice || !device?.id) {
+      setNetworkDetail(null);
+      setNetworkDetailErr(null);
+      return;
+    }
+    let cancelled = false;
+    setNetworkDetailErr(null);
+    getNetworkDeviceDetail(device.id)
+      .then((detail) => {
+        if (!cancelled) setNetworkDetail(detail);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setNetworkDetailErr((err as Error).message || tr('加载网络设备资料失败', 'Failed to load network device profile'));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [device?.id, isNetworkDevice, tr]);
+
   const refreshMetrics = useCallback(async () => {
+    if (isNetworkDevice) return;
     const deviceID = device?.id ?? edge?.device_id;
     if (!deviceID) return;
     // Prom samples are labelled with the *host device_id* — set on
@@ -270,13 +306,13 @@ export default function EdgeDetailPage() {
     } catch (err) {
       setMetricsErr((err as Error).message || tr('加载指标失败', 'Failed to load metrics'));
     }
-  }, [device?.id, edge?.device_id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [device?.id, edge?.device_id, isNetworkDevice]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!device?.id && !edge?.device_id) return;
+    if (isNetworkDevice || (!device?.id && !edge?.device_id)) return;
     void refreshMetrics();
-  }, [device?.id, edge?.device_id, refreshMetrics]);
-  usePoll(refreshMetrics, REFRESH_MS, Boolean(device?.id || edge?.device_id));
+  }, [device?.id, edge?.device_id, isNetworkDevice, refreshMetrics]);
+  usePoll(refreshMetrics, REFRESH_MS, !isNetworkDevice && Boolean(device?.id || edge?.device_id));
 
   const promExprs = useMemo(() => {
     const deviceID = device?.id ?? edge?.device_id;
@@ -321,6 +357,18 @@ export default function EdgeDetailPage() {
   const status = device ? (device.online ? 'online' : 'offline') : edge?.status;
   const lastSeen = device?.last_seen_at ?? edge?.last_seen_at;
   const deviceID = device?.id ?? edge?.device_id ?? null;
+
+  if (isNetworkDevice && device) {
+    return (
+      <NetworkDevicePage
+        device={device}
+        detail={networkDetail}
+        error={networkDetailErr ?? edgeErr}
+        deviceID={deviceID}
+        onBack={() => navigate('/devices')}
+      />
+    );
+  }
 
   return (
     <main className="anim-fade flex flex-1 flex-col overflow-hidden">
@@ -482,6 +530,186 @@ export default function EdgeDetailPage() {
           )}
         </div>
       </main>
+  );
+}
+
+function NetworkDevicePage({
+  device,
+  detail,
+  error,
+  deviceID,
+  onBack,
+}: {
+  device: Device;
+  detail: NetworkDeviceDetail | null;
+  error: string | null;
+  deviceID: number | null;
+  onBack(): void;
+}) {
+  const { tr } = useI18n();
+  const [tab, setTab] = useState<NetworkTab>('overview');
+  const interfaces = detail?.interfaces ?? [];
+  const scanner = detail?.scanner_host_name || detail?.scanner_edge_name;
+  const reachable = detail?.reachability_status === 'reachable';
+
+  return (
+    <main className="anim-fade flex min-w-0 flex-1 flex-col overflow-hidden">
+      <header className="app-header flex items-center justify-between border-b border-zinc-800 px-6 py-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <button
+            type="button"
+            onClick={onBack}
+            aria-label={tr('返回设备列表', 'Back to device list')}
+            className="rounded-md p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <span className="rounded-md border border-sky-500/20 bg-sky-500/10 p-2 text-sky-400">
+            <Network size={16} />
+          </span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h1 className="truncate text-base font-semibold text-zinc-100">
+                {device.name || detail?.sys_name || device.hostname}
+              </h1>
+              <span className="rounded border border-sky-500/25 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">
+                SNMP
+              </span>
+              <span className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400">
+                <span className={cn('h-1.5 w-1.5 rounded-full', reachable ? 'bg-emerald-500' : 'bg-zinc-500')} />
+                {reachable ? tr('可达', 'Reachable') : tr('状态未知', 'Unknown')}
+              </span>
+            </div>
+            <div className="mt-0.5 truncate text-[11px] text-zinc-500">
+              {[detail?.management_address || device.ip_address, detail?.vendor, detail?.model]
+                .filter(Boolean)
+                .join(' · ') || tr(`设备 ID: ${device.id}`, `Device ID: ${device.id}`)}
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div className="flex items-center gap-1 border-b border-zinc-800 px-6">
+        <TabBtn active={tab === 'overview'} onClick={() => setTab('overview')} label={tr('概览', 'Overview')} />
+        <TabBtn active={tab === 'interfaces'} onClick={() => setTab('interfaces')} label={tr('接口', 'Interfaces')} />
+        <TabBtn active={tab === 'topology'} onClick={() => setTab('topology')} label={tr('拓扑', 'Topology')} />
+        <TabBtn active={tab === 'meta'} onClick={() => setTab('meta')} label={tr('元数据', 'Metadata')} />
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-6 py-5">
+        {error && (
+          <div role="alert" className="mb-4 rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+            {error}
+          </div>
+        )}
+
+        {tab === 'overview' && (
+          <div className="space-y-4">
+            <section className="overflow-hidden rounded-lg border border-zinc-800/60 bg-zinc-900/40">
+              <div className="border-b border-zinc-800/60 px-4 py-3">
+                <h2 className="text-sm font-medium text-zinc-100">{tr('设备身份', 'Device identity')}</h2>
+              </div>
+              <dl className="grid grid-cols-1 divide-y divide-zinc-800/50 md:grid-cols-2 md:divide-y-0">
+                <NetworkDetailField label={tr('管理地址', 'Management address')} value={detail?.management_address || device.ip_address} />
+                <NetworkDetailField label={tr('系统名称', 'System name')} value={detail?.sys_name || device.hostname} />
+                <NetworkDetailField label={tr('厂商', 'Vendor')} value={detail?.vendor} />
+                <NetworkDetailField label={tr('型号', 'Model')} value={detail?.model} />
+                <NetworkDetailField label={tr('序列号', 'Serial number')} value={detail?.serial_number} mono />
+                <NetworkDetailField label="SNMP Engine ID" value={detail?.snmp_engine_id} mono />
+                <NetworkDetailField label="LLDP Chassis ID" value={detail?.lldp_chassis_id} mono />
+                <NetworkDetailField label={tr('桥接 MAC', 'Bridge MAC')} value={detail?.bridge_base_mac} mono />
+              </dl>
+            </section>
+
+            <section className="overflow-hidden rounded-lg border border-zinc-800/60 bg-zinc-900/40">
+              <div className="border-b border-zinc-800/60 px-4 py-3">
+                <h2 className="text-sm font-medium text-zinc-100">{tr('发现信息', 'Discovery')}</h2>
+              </div>
+              <dl className="grid grid-cols-1 md:grid-cols-3">
+                <NetworkDetailField label={tr('发现方式', 'Method')} value={detail?.discovery_source?.toUpperCase()} />
+                <NetworkDetailField label={tr('扫描源', 'Scanner')} value={scanner} />
+                <NetworkDetailField
+                  label={tr('最后发现', 'Last observed')}
+                  value={detail?.last_observed_at ? relativeTime(detail.last_observed_at) : undefined}
+                />
+              </dl>
+            </section>
+
+            {detail?.sys_description && (
+              <section className="rounded-lg border border-zinc-800/60 bg-zinc-900/40 px-4 py-3">
+                <h2 className="text-[11px] font-medium uppercase text-zinc-500">{tr('系统描述', 'System description')}</h2>
+                <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-zinc-300">{detail.sys_description}</p>
+              </section>
+            )}
+          </div>
+        )}
+
+        {tab === 'interfaces' && <NetworkInterfacesTable interfaces={interfaces} />}
+        {tab === 'topology' && <TopologyTab deviceID={deviceID} />}
+        {tab === 'meta' && (
+          <JsonCard
+            title={tr('网络设备元数据', 'Network device metadata')}
+            data={{ device, network: detail }}
+            empty={tr('加载中…', 'Loading…')}
+          />
+        )}
+      </div>
+    </main>
+  );
+}
+
+function NetworkDetailField({ label, value, mono = false }: { label: string; value?: string | number | null; mono?: boolean }) {
+  return (
+    <div className="min-w-0 border-zinc-800/50 px-4 py-3 md:border-r md:last:border-r-0">
+      <dt className="text-[11px] text-zinc-500">{label}</dt>
+      <dd className={cn('mt-1 truncate text-xs text-zinc-200', mono && 'font-mono')}>{value || '—'}</dd>
+    </div>
+  );
+}
+
+function NetworkInterfacesTable({ interfaces }: { interfaces: NetworkInterface[] }) {
+  const { tr } = useI18n();
+  return (
+    <section className="overflow-x-auto rounded-lg border border-zinc-800/60 bg-zinc-900/40">
+      <table className="w-full min-w-[860px] table-fixed text-xs">
+        <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase text-zinc-500">
+          <tr>
+            <th className="w-16 px-3 py-2.5 text-left">Index</th>
+            <th className="w-40 px-3 py-2.5 text-left">{tr('接口', 'Interface')}</th>
+            <th className="w-32 px-3 py-2.5 text-left">{tr('类型', 'Type')}</th>
+            <th className="w-48 px-3 py-2.5 text-left">MAC</th>
+            <th className="px-3 py-2.5 text-left">{tr('地址', 'Addresses')}</th>
+            <th className="w-24 px-3 py-2.5 text-left">Admin</th>
+            <th className="w-24 px-3 py-2.5 text-left">Oper</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-zinc-800/40">
+          {interfaces.length === 0 ? (
+            <tr><td colSpan={7} className="px-4 py-10 text-center text-zinc-500">{tr('暂无接口数据', 'No interface data')}</td></tr>
+          ) : interfaces.map((row, index) => (
+            <tr key={`${row.if_index ?? index}-${row.name ?? ''}`}>
+              <td className="px-3 py-2.5 font-mono text-zinc-500">{row.if_index ?? '—'}</td>
+              <td className="truncate px-3 py-2.5 font-medium text-zinc-100">{row.name || '—'}</td>
+              <td className="truncate px-3 py-2.5 text-zinc-400">{row.interface_kind || '—'}</td>
+              <td className="truncate px-3 py-2.5 font-mono text-zinc-400">{row.mac || '—'}</td>
+              <td className="truncate px-3 py-2.5 font-mono text-zinc-400">{row.addresses?.join(', ') || '—'}</td>
+              <td className="px-3 py-2.5"><InterfaceStatus value={row.admin_status} /></td>
+              <td className="px-3 py-2.5"><InterfaceStatus value={row.oper_status} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+function InterfaceStatus({ value }: { value?: string }) {
+  const normalized = value?.toLowerCase();
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400">
+      <span className={cn('h-1.5 w-1.5 rounded-full', normalized === 'up' ? 'bg-emerald-500' : normalized === 'down' ? 'bg-red-500' : 'bg-zinc-500')} />
+      {value || '—'}
+    </span>
   );
 }
 
