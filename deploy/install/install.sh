@@ -359,32 +359,50 @@ fi
 # thin packages download direct CNB Release files and verify their checksums.
 EDGE_STAGE_DIR=""
 prepare_edge_assets() {
-    local source_dir="$SCRIPT_DIR/edge" edge_bin edge_arch
+    local source_dir="$SCRIPT_DIR/edge" target deps_tag resolved_targets
+    local edge_targets=()
     [[ -d "$source_dir" ]] || return 0
 
     EDGE_STAGE_DIR=$(mktemp -d "$INSTALL_DIR/.edge-stage.XXXXXX")
     cp -rf "$source_dir/." "$EDGE_STAGE_DIR/"
     find "$EDGE_STAGE_DIR" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
+    [[ -r "$EDGE_STAGE_DIR/edge-assets-lib.sh" ]] || {
+        log_error "package is missing edge/edge-assets-lib.sh"
+        return 1
+    }
+    # shellcheck source=deploy/install/edge/edge-assets-lib.sh
+    source "$EDGE_STAGE_DIR/edge-assets-lib.sh"
+    if ! resolved_targets=$(ongrid_resolve_edge_targets \
+        "${ONGRID_EDGE_TARGETS:-}" \
+        "$INSTALL_DIR/edge/edge-artifacts.env" \
+        "$EDGE_STAGE_DIR/edge-artifacts.env" \
+        "$INSTALL_DIR/edge"); then
+        log_error "invalid ONGRID_EDGE_TARGETS; supported values: linux-amd64 linux-arm64"
+        return 1
+    fi
+    read -r -a edge_targets <<<"$resolved_targets"
 
     local embedded=0
-    for edge_bin in "$EDGE_STAGE_DIR"/ongrid-edge-linux-*; do
-        if [[ -f "$edge_bin" ]]; then embedded=1; break; fi
-    done
+    compgen -G "$EDGE_STAGE_DIR/ongrid-edge-linux-*" >/dev/null && embedded=1
     if (( embedded == 0 )); then
         [[ -x "$EDGE_STAGE_DIR/fetch-edge-assets.sh" ]] || {
             log_error "thin package is missing edge/fetch-edge-assets.sh"
             return 1
         }
-        log_info "prefetching checksum-verified Edge assets from CNB"
-        "$EDGE_STAGE_DIR/fetch-edge-assets.sh" "$EDGE_STAGE_DIR" "$EDGE_ASSET_VERSION"
+        log_info "prefetching checksum-verified Edge assets from CNB for $resolved_targets"
+        "$EDGE_STAGE_DIR/fetch-edge-assets.sh" "$EDGE_STAGE_DIR" "$EDGE_ASSET_VERSION" \
+            "${edge_targets[@]}"
     else
-        log_info "using Edge binaries embedded by an offline/legacy package"
+        log_info "using complete Edge binaries embedded for $resolved_targets"
+        ongrid_validate_embedded_edge_assets "$EDGE_STAGE_DIR" "$resolved_targets" || return 1
     fi
 
-    for edge_bin in "$EDGE_STAGE_DIR"/ongrid-edge-linux-*; do
-        [[ -f "$edge_bin" ]] || continue
-        edge_arch="${edge_bin##*/ongrid-edge-}"
-        "$EDGE_STAGE_DIR/build-edge-bundle.sh" "$EDGE_STAGE_DIR" "$EDGE_ASSET_VERSION" "$edge_arch"
+    deps_tag=$(ongrid_edge_config_value "$EDGE_STAGE_DIR/edge-artifacts.env" \
+        ONGRID_EDGE_DEPS_TAG 2>/dev/null || true)
+    ongrid_write_edge_artifact_config "$EDGE_STAGE_DIR/edge-artifacts.env" \
+        "$deps_tag" "$resolved_targets"
+    for target in "${edge_targets[@]}"; do
+        "$EDGE_STAGE_DIR/build-edge-bundle.sh" "$EDGE_STAGE_DIR" "$EDGE_ASSET_VERSION" "$target"
     done
 }
 

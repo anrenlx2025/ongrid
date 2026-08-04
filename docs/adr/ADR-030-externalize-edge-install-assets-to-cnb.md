@@ -28,7 +28,7 @@ Manager 当前通过本地 `/opt/ongrid/edge` 同时提供 Edge 网络安装器�
 
 每个归档附带外部 `.sha256`，内部还包含 `TARGET`、`DEPENDENCIES` 和 `MANIFEST.sha256`。发布命令发现该 Release 已存在全部预期附件时直接复用；只存在部分附件时失败，禁止悄悄覆盖不可变内容。只有依赖版本集合或布局发生变化才创建新的公共依赖 Release。
 
-公共依赖归档使用固定顺序、时间戳、owner/group 和压缩块大小生成，确保相同输入重复构建得到相同 SHA-256。发布命令会先检查完整的既有 Release，在下载上游依赖或执行 Go 构建前直接跳过，因此能够继续复用修复前已经发布的不可变附件。附件上传器必须固定到经过审核的镜像 digest，禁止把 CNB 发布令牌交给可变 tag。
+公共依赖归档使用固定顺序、时间戳、owner/group 和压缩块大小生成，确保相同输入重复构建得到相同 SHA-256。公共依赖发布命令会先下载既有附件并同时校验外层 checksum、内部文件全集、manifest、目标架构以及由全部版本元数据重建出的 Release tag；全部通过时才在获取上游依赖前跳过。版本化自研 Edge 必须使用固定 Go toolchain 先从当前源码构建，再把本地 sidecar 与远端不可变附件比较，一致时才复用同版本 Release，禁止旧源码产物因为“文件存在”被跳过。附件上传器必须固定到经过审核的镜像 digest，禁止把 CNB 发布令牌交给可变 tag。
 
 ### 2. 自研 Edge 跟随 Ongrid 版本
 
@@ -55,7 +55,7 @@ GitHub 的 `Release` workflow 在每个 `vMAJOR.MINOR.PATCH` tag 上自动执行
 `install.sh` 和 `upgrade.sh` 执行以下步骤：
 
 1. 从公共依赖 Release 下载目标架构归档，从当前 Ongrid Release 下载 `ongrid-edge`；
-2. 将 sidecar 中的 SHA-256 和文件名严格绑定到当前附件，并校验依赖归档内部 manifest 和目标架构；
+2. 将 sidecar 中的 SHA-256 和文件名严格绑定到当前附件，并校验依赖归档内部文件全集、manifest、目标架构和版本元数据；
 3. 把校验通过的附件保存在 `/var/cache/ongrid/edge-artifacts`，重复安装或升级直接复用；
 4. 在安装目录同一文件系统的隐藏 staging 目录中生成原有单文件布局和 ADR-024 bundle；
 5. 全部成功后再原子替换 `/opt/ongrid/edge`。
@@ -68,9 +68,9 @@ Manager、Nginx 和 Edge 设备继续使用既有 `/edge/` URL、文件名、man
 
 ### 4. 保留离线兼容路径
 
-隔离环境可在构建安装包时设置 `ONGRID_BUNDLE_EDGE_ASSETS=1`，恢复原有内嵌二进制布局。安装器检测到内嵌 `ongrid-edge-linux-*` 后跳过 CNB 下载，其余 bundle 和目录替换路径不变。
+隔离环境可在构建安装包时设置 `ONGRID_BUNDLE_EDGE_ASSETS=1`，恢复原有内嵌二进制布局。Make 入口会先构建自研 Edge 并获取所选架构的全部公共组件；打包器和安装器都会校验完整文件集合，缺任一组件即失败，不会生成或接受不完整的离线包。安装器检测到完整的内嵌 `ongrid-edge-linux-*` 后跳过 CNB 下载，其余 bundle 和目录替换路径不变。
 
-默认只服务 `linux-amd64` Edge；需要同时服务两种架构时设置 `ONGRID_EDGE_TARGETS="linux-amd64 linux-arm64"`。私有代理或镜像站可通过 `ONGRID_EDGE_ARTIFACT_BASE_URL` 覆盖下载根地址。
+默认只服务 `linux-amd64` Edge；需要同时服务两种架构时设置 `ONGRID_EDGE_TARGETS="linux-amd64 linux-arm64"`。安装器会持久化实际架构集合，普通升级优先继承已安装值，只有显式设置该变量才改变选择。私有代理或镜像站可通过 `ONGRID_EDGE_ARTIFACT_BASE_URL` 覆盖下载根地址。
 
 ## 后果
 
@@ -96,7 +96,7 @@ Manager、Nginx 和 Edge 设备继续使用既有 `/edge/` URL、文件名、man
 
 - 附件构建必须验证两个 Linux 架构的必需组件全集并生成内外两层 checksum；
 - 下载脚本测试必须覆盖直链路径、缓存复用、完整提取和 checksum 篡改拒绝；
-- 发布脚本必须在完整附件逐一通过 sidecar checksum 后幂等跳过、部分存在或内容损坏时拒绝覆盖；
+- 公共依赖发布脚本必须同时通过外层 checksum 和内部语义校验后幂等跳过；版本化 Edge 必须与当前源码构建结果一致才可跳过；部分存在或内容损坏时拒绝覆盖；
 - Release 创建脚本必须在目标已存在时幂等复用，API 权限不足时失败且不得输出 Token；
 - GitHub Release workflow 必须等待 CNB `edge-release` job 成功；
 - 发布包测试必须证明默认包包含依赖 tag 锁文件和下载脚本，但不包含 Edge 大型二进制；

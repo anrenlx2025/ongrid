@@ -16,6 +16,8 @@ components=(
     node_exporter process_exporter mysqld_exporter postgres_exporter
     redis_exporter mongodb_exporter promtail otelcol-contrib
 )
+deps_tag=edge-deps-layout1-p1-o2-n3-pr4-my5-pg6-r7-m8
+next_deps_tag=edge-deps-layout1-p11-o12-n13-pr14-my15-pg16-r17-m18
 bin_root="$tmp_dir/bin"
 mkdir -p "$bin_root/linux-amd64"
 for component in "${components[@]}"; do
@@ -29,7 +31,7 @@ PROMTAIL_VERSION=1 OTELCOL_VERSION=2 NODE_EXPORTER_VERSION=3 \
 PROCESS_EXPORTER_VERSION=4 MYSQLD_EXPORTER_VERSION=5 \
 POSTGRES_EXPORTER_VERSION=6 REDIS_EXPORTER_VERSION=7 \
 MONGODB_EXPORTER_VERSION=8 \
-    bash "$build_script" deps edge-deps-test "$attachments" linux-amd64
+    bash "$build_script" deps "$deps_tag" "$attachments" linux-amd64
 EDGE_BIN_ROOT="$bin_root" \
     bash "$build_script" edge vtest "$attachments" linux-amd64
 
@@ -42,7 +44,7 @@ PROMTAIL_VERSION=1 OTELCOL_VERSION=2 NODE_EXPORTER_VERSION=3 \
 PROCESS_EXPORTER_VERSION=4 MYSQLD_EXPORTER_VERSION=5 \
 POSTGRES_EXPORTER_VERSION=6 REDIS_EXPORTER_VERSION=7 \
 MONGODB_EXPORTER_VERSION=8 \
-    bash "$build_script" deps edge-deps-test "$rebuilt_attachments" linux-amd64
+    bash "$build_script" deps "$deps_tag" "$rebuilt_attachments" linux-amd64
 cmp -s \
     "$attachments/edge-deps-linux-amd64.tar.xz" \
     "$rebuilt_attachments/edge-deps-linux-amd64.tar.xz" \
@@ -50,10 +52,25 @@ cmp -s \
 
 (cd "$attachments" && sha256sum -c edge-deps-linux-amd64.tar.xz.sha256)
 (cd "$attachments" && sha256sum -c ongrid-edge-linux-amd64-vtest.sha256)
+bash "$repo_root/deploy/install/edge/verify-edge-deps-archive.sh" \
+    "$attachments/edge-deps-linux-amd64.tar.xz" linux-amd64 "$deps_tag" >/dev/null
+
+# An outer checksum alone must not turn arbitrary bytes into a valid shared
+# dependency attachment.
+invalid_root="$tmp_dir/invalid-releases"
+mkdir -p "$invalid_root/$deps_tag"
+printf 'not an xz archive\n' > "$invalid_root/$deps_tag/edge-deps-linux-amd64.tar.xz"
+(cd "$invalid_root/$deps_tag" && sha256sum edge-deps-linux-amd64.tar.xz \
+    > edge-deps-linux-amd64.tar.xz.sha256)
+if make -s -C "$repo_root" verify-edge-deps-release \
+    EDGE_ATTACHMENT_TARGETS=linux-amd64 EDGE_DEPS_TAG="$deps_tag" \
+    CNB_RELEASE_BASE_URL="file://$invalid_root" >/dev/null 2>&1; then
+    fail "arbitrary bytes with a matching outer sidecar passed dependency verification"
+fi
 
 fixture_root="$tmp_dir/releases"
-mkdir -p "$fixture_root/edge-deps-test" "$fixture_root/vtest"
-cp "$attachments/edge-deps-linux-amd64.tar.xz"* "$fixture_root/edge-deps-test/"
+mkdir -p "$fixture_root/$deps_tag" "$fixture_root/vtest"
+cp "$attachments/edge-deps-linux-amd64.tar.xz"* "$fixture_root/$deps_tag/"
 cp "$attachments/ongrid-edge-linux-amd64-vtest"* "$fixture_root/vtest/"
 
 fake_bin="$tmp_dir/fake-bin"
@@ -82,12 +99,12 @@ cache="$tmp_dir/cache"
 FAKE_CURL_LOG="$tmp_dir/curl.log" \
 FAKE_RELEASE_ROOT="$fixture_root" \
 PATH="$fake_bin:$PATH" \
-ONGRID_EDGE_DEPS_TAG=edge-deps-test \
+ONGRID_EDGE_DEPS_TAG="$deps_tag" \
 ONGRID_EDGE_ARTIFACT_CACHE_DIR="$cache" \
 ONGRID_EDGE_ARTIFACT_BASE_URL=https://cnb.test/repo/-/releases/download \
     bash "$fetch_script" "$dest" vtest linux-amd64
 
-grep -Fqx 'https://cnb.test/repo/-/releases/download/edge-deps-test/edge-deps-linux-amd64.tar.xz' "$tmp_dir/curl.log" \
+grep -Fqx "https://cnb.test/repo/-/releases/download/$deps_tag/edge-deps-linux-amd64.tar.xz" "$tmp_dir/curl.log" \
     || fail "public dependency archive was not downloaded from its immutable release"
 grep -Fqx 'https://cnb.test/repo/-/releases/download/vtest/ongrid-edge-linux-amd64-vtest' "$tmp_dir/curl.log" \
     || fail "versioned ongrid-edge binary was not downloaded directly"
@@ -95,7 +112,7 @@ for component in "${components[@]}"; do
     [[ -x "$dest/${component}-linux-amd64" ]] || fail "missing staged $component"
 done
 [[ -x "$dest/ongrid-edge-linux-amd64" ]] || fail "missing staged ongrid-edge"
-grep -Fq 'edge-deps-test/edge-deps-linux-amd64.tar.xz' "$dest/edge-assets-linux-amd64.ref" \
+grep -Fq "$deps_tag/edge-deps-linux-amd64.tar.xz" "$dest/edge-assets-linux-amd64.ref" \
     || fail "dependency source was not recorded"
 grep -Fq 'vtest/ongrid-edge-linux-amd64-vtest' "$dest/edge-assets-linux-amd64.ref" \
     || fail "edge source was not recorded"
@@ -113,18 +130,18 @@ PROMTAIL_VERSION=11 OTELCOL_VERSION=12 NODE_EXPORTER_VERSION=13 \
 PROCESS_EXPORTER_VERSION=14 MYSQLD_EXPORTER_VERSION=15 \
 POSTGRES_EXPORTER_VERSION=16 REDIS_EXPORTER_VERSION=17 \
 MONGODB_EXPORTER_VERSION=18 \
-    bash "$build_script" deps edge-deps-next "$next_attachments" linux-amd64
-mkdir -p "$fixture_root/edge-deps-next"
-cp "$next_attachments/edge-deps-linux-amd64.tar.xz"* "$fixture_root/edge-deps-next/"
+    bash "$build_script" deps "$next_deps_tag" "$next_attachments" linux-amd64
+mkdir -p "$fixture_root/$next_deps_tag"
+cp "$next_attachments/edge-deps-linux-amd64.tar.xz"* "$fixture_root/$next_deps_tag/"
 : > "$tmp_dir/next-curl.log"
 FAKE_CURL_LOG="$tmp_dir/next-curl.log" \
 FAKE_RELEASE_ROOT="$fixture_root" \
 PATH="$fake_bin:$PATH" \
-ONGRID_EDGE_DEPS_TAG=edge-deps-next \
+ONGRID_EDGE_DEPS_TAG="$next_deps_tag" \
 ONGRID_EDGE_ARTIFACT_CACHE_DIR="$cache" \
 ONGRID_EDGE_ARTIFACT_BASE_URL=https://cnb.test/repo/-/releases/download \
     bash "$fetch_script" "$tmp_dir/next-dest" vtest linux-amd64
-grep -Fqx 'https://cnb.test/repo/-/releases/download/edge-deps-next/edge-deps-linux-amd64.tar.xz' "$tmp_dir/next-curl.log" \
+grep -Fqx "https://cnb.test/repo/-/releases/download/$next_deps_tag/edge-deps-linux-amd64.tar.xz" "$tmp_dir/next-curl.log" \
     || fail "a new dependency tag reused the previous tag's cached archive"
 if grep -Fq '/vtest/ongrid-edge-linux-amd64-vtest' "$tmp_dir/next-curl.log"; then
     fail "an unchanged versioned Edge binary was not reused from its tag-scoped cache"
@@ -133,7 +150,7 @@ for component in "${components[@]}"; do
     cmp -s "$bin_root/linux-amd64/$component" "$tmp_dir/next-dest/${component}-linux-amd64" \
         || fail "dependency tag change did not stage the new $component payload"
 done
-grep -Fq 'edge-deps-next/edge-deps-linux-amd64.tar.xz' "$tmp_dir/next-dest/edge-assets-linux-amd64.ref" \
+grep -Fq "$next_deps_tag/edge-deps-linux-amd64.tar.xz" "$tmp_dir/next-dest/edge-assets-linux-amd64.ref" \
     || fail "dependency tag change recorded the wrong source"
 
 # A valid local cache must make a repeated installation independent of CNB.
@@ -142,7 +159,7 @@ rm -rf "$fixture_root"
 FAKE_CURL_LOG="$tmp_dir/cache-curl.log" \
 FAKE_RELEASE_ROOT="$fixture_root" \
 PATH="$fake_bin:$PATH" \
-ONGRID_EDGE_DEPS_TAG=edge-deps-test \
+ONGRID_EDGE_DEPS_TAG="$deps_tag" \
 ONGRID_EDGE_ARTIFACT_CACHE_DIR="$cache" \
 ONGRID_EDGE_ARTIFACT_BASE_URL=https://cnb.test/repo/-/releases/download \
     bash "$fetch_script" "$tmp_dir/cache-dest" vtest linux-amd64
@@ -172,20 +189,17 @@ grep -Fq 'dependency archive release tag does not match edge-deps-forged' "$tmp_
 # injected symlink; the installer must fail without touching it.
 real_sha256sum=$(command -v sha256sum)
 nonregular_stage="$tmp_dir/nonregular-stage"
-nonregular_release="$fixture_root/edge-deps-nonregular"
-mkdir -p "$nonregular_stage" "$nonregular_release"
+nonregular_root="$tmp_dir/nonregular-releases"
+nonregular_release="$nonregular_root/$deps_tag"
+mkdir -p "$nonregular_stage" "$nonregular_release" "$nonregular_root/vtest"
 tar -xJf "$attachments/edge-deps-linux-amd64.tar.xz" -C "$nonregular_stage"
 rm -f "$nonregular_stage/node_exporter"
 ln -s process_exporter "$nonregular_stage/node_exporter"
-awk -F= '
-    $1 == "release_tag" { print "release_tag=edge-deps-nonregular"; next }
-    { print }
-' "$nonregular_stage/DEPENDENCIES" > "$nonregular_stage/DEPENDENCIES.new"
-mv "$nonregular_stage/DEPENDENCIES.new" "$nonregular_stage/DEPENDENCIES"
 (cd "$nonregular_stage" && "$real_sha256sum" TARGET DEPENDENCIES "${components[@]}" > MANIFEST.sha256)
 tar -cJf "$nonregular_release/edge-deps-linux-amd64.tar.xz" \
     -C "$nonregular_stage" TARGET DEPENDENCIES MANIFEST.sha256 "${components[@]}"
 (cd "$nonregular_release" && "$real_sha256sum" edge-deps-linux-amd64.tar.xz > edge-deps-linux-amd64.tar.xz.sha256)
+cp "$attachments/ongrid-edge-linux-amd64-vtest"* "$nonregular_root/vtest/"
 
 guard_bin="$tmp_dir/guard-bin"
 mkdir -p "$guard_bin"
@@ -204,11 +218,11 @@ EOF
 chmod 0755 "$guard_bin/curl" "$guard_bin/sha256sum"
 : > "$tmp_dir/sha-symlink.log"
 if FAKE_CURL_LOG="$tmp_dir/nonregular-curl.log" \
-    FAKE_RELEASE_ROOT="$fixture_root" \
+    FAKE_RELEASE_ROOT="$nonregular_root" \
     FAKE_SHA_SYMLINK_LOG="$tmp_dir/sha-symlink.log" \
     REAL_SHA256SUM="$real_sha256sum" \
     PATH="$guard_bin:$PATH" \
-    ONGRID_EDGE_DEPS_TAG=edge-deps-nonregular \
+    ONGRID_EDGE_DEPS_TAG="$deps_tag" \
     ONGRID_EDGE_ARTIFACT_CACHE_DIR="$tmp_dir/nonregular-cache" \
     ONGRID_EDGE_ARTIFACT_BASE_URL=https://cnb.test/repo/-/releases/download \
     bash "$fetch_script" "$tmp_dir/nonregular-dest" vtest linux-amd64 \
@@ -219,14 +233,14 @@ fi
     || fail "manifest verification hashed a non-regular archive entry before rejecting it"
 
 # A mismatched direct binary and sidecar must fail before staging anything.
-mkdir -p "$fixture_root/edge-deps-test" "$fixture_root/vtest"
-cp "$attachments/edge-deps-linux-amd64.tar.xz"* "$fixture_root/edge-deps-test/"
+mkdir -p "$fixture_root/$deps_tag" "$fixture_root/vtest"
+cp "$attachments/edge-deps-linux-amd64.tar.xz"* "$fixture_root/$deps_tag/"
 cp "$attachments/ongrid-edge-linux-amd64-vtest"* "$fixture_root/vtest/"
 printf 'tampered\n' >> "$fixture_root/vtest/ongrid-edge-linux-amd64-vtest"
 if FAKE_CURL_LOG="$tmp_dir/bad-curl.log" \
     FAKE_RELEASE_ROOT="$fixture_root" \
     PATH="$fake_bin:$PATH" \
-    ONGRID_EDGE_DEPS_TAG=edge-deps-test \
+    ONGRID_EDGE_DEPS_TAG="$deps_tag" \
     ONGRID_EDGE_ARTIFACT_CACHE_DIR="$tmp_dir/bad-cache" \
     ONGRID_EDGE_ARTIFACT_BASE_URL=https://cnb.test/repo/-/releases/download \
     bash "$fetch_script" "$tmp_dir/bad-dest" vtest linux-amd64 >/dev/null 2>&1; then
@@ -241,7 +255,7 @@ cp "$attachments/edge-deps-linux-amd64.tar.xz.sha256" \
 if FAKE_CURL_LOG="$tmp_dir/wrong-name-curl.log" \
     FAKE_RELEASE_ROOT="$fixture_root" \
     PATH="$fake_bin:$PATH" \
-    ONGRID_EDGE_DEPS_TAG=edge-deps-test \
+    ONGRID_EDGE_DEPS_TAG="$deps_tag" \
     ONGRID_EDGE_ARTIFACT_CACHE_DIR="$tmp_dir/wrong-name-cache" \
     ONGRID_EDGE_ARTIFACT_BASE_URL=https://cnb.test/repo/-/releases/download \
     bash "$fetch_script" "$tmp_dir/wrong-name-dest" vtest linux-amd64 >/dev/null 2>&1; then

@@ -627,11 +627,16 @@ edge-deps-tag: ## [release] 打印当前不可变公共依赖 Release tag
 	@printf '%s\n' "$(EDGE_DEPS_TAG)"
 
 verify-edge-deps-release: ## [release] 校验一次性公共 Edge 依赖 Release 已完整发布
-	@files=""; for target in $(EDGE_ATTACHMENT_TARGETS); do \
+	@tmp_dir=$$(mktemp -d); trap 'rm -rf "$$tmp_dir"' EXIT; \
+	files=""; for target in $(EDGE_ATTACHMENT_TARGETS); do \
 		files="$$files edge-deps-$$target.tar.xz"; \
 	done; \
 	bash "$(CURDIR)/scripts/verify-cnb-release-attachments.sh" \
-		"$(CNB_RELEASE_BASE_URL)" "$(EDGE_DEPS_TAG)" $$files
+		"$(CNB_RELEASE_BASE_URL)" "$(EDGE_DEPS_TAG)" --output-dir "$$tmp_dir" $$files; \
+	for target in $(EDGE_ATTACHMENT_TARGETS); do \
+		bash "$(CURDIR)/deploy/install/edge/verify-edge-deps-archive.sh" \
+			"$$tmp_dir/edge-deps-$$target.tar.xz" "$$target" "$(EDGE_DEPS_TAG)"; \
+	done
 	@echo "verified immutable Edge dependency release $(EDGE_DEPS_TAG)"
 
 verify-edge-version-release: ## [release] 校验当前 VERSION 的 Edge Release 已完整发布
@@ -680,19 +685,20 @@ publish-edge-deps-attachments: ## [release] 幂等创建并上传一次性公共
 publish-edge-version-attachments: ## [release] 自动创建并上传当前 VERSION 的 ongrid-edge Release
 	@set -e; \
 	$(MAKE) --no-print-directory verify-edge-deps-release; \
+	$(MAKE) --no-print-directory build-edge-version-attachments; \
+	files=""; for target in $(EDGE_ATTACHMENT_TARGETS); do \
+		files="$$files $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/ongrid-edge-$$target-$(VERSION) $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/ongrid-edge-$$target-$(VERSION).sha256"; \
+	done; \
 	if $(MAKE) --no-print-directory verify-edge-version-release >/dev/null 2>&1; then \
-		echo "CNB Edge release $(VERSION) is complete; skip build and upload"; \
+		CNB_API_ENDPOINT="$(CNB_API_ENDPOINT)" \
+			bash scripts/publish-cnb-release-attachments.sh "$(VERSION)" "$(CNB_REPO_SLUG)" "$(CNB_RELEASE_BASE_URL)" "$(CNB_ATTACHMENTS_IMAGE)" $$files; \
 		exit 0; \
 	fi; \
-	$(MAKE) --no-print-directory build-edge-version-attachments; \
 	CNB_API_ENDPOINT="$(CNB_API_ENDPOINT)" \
 	CNB_RELEASE_TARGET_COMMITISH="$(CNB_RELEASE_TARGET_COMMITISH)" \
 		bash scripts/ensure-cnb-release.sh "$(VERSION)" "$(CNB_REPO_SLUG)" \
 		"Ongrid Edge $(VERSION)" \
 		"Ongrid Edge binaries for $(VERSION). Source: https://github.com/ongridio/ongrid"; \
-	files=""; for target in $(EDGE_ATTACHMENT_TARGETS); do \
-		files="$$files $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/ongrid-edge-$$target-$(VERSION) $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/ongrid-edge-$$target-$(VERSION).sha256"; \
-	done; \
 	CNB_API_ENDPOINT="$(CNB_API_ENDPOINT)" \
 		bash scripts/publish-cnb-release-attachments.sh "$(VERSION)" "$(CNB_REPO_SLUG)" "$(CNB_RELEASE_BASE_URL)" "$(CNB_ATTACHMENTS_IMAGE)" $$files
 
@@ -700,6 +706,7 @@ publish-edge-attachments: publish-edge-deps-attachments publish-edge-version-att
 
 test-edge-attachments: ## [test] 校验附件构建、直链下载和 checksum 拒绝路径
 	bash scripts/test-edge-assets.sh
+	bash scripts/test-edge-assets-lib.sh
 	bash scripts/test-verify-cnb-release-attachments.sh
 	bash scripts/test-ensure-cnb-release.sh
 	bash scripts/test-publish-cnb-release-attachments.sh
@@ -718,8 +725,15 @@ test-release-workflow: ## [test] 校验 GitHub Release 必须等待 CNB Edge Rel
 package: check-release-target ## [release] 打单架构精简 release tarball 到 dist/out/（Edge 制品安装时从 CNB 拉取）
 	@if [ "$(PACKAGE_CLEAN)" = "1" ]; then rm -rf dist/stage dist/out; fi
 	@mkdir -p dist/stage dist/out
+	@if [ "$(ONGRID_BUNDLE_EDGE_ASSETS)" = "1" ]; then \
+		$(MAKE) --no-print-directory \
+			$(addprefix build-edge-,$(EDGE_PLUGIN_ARCHES)) \
+			fetch-promtail fetch-otelcol fetch-node-exporter fetch-process-exporter fetch-db-exporters \
+			EDGE_PLUGIN_ARCHES="$(EDGE_PLUGIN_ARCHES)"; \
+	fi
 	PACKAGE_TARGET="$(PACKAGE_TARGET)" \
 	ONGRID_EDGE_DEPS_TAG="$(EDGE_DEPS_TAG)" \
+	EDGE_TARGETS="$(EDGE_PLUGIN_ARCHES)" \
 		bash dist/package.sh "$(VERSION)" "$(STAGE)" "$(OUT)"
 	@echo ""
 	@echo "=== release artefact ==="

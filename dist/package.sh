@@ -184,7 +184,24 @@ fi
 EDGE_TARGETS="${EDGE_TARGETS:-linux-amd64}"
 EDGE_BIN_ROOT="${EDGE_BIN_ROOT:-${REPO_ROOT}/bin}"
 BUNDLE_EDGE_ASSETS="${ONGRID_BUNDLE_EDGE_ASSETS:-0}"
+for target in ${EDGE_TARGETS}; do
+    case "$target" in
+        linux-amd64|linux-arm64) ;;
+        *) die "unsupported EDGE_TARGETS value: $target" ;;
+    esac
+done
 if [[ "$BUNDLE_EDGE_ASSETS" == "1" ]]; then
+required_edge_components=(
+    ongrid-edge promtail otelcol-contrib node_exporter process_exporter
+    mysqld_exporter postgres_exporter redis_exporter mongodb_exporter
+)
+for target in ${EDGE_TARGETS}; do
+    for component in "${required_edge_components[@]}"; do
+        src="${EDGE_BIN_ROOT}/${target}/${component}"
+        [[ -f "$src" && ! -L "$src" && -s "$src" ]] \
+            || die "offline Edge package requires regular non-empty ${src}"
+    done
+done
 for target in ${EDGE_TARGETS}; do
     src="${EDGE_BIN_ROOT}/${target}/ongrid-edge"
     dst="${STAGE_DIR}/edge/ongrid-edge-${target}"
@@ -277,12 +294,15 @@ for exporter in mysqld_exporter postgres_exporter redis_exporter mongodb_exporte
 done
 else
     : "${ONGRID_EDGE_DEPS_TAG:?ONGRID_EDGE_DEPS_TAG is required for a thin package}"
-    printf 'ONGRID_EDGE_DEPS_TAG=%s\n' "$ONGRID_EDGE_DEPS_TAG" \
-        > "${STAGE_DIR}/edge/edge-artifacts.env"
-    chmod 0644 "${STAGE_DIR}/edge/edge-artifacts.env"
     log "  edge binaries: direct CNB Release attachments (not embedded)"
-    log "  + edge/edge-artifacts.env"
 fi
+{
+    [[ -z "${ONGRID_EDGE_DEPS_TAG:-}" ]] \
+        || printf 'ONGRID_EDGE_DEPS_TAG=%s\n' "$ONGRID_EDGE_DEPS_TAG"
+    printf 'ONGRID_EDGE_TARGETS=%s\n' "$EDGE_TARGETS"
+} > "${STAGE_DIR}/edge/edge-artifacts.env"
+chmod 0644 "${STAGE_DIR}/edge/edge-artifacts.env"
+log "  + edge/edge-artifacts.env"
 
 # --- loki config (ADR-012) --------------------------------------------------
 copy_opt "${REPO_ROOT}/deploy/install/loki-config.yaml" \
@@ -326,6 +346,10 @@ copy_opt "${REPO_ROOT}/deploy/install/edge/build-edge-bundle.sh" \
          "${STAGE_DIR}/edge/build-edge-bundle.sh" 755
 copy_opt "${REPO_ROOT}/deploy/install/edge/fetch-edge-assets.sh" \
          "${STAGE_DIR}/edge/fetch-edge-assets.sh" 755
+copy_opt "${REPO_ROOT}/deploy/install/edge/verify-edge-deps-archive.sh" \
+         "${STAGE_DIR}/edge/verify-edge-deps-archive.sh" 755
+copy_opt "${REPO_ROOT}/deploy/install/edge/edge-assets-lib.sh" \
+         "${STAGE_DIR}/edge/edge-assets-lib.sh" 755
 
 # --- edge bundle for ADR-024 one-button upgrade -----------------------------
 # We do not pack edge-bundle-<arch>-<version>.tar.gz into the release tarball.

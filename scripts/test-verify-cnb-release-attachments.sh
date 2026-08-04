@@ -19,6 +19,11 @@ printf 'verified payload\n' > "$release_root/valid/asset"
 (cd "$release_root/valid" && sha256sum asset > asset.sha256)
 bash "$verify_script" "file://$release_root" valid asset >/dev/null \
     || fail "a valid attachment and sidecar were rejected"
+download_dir="$tmp_dir/downloaded"
+bash "$verify_script" "file://$release_root" valid --output-dir "$download_dir" asset \
+    >/dev/null || fail "a caller-owned output directory was rejected"
+cmp -s "$release_root/valid/asset" "$download_dir/asset" \
+    || fail "verified attachment was not retained in the caller-owned output directory"
 
 : > "$release_root/empty/asset"
 printf '%064d  asset\n' 0 > "$release_root/empty/asset.sha256"

@@ -10,9 +10,12 @@ shift 2
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CONFIG_FILE=${ONGRID_EDGE_ARTIFACT_CONFIG:-$SCRIPT_DIR/edge-artifacts.env}
 CONFIG_DEPS_TAG=""
+CONFIG_TARGETS=""
 if [[ -f "$CONFIG_FILE" ]]; then
     CONFIG_DEPS_TAG=$(sed -n 's/^ONGRID_EDGE_DEPS_TAG=//p' "$CONFIG_FILE" | tail -n 1)
+    CONFIG_TARGETS=$(sed -n 's/^ONGRID_EDGE_TARGETS=//p' "$CONFIG_FILE" | tail -n 1)
 fi
+VERIFY_DEPS_SCRIPT="$SCRIPT_DIR/verify-edge-deps-archive.sh"
 
 BASE_URL=${ONGRID_EDGE_ARTIFACT_BASE_URL:-https://cnb.cool/ongridio/ongrid-edge/-/releases/download}
 DEPS_TAG=${ONGRID_EDGE_DEPS_TAG:-$CONFIG_DEPS_TAG}
@@ -27,7 +30,7 @@ CURL_FLAGS=(
 if (( $# > 0 )); then
     TARGETS=("$@")
 else
-    read -r -a TARGETS <<<"${ONGRID_EDGE_TARGETS:-linux-amd64}"
+    read -r -a TARGETS <<<"${ONGRID_EDGE_TARGETS:-${CONFIG_TARGETS:-linux-amd64}}"
 fi
 
 log() { printf '[edge-assets] %s\n' "$*" >&2; }
@@ -39,6 +42,7 @@ die() { printf '[edge-assets] error: %s\n' "$*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 command -v tar >/dev/null 2>&1 || die "tar is required"
+[[ -x "$VERIFY_DEPS_SCRIPT" ]] || die "missing dependency verifier: $VERIFY_DEPS_SCRIPT"
 mkdir -p "$DEST_DIR" "$CACHE_DIR"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/ongrid-edge-assets.XXXXXX")
@@ -92,36 +96,6 @@ deps=(
     redis_exporter mongodb_exporter promtail otelcol-contrib
 )
 
-verify_dependency_manifest() {
-    local extract_dir=$1 manifest="$extract_dir/MANIFEST.sha256"
-    local required=(TARGET DEPENDENCIES "${deps[@]}")
-    local line_count name line
-
-    line_count=$(awk 'NF {count++} END {print count + 0}' "$manifest")
-    [[ "$line_count" == "${#required[@]}" ]] || return 1
-    for name in "${required[@]}"; do
-        [[ -f "$extract_dir/$name" && ! -L "$extract_dir/$name" && -s "$extract_dir/$name" ]] \
-            || return 1
-        if ! line=$(awk -v expected="$name" '
-            NF {
-                recorded=$2
-                sub(/^\*/, "", recorded)
-                if (recorded == expected) {
-                    line=$0
-                    count++
-                }
-            }
-            END {
-                if (count != 1) exit 1
-                print line
-            }
-        ' "$manifest"); then
-            return 1
-        fi
-        verify_checksum_line "$extract_dir/$name" "$name" "$line" || return 1
-    done
-}
-
 for target in "${TARGETS[@]}"; do
     case "$target" in
         linux-amd64|linux-arm64) ;;
@@ -134,34 +108,8 @@ for target in "${TARGETS[@]}"; do
     edge_binary=$(download_verified "$VERSION" "$edge_name")
 
     extract_dir="$work/extract-$target"
-    mkdir -p "$extract_dir"
-    while IFS= read -r entry; do
-        entry=${entry#./}
-        case "$entry" in
-            ""|TARGET|DEPENDENCIES|MANIFEST.sha256|node_exporter|process_exporter|mysqld_exporter|postgres_exporter|redis_exporter|mongodb_exporter|promtail|otelcol-contrib) ;;
-            *) die "$deps_name contains unexpected path: $entry" ;;
-        esac
-    done < <(tar -tJf "$deps_archive")
-    tar -xJf "$deps_archive" -C "$extract_dir"
-    [[ -f "$extract_dir/MANIFEST.sha256" && ! -L "$extract_dir/MANIFEST.sha256" && -s "$extract_dir/MANIFEST.sha256" ]] \
-        || die "$deps_name is missing a regular MANIFEST.sha256"
-    verify_dependency_manifest "$extract_dir" || die "dependency manifest failed for $target"
-    [[ "$(tr -d '[:space:]' < "$extract_dir/TARGET")" == "$target" ]] \
-        || die "dependency archive target does not match $target"
-    if ! dependency_release_tag=$(awk -F= '
-        $1 == "release_tag" {
-            value=substr($0, index($0, "=") + 1)
-            count++
-        }
-        END {
-            if (count != 1) exit 1
-            print value
-        }
-    ' "$extract_dir/DEPENDENCIES"); then
-        die "$deps_name has an invalid dependency release tag"
-    fi
-    [[ "$dependency_release_tag" == "$DEPS_TAG" ]] \
-        || die "dependency archive release tag does not match $DEPS_TAG"
+    "$VERIFY_DEPS_SCRIPT" "$deps_archive" "$target" "$DEPS_TAG" "$extract_dir" \
+        >/dev/null || die "dependency archive validation failed for $target"
 
     for component in "${deps[@]}"; do
         install -m 0755 "$extract_dir/$component" "$DEST_DIR/${component}-${target}"

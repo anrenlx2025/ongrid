@@ -79,6 +79,14 @@ rm -f "$tmp_dir/remote/one" "$tmp_dir/remote/one.sha256"
 cp "$tmp_dir/files/one" "$tmp_dir/files/one.sha256" "$tmp_dir/remote/"
 run_publisher
 [[ ! -s "$tmp_dir/docker.log" ]] || { echo "complete release was uploaded again" >&2; exit 1; }
+env -u CNB_TOKEN \
+    FAKE_CURL_LOG="$tmp_dir/curl.log" \
+    FAKE_REMOTE_ROOT="$tmp_dir/remote" \
+    PATH="$tmp_dir/bin:$PATH" \
+    bash "$publisher" vtest ongridio/ongrid-edge \
+        https://cnb.test/ongridio/ongrid-edge/-/releases/download \
+        "$plugin_image" "$tmp_dir/files/one" "$tmp_dir/files/one.sha256" >/dev/null \
+    || { echo "complete release unnecessarily required upload credentials" >&2; exit 1; }
 
 # Matching sidecar text is not enough: a corrupt remote payload must fail
 # actual content verification and must never be reported as an immutable hit.

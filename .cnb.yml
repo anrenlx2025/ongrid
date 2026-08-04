@@ -1,7 +1,7 @@
 $:
   tag_push:
     - docker:
-        image: golang:1.25-bookworm
+        image: golang:1.25.11-bookworm
       stages:
         - name: Build direct Edge attachments
           script: |

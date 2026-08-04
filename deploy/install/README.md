@@ -93,12 +93,12 @@ sudo ./upgrade.sh
 
 | 变量 | 说明 |
 |------|------|
-| `ONGRID_EDGE_TARGETS` | 需要在 Manager `/edge/` 服务的架构列表；默认 `linux-amd64`，双架构可设为 `linux-amd64 linux-arm64` |
+| `ONGRID_EDGE_TARGETS` | 需要在 Manager `/edge/` 服务的架构列表；默认 `linux-amd64`，双架构可设为 `linux-amd64 linux-arm64`。选择会写入 `/opt/ongrid/edge/edge-artifacts.env`，后续升级默认继承 |
 | `ONGRID_EDGE_ARTIFACT_BASE_URL` | 覆盖 Release 下载根地址，适合 CNB 私有镜像仓库或内网代理 |
 | `ONGRID_EDGE_DEPS_TAG` | 覆盖公共依赖 Release tag；标准包已在 `edge/edge-artifacts.env` 固定，不建议安装时修改 |
 | `ONGRID_EDGE_ARTIFACT_CACHE_DIR` | 校验通过后的本地下载缓存；默认 `/var/cache/ongrid/edge-artifacts` |
 
-完全离线的自定义安装包可在构建时执行 `ONGRID_BUNDLE_EDGE_ASSETS=1 make package ...`，恢复旧版内嵌二进制方式；标准 Release 不启用该选项。
+完全离线的自定义安装包可在构建时执行 `ONGRID_BUNDLE_EDGE_ASSETS=1 make package ...`，恢复旧版内嵌二进制方式；该命令会先构建自研 Edge、获取所选架构的全部公共组件，任何文件缺失都会终止打包，避免生成不可安装的离线包。标准 Release 不启用该选项。
 
 仅当数据目录被人工改乱、从不保留属主的备份恢复，或升级说明明确指出容器 UID 发生变化时，才执行显式权限修复。该操作会遍历历史数据，大目录可能耗时较长：
 

@@ -3,9 +3,14 @@
 
 set -euo pipefail
 
-BASE_URL=${1:?usage: verify-cnb-release-attachments.sh <base-url> <tag> <filename...>}
+BASE_URL=${1:?usage: verify-cnb-release-attachments.sh <base-url> <tag> [--output-dir dir] <filename...>}
 TAG=${2:?release tag}
 shift 2
+OUTPUT_DIR=""
+if [[ "${1:-}" == "--output-dir" ]]; then
+    OUTPUT_DIR=${2:?--output-dir requires a directory}
+    shift 2
+fi
 (( $# > 0 )) || { echo "verify-cnb-attachments: no filenames supplied" >&2; exit 2; }
 
 BASE_URL=${BASE_URL%/}
@@ -17,8 +22,21 @@ BASE_URL=${BASE_URL%/}
 command -v curl >/dev/null 2>&1 || { echo "verify-cnb-attachments: curl is required" >&2; exit 1; }
 command -v sha256sum >/dev/null 2>&1 || { echo "verify-cnb-attachments: sha256sum is required" >&2; exit 1; }
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/verify-cnb-attachments.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+if [[ -n "$OUTPUT_DIR" ]]; then
+    work=$OUTPUT_DIR
+    mkdir -p "$work"
+    [[ -d "$work" && ! -L "$work" ]] || {
+        echo "verify-cnb-attachments: output directory is not a regular directory: $work" >&2
+        exit 2
+    }
+    if find "$work" -mindepth 1 -print -quit | grep -q .; then
+        echo "verify-cnb-attachments: output directory must be empty: $work" >&2
+        exit 2
+    fi
+else
+    work=$(mktemp -d "${TMPDIR:-/tmp}/verify-cnb-attachments.XXXXXX")
+    trap 'rm -rf "$work"' EXIT
+fi
 
 CURL_FLAGS=(
     --fail --location --silent --show-error

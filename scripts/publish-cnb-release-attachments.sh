@@ -14,13 +14,11 @@ shift 4
     exit 2
 }
 
-: "${CNB_TOKEN:?CNB_TOKEN with repo-contents read/write permission is required}"
 API_ENDPOINT=${CNB_API_ENDPOINT:-https://api.cnb.cool}
 WEB_ENDPOINT=${CNB_WEB_ENDPOINT:-https://cnb.cool}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VERIFY_SCRIPT="$SCRIPT_DIR/verify-cnb-release-attachments.sh"
 command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
-command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
 command -v cmp >/dev/null 2>&1 || { echo "cmp is required" >&2; exit 1; }
 [[ -x "$VERIFY_SCRIPT" ]] || { echo "publish-cnb-attachments: missing $VERIFY_SCRIPT" >&2; exit 1; }
 
@@ -83,7 +81,7 @@ verify_remote_release() {
         case "$file" in
             *.sha256)
                 curl -fsSL "$BASE_URL/$TAG/$(basename "$file")" | cmp -s - "$file" || {
-                    echo "publish-cnb-attachments: remote checksum differs for $(basename "$file")" >&2
+                    echo "publish-cnb-attachments: remote checksum differs for $(basename "$file"); refusing to overwrite immutable content (publish a new version or remove the incorrect Release manually)" >&2
                     return 1
                 }
                 ;;
@@ -101,6 +99,9 @@ if (( present != 0 )); then
     echo "publish-cnb-attachments: release $TAG is only partially populated; refusing to overwrite immutable attachments" >&2
     exit 1
 fi
+
+: "${CNB_TOKEN:?CNB_TOKEN with repo-contents read/write permission is required}"
+command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
 
 repo_root=$(pwd)
 attachment_list=""
