@@ -253,6 +253,12 @@ grep -Fq 'docker compose --env-file .env up -d --force-recreate ongrid nginx' "$
     || fail "manual Edge rollback does not recreate containers with Edge bind mounts"
 grep -Fq 'trap - ERR' "$upgrade_script" \
     || fail "upgrade.sh health failure can trigger a partial automatic Edge-only rollback"
+grep -Fq 'for d in /tmp/ongrid-v*-linux /tmp/ongrid-v*-linux-*; do' "$upgrade_script" \
+    || fail "upgrade.sh does not prune both universal and legacy extracted release directories"
+grep -Fq '"$INSTALL_DIR"/ongrid-v*-linux.tar.xz' "$upgrade_script" \
+    || fail "upgrade.sh does not include universal xz release packages in retention cleanup"
+grep -Fq '"$INSTALL_DIR"/ongrid-v*-linux-*.tar.xz' "$upgrade_script" \
+    || fail "upgrade.sh no longer includes legacy architecture-specific xz packages in cleanup"
 for persistent_dir in mysql prometheus loki tempo grafana skills pages workspace tools; do
     if grep -Eq "chown -R .*ONGRID_DATA_DIR/${persistent_dir}" "$upgrade_script"; then
         fail "upgrade.sh directly recurses through $persistent_dir outside the repair helper"

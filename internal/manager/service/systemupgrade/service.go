@@ -228,7 +228,7 @@ func buildCommands(version, downloadBase string) []UpgradeCommand {
 	base := strings.TrimRight(downloadBase, "/")
 	return []UpgradeCommand{
 		{
-			ID:      "auto",
+			ID:      "linux-universal",
 			Label:   "Universal Linux package",
 			Arch:    "linux",
 			Command: buildUniversalCommand(version, base),

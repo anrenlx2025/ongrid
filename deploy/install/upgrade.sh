@@ -686,7 +686,7 @@ fi
 # ---------- post-success cleanup (only when healthy) ----------
 # Each upgrade leaves three things on disk that build up over many
 # version bumps and have bitten today (2 disk-full incidents):
-#   1. /tmp/ongrid-vN-linux-<arch>/ — the extracted release tree
+#   1. /tmp/ongrid-vN-linux{,-<arch>}/ — the extracted release tree
 #      (1+ GB per version, never reused after install)
 #   2. Pulled CNB images from old versions (manager + Web)
 #      — Docker keeps them forever; one set is ~500 MB
@@ -701,7 +701,7 @@ if [[ $HEALTH_OK -eq 1 ]]; then
     # NB: SCRIPT_DIR for this upgrade is typically /tmp/ongrid-<NEW>/,
     # so the basename = the dir we keep.
     CURRENT_TMP=$(basename "$SCRIPT_DIR")
-    for d in /tmp/ongrid-v*-linux-*; do
+    for d in /tmp/ongrid-v*-linux /tmp/ongrid-v*-linux-*; do
         [[ -d "$d" ]] || continue
         [[ "$(basename "$d")" == "$CURRENT_TMP" ]] && continue
         rm -rf "$d"
@@ -737,13 +737,15 @@ if [[ $HEALTH_OK -eq 1 ]]; then
 
     # (3) Cap release tarballs in $INSTALL_DIR — keep the two newest
     # (so operators can roll back one version) and drop the rest.
-    # Match both the legacy .tar.gz and the current .tar.xz (release packages
-    # switched to xz) so upgrades from a pre-xz install still prune old gz
-    # tarballs. The two explicit globs avoid .tar.* also matching .sha256.
+    # Match both the universal package name and the legacy architecture-specific
+    # names, with both .tar.gz and .tar.xz, so upgrades keep pruning every format.
+    # The four explicit globs avoid .tar.* also matching .sha256.
     # `|| true` inside the group: when only one extension is present the other
     # glob stays literal and `ls` exits non-zero — harmless here, but under
     # `set -o pipefail` it would abort this best-effort cleanup step.
-    { ls -1t "$INSTALL_DIR"/ongrid-v*-linux-*.tar.gz \
+    { ls -1t "$INSTALL_DIR"/ongrid-v*-linux.tar.gz \
+             "$INSTALL_DIR"/ongrid-v*-linux.tar.xz \
+             "$INSTALL_DIR"/ongrid-v*-linux-*.tar.gz \
              "$INSTALL_DIR"/ongrid-v*-linux-*.tar.xz 2>/dev/null || true; } \
         | tail -n +3 \
         | while read -r f; do

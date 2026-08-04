@@ -46,7 +46,7 @@ func TestCheckDetectsNewerRelease(t *testing.T) {
 	if len(info.Commands) != 1 {
 		t.Fatalf("commands = %d, want 1", len(info.Commands))
 	}
-	if info.Commands[0].ID != "auto" || info.Commands[0].Arch != "linux" {
+	if info.Commands[0].ID != "linux-universal" || info.Commands[0].Arch != "linux" {
 		t.Fatalf("command = %+v, want one universal Linux command", info.Commands[0])
 	}
 	wantCommand := strings.Join([]string{

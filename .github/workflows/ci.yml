@@ -87,6 +87,7 @@ jobs:
           src/pages/Kubernetes.test.tsx
           src/pages/Edges.test.tsx
           src/pages/Dashboard.test.tsx
+          src/pages/settings/Upgrade.test.tsx
           src/pages/settings/LLM.test.tsx
           src/pages/kubernetes/edgeAttachments.test.ts
           src/pages/kubernetes/registryCommands.test.ts
