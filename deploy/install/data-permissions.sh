@@ -183,6 +183,28 @@ ongrid_restore_existing_stack() {
     return 1
 }
 
+ongrid_restore_edge_directory() {
+    local install_dir="$1" backup_dir="$2"
+    local current_edge="$install_dir/edge" backup_edge="$backup_dir/edge"
+
+    if [[ ! -d "$backup_edge" ]]; then
+        printf '[ERROR] previous Edge directory is missing from %s\n' "$backup_dir" >&2
+        return 1
+    fi
+    if [[ -e "$current_edge" || -L "$current_edge" ]]; then
+        if ! rm -rf -- "$current_edge"; then
+            printf '[ERROR] could not remove failed Edge directory at %s\n' "$current_edge" >&2
+            return 1
+        fi
+    fi
+    if ! mv -- "$backup_edge" "$current_edge"; then
+        printf '[ERROR] could not restore previous Edge directory from %s\n' "$backup_dir" >&2
+        return 1
+    fi
+    rmdir "$backup_dir" 2>/dev/null || true
+    printf '[INFO] restored previous Edge directory from upgrade backup\n'
+}
+
 ongrid_prepare_data_directories_or_restore() {
     local data_dir="$1" log_dir="$2" install_dir="$3"
 

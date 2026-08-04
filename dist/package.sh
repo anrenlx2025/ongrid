@@ -4,16 +4,18 @@
 # Usage: package.sh <VERSION> <STAGE_DIR> <OUT_DIR>
 #
 #   VERSION     e.g. v0.1.0
-#   STAGE_DIR   staging directory whose basename is "ongrid-<VERSION>-linux-<arch>"
+#   STAGE_DIR   staging directory whose basename is "ongrid-<VERSION>-linux"
 #   OUT_DIR     directory in which the final tarball is written
 #
 # Produces:
-#   <OUT_DIR>/ongrid-<VERSION>-linux-<arch>.tar.xz
-#   <OUT_DIR>/ongrid-<VERSION>-linux-<arch>.tar.xz.sha256
+#   <OUT_DIR>/ongrid-<VERSION>-linux.tar.xz
+#   <OUT_DIR>/ongrid-<VERSION>-linux.tar.xz.sha256
 #
 # Optional env:
-#   PACKAGE_TARGET  linux-amd64 (default) or linux-arm64
-#   EDGE_TARGETS    edge binary targets to bundle (default linux-amd64)
+#   PACKAGE_TARGET  linux (default)
+#   ONGRID_BUNDLE_EDGE_ASSETS=1 restores legacy embedded Edge binaries
+#   ONGRID_EDGE_DEPS_TAG immutable CNB Release tag for public dependencies
+#   EDGE_TARGETS    legacy embedded Edge targets (default linux-amd64)
 #   ONGRID_BUNDLE_EMBEDDING_MODEL=0 omits the local embedding model
 #
 # The script is tolerant of missing deploy/install/* files: it warns and
@@ -43,14 +45,14 @@ if [[ -z "$PACKAGE_TARGET" ]]; then
     if [[ "$STAGE_BASE" == "$STAGE_PREFIX"* ]]; then
         PACKAGE_TARGET="${STAGE_BASE#${STAGE_PREFIX}}"
     else
-        PACKAGE_TARGET="linux-amd64"
+        PACKAGE_TARGET="linux"
     fi
 fi
 
 case "$PACKAGE_TARGET" in
-    linux-amd64|linux-arm64) ;;
+    linux) ;;
     *)
-        echo "[pkg] error: unsupported PACKAGE_TARGET=${PACKAGE_TARGET}; expected linux-amd64 or linux-arm64" >&2
+        echo "[pkg] error: unsupported PACKAGE_TARGET=${PACKAGE_TARGET}; expected linux" >&2
         exit 2
         ;;
 esac
@@ -175,13 +177,33 @@ if [[ "$BUNDLE_EMB" == "1" ]]; then
     fi
 fi
 
-# --- edge binaries -----------------------------------------------------------
-# Edges are amd64-only in our deployments, so both compatibility-named server
-# packages carry the same linux/amd64 Edge payload. Override EDGE_TARGETS to
-# bundle more Edge architectures when the deployment policy changes.
+# --- optional legacy embedded edge binaries ---------------------------------
+# Default packages intentionally contain no large Edge/plugin binaries. The
+# installer downloads checksum-verified CNB Release attachments instead. The opt-in
+# remains for air-gapped/private rebuilds and keeps the old file layout intact.
 EDGE_TARGETS="${EDGE_TARGETS:-linux-amd64}"
+EDGE_BIN_ROOT="${EDGE_BIN_ROOT:-${REPO_ROOT}/bin}"
+BUNDLE_EDGE_ASSETS="${ONGRID_BUNDLE_EDGE_ASSETS:-0}"
 for target in ${EDGE_TARGETS}; do
-    src="${REPO_ROOT}/bin/${target}/ongrid-edge"
+    case "$target" in
+        linux-amd64|linux-arm64) ;;
+        *) die "unsupported EDGE_TARGETS value: $target" ;;
+    esac
+done
+if [[ "$BUNDLE_EDGE_ASSETS" == "1" ]]; then
+required_edge_components=(
+    ongrid-edge promtail otelcol-contrib node_exporter process_exporter
+    mysqld_exporter postgres_exporter redis_exporter mongodb_exporter
+)
+for target in ${EDGE_TARGETS}; do
+    for component in "${required_edge_components[@]}"; do
+        src="${EDGE_BIN_ROOT}/${target}/${component}"
+        [[ -f "$src" && ! -L "$src" && -s "$src" ]] \
+            || die "offline Edge package requires regular non-empty ${src}"
+    done
+done
+for target in ${EDGE_TARGETS}; do
+    src="${EDGE_BIN_ROOT}/${target}/ongrid-edge"
     dst="${STAGE_DIR}/edge/ongrid-edge-${target}"
     if [ -f "$src" ]; then
         cp "$src" "$dst"
@@ -196,7 +218,7 @@ done
 # promtail (logs plugin) ships next to ongrid-edge so install-edge.sh can
 # install it under /usr/local/lib/ongrid-edge/promtail.
 for target in ${EDGE_TARGETS}; do
-    src="${REPO_ROOT}/bin/${target}/promtail"
+    src="${EDGE_BIN_ROOT}/${target}/promtail"
     dst="${STAGE_DIR}/edge/promtail-${target}"
     if [ -f "$src" ]; then
         cp "$src" "$dst"
@@ -212,7 +234,7 @@ done
 # Linux-only: upstream doesn't publish darwin builds in the contrib stream;
 # darwin edges will see the traces plugin disabled (warned by install-edge.sh).
 for target in ${EDGE_TARGETS}; do
-    src="${REPO_ROOT}/bin/${target}/otelcol-contrib"
+    src="${EDGE_BIN_ROOT}/${target}/otelcol-contrib"
     dst="${STAGE_DIR}/edge/otelcol-contrib-${target}"
     if [ -f "$src" ]; then
         cp "$src" "$dst"
@@ -229,7 +251,7 @@ done
 # a metric source and Monitor stays empty until an operator manually
 # installs node_exporter.
 for target in ${EDGE_TARGETS}; do
-    src="${REPO_ROOT}/bin/${target}/node_exporter"
+    src="${EDGE_BIN_ROOT}/${target}/node_exporter"
     dst="${STAGE_DIR}/edge/node_exporter-${target}"
     if [ -f "$src" ]; then
         cp "$src" "$dst"
@@ -244,7 +266,7 @@ done
 # timeline" PromQL panel). Same systemd-managed deploy model as
 # node_exporter. Without this, the process timeline panel stays empty.
 for target in ${EDGE_TARGETS}; do
-    src="${REPO_ROOT}/bin/${target}/process_exporter"
+    src="${EDGE_BIN_ROOT}/${target}/process_exporter"
     dst="${STAGE_DIR}/edge/process_exporter-${target}"
     if [ -f "$src" ]; then
         cp "$src" "$dst"
@@ -259,7 +281,7 @@ done
 # subprocesses; the manager stores only the edge-local secret file path.
 for exporter in mysqld_exporter postgres_exporter redis_exporter mongodb_exporter; do
     for target in ${EDGE_TARGETS}; do
-        src="${REPO_ROOT}/bin/${target}/${exporter}"
+        src="${EDGE_BIN_ROOT}/${target}/${exporter}"
         dst="${STAGE_DIR}/edge/${exporter}-${target}"
         if [ -f "$src" ]; then
             cp "$src" "$dst"
@@ -270,6 +292,19 @@ for exporter in mysqld_exporter postgres_exporter redis_exporter mongodb_exporte
         fi
     done
 done
+else
+    : "${ONGRID_EDGE_DEPS_TAG:?ONGRID_EDGE_DEPS_TAG is required for a thin package}"
+    log "  edge binaries: direct CNB Release attachments (not embedded)"
+fi
+{
+    [[ -z "${ONGRID_EDGE_DEPS_TAG:-}" ]] \
+        || printf 'ONGRID_EDGE_DEPS_TAG=%s\n' "$ONGRID_EDGE_DEPS_TAG"
+    if [[ "$BUNDLE_EDGE_ASSETS" == "1" ]]; then
+        printf 'ONGRID_EDGE_TARGETS=%s\n' "$EDGE_TARGETS"
+    fi
+} > "${STAGE_DIR}/edge/edge-artifacts.env"
+chmod 0644 "${STAGE_DIR}/edge/edge-artifacts.env"
+log "  + edge/edge-artifacts.env"
 
 # --- loki config (ADR-012) --------------------------------------------------
 copy_opt "${REPO_ROOT}/deploy/install/loki-config.yaml" \
@@ -311,15 +346,17 @@ copy_opt "${REPO_ROOT}/deploy/install/apply-pending-upgrade.sh" \
 # the loose binaries already staged in edge/.
 copy_opt "${REPO_ROOT}/deploy/install/edge/build-edge-bundle.sh" \
          "${STAGE_DIR}/edge/build-edge-bundle.sh" 755
+copy_opt "${REPO_ROOT}/deploy/install/edge/fetch-edge-assets.sh" \
+         "${STAGE_DIR}/edge/fetch-edge-assets.sh" 755
+copy_opt "${REPO_ROOT}/deploy/install/edge/verify-edge-deps-archive.sh" \
+         "${STAGE_DIR}/edge/verify-edge-deps-archive.sh" 755
+copy_opt "${REPO_ROOT}/deploy/install/edge/edge-assets-lib.sh" \
+         "${STAGE_DIR}/edge/edge-assets-lib.sh" 755
 
 # --- edge bundle for ADR-024 one-button upgrade -----------------------------
-# We deliberately do NOT pack edge-bundle-<arch>-<version>.tar.gz into the
-# release tarball anymore. Those bundles are byte-for-byte copies of the loose
-# linux binaries already staged above, and being pre-gzipped they added
-# ~120 MB+ of incompressible payload to every release (they are still published
-# as standalone GitHub release assets by `make build-edge-bundle`).
-# install.sh / upgrade.sh now reassemble it on the manager host via
-# edge/build-edge-bundle.sh after extracting STAGE_DIR/edge/* to
+# We do not pack edge-bundle-<arch>-<version>.tar.gz into the release tarball.
+# install.sh / upgrade.sh first verify the CNB downloads, then
+# reassemble the compatibility bundle via edge/build-edge-bundle.sh under
 # /opt/ongrid/edge/, where docker-compose bind-mounts it into ongrid-web's
 # nginx html and it is served from /edge/ exactly as before.
 

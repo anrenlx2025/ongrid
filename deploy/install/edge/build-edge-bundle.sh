@@ -62,9 +62,9 @@ for entry in "${ENTRIES[@]}"; do
   loose=$4
   src_file="$EDGE_DIR/$loose"
 
-  if [[ ! -f "$src_file" ]]; then
-    echo "build-edge-bundle(host): missing $src_file — skipping (bundle will be incomplete)" >&2
-    continue
+  if [[ ! -f "$src_file" || -L "$src_file" || ! -s "$src_file" ]]; then
+    echo "build-edge-bundle(host): missing regular non-empty file $src_file — bundle NOT built" >&2
+    exit 1
   fi
   install -m 0755 "$src_file" "$work/$src_in_bundle"
   sha=$(sha256sum "$work/$src_in_bundle" | awk '{print $1}')
@@ -72,8 +72,8 @@ for entry in "${ENTRIES[@]}"; do
   staged=$((staged + 1))
 done
 
-if [[ "$staged" -eq 0 ]]; then
-  echo "build-edge-bundle(host): no loose binaries found under $EDGE_DIR for $ARCH — bundle NOT built" >&2
+if [[ "$staged" -ne "${#ENTRIES[@]}" ]]; then
+  echo "build-edge-bundle(host): expected ${#ENTRIES[@]} files, staged $staged — bundle NOT built" >&2
   exit 1
 fi
 

@@ -228,46 +228,16 @@ func buildCommands(version, downloadBase string) []UpgradeCommand {
 	base := strings.TrimRight(downloadBase, "/")
 	return []UpgradeCommand{
 		{
-			ID:      "linux-amd64",
-			Label:   "Linux amd64",
-			Arch:    "linux-amd64",
-			Command: buildArchCommand(version, base, "amd64"),
-		},
-		{
-			ID:      "linux-arm64",
-			Label:   "Linux arm64",
-			Arch:    "linux-arm64",
-			Command: buildArchCommand(version, base, "arm64"),
-		},
-		{
-			ID:      "auto",
-			Label:   "Auto-detect Linux arch",
+			ID:      "linux-universal",
+			Label:   "Universal Linux package",
 			Arch:    "linux",
-			Command: buildAutoCommand(version, base),
+			Command: buildUniversalCommand(version, base),
 		},
 	}
 }
 
-func buildAutoCommand(version, base string) string {
-	return fmt.Sprintf(
-		`ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64|amd64) ARCH=amd64 ;;
-  aarch64|arm64) ARCH=arm64 ;;
-  *) echo "unsupported arch: $ARCH"; exit 1 ;;
-esac
-PKG="ongrid-%s-linux-${ARCH}"
-curl -fL -O %s/${PKG}.tar.xz || wget %s/${PKG}.tar.xz
-tar xf ${PKG}.tar.xz && cd ${PKG}
-sudo ./upgrade.sh`,
-		version,
-		base,
-		base,
-	)
-}
-
-func buildArchCommand(version, base, arch string) string {
-	pkg := fmt.Sprintf("ongrid-%s-linux-%s", version, arch)
+func buildUniversalCommand(version, base string) string {
+	pkg := fmt.Sprintf("ongrid-%s-linux", version)
 	return fmt.Sprintf(
 		`curl -fL -O %s/%s.tar.xz || wget %s/%s.tar.xz
 tar xf %s.tar.xz && cd %s
