@@ -93,6 +93,11 @@ relative=${url#*releases/download/}
 cp "$FAKE_RELEASE_ROOT/$relative" "$out"
 EOF
 chmod 0755 "$fake_bin/curl"
+cat > "$fake_bin/uname" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' x86_64
+EOF
+chmod 0755 "$fake_bin/uname"
 
 dest="$tmp_dir/dest"
 cache="$tmp_dir/cache"
@@ -116,6 +121,22 @@ grep -Fq "$deps_tag/edge-deps-linux-amd64.tar.xz" "$dest/edge-assets-linux-amd64
     || fail "dependency source was not recorded"
 grep -Fq 'vtest/ongrid-edge-linux-amd64-vtest' "$dest/edge-assets-linux-amd64.ref" \
     || fail "edge source was not recorded"
+
+# A thin universal package carries no target. The downloader must select the
+# current host architecture before resolving the CNB attachment names.
+auto_dest="$tmp_dir/auto-dest"
+FAKE_CURL_LOG="$tmp_dir/auto-curl.log" \
+FAKE_RELEASE_ROOT="$fixture_root" \
+PATH="$fake_bin:$PATH" \
+ONGRID_EDGE_DEPS_TAG="$deps_tag" \
+ONGRID_EDGE_ARTIFACT_CACHE_DIR="$tmp_dir/auto-cache" \
+ONGRID_EDGE_ARTIFACT_BASE_URL=https://cnb.test/repo/-/releases/download \
+    bash "$fetch_script" "$auto_dest" vtest
+[[ -x "$auto_dest/ongrid-edge-linux-amd64" ]] \
+    || fail "host architecture auto-detection did not stage the matching Edge binary"
+grep -Fqx 'https://cnb.test/repo/-/releases/download/vtest/ongrid-edge-linux-amd64-vtest' \
+    "$tmp_dir/auto-curl.log" \
+    || fail "host architecture auto-detection requested the wrong Edge attachment"
 
 # Dependency archives keep stable filenames across release tags. Reusing one
 # cache directory after a dependency version bump must fetch and stage the new

@@ -13,6 +13,17 @@ jobs = workflow.fetch("jobs")
 edge = jobs.fetch("edge-release")
 raise "edge-release must wait for image publication" unless edge.fetch("needs") == "image"
 
+build = jobs.fetch("build")
+raise "release must build one universal package without an architecture matrix" if build.key?("strategy")
+build_step = build.fetch("steps").find { |step| step["name"] == "Build universal Linux package" }
+raise "missing universal package build step" unless build_step
+raise "universal package build must call make package" unless build_step.fetch("run").match?(/^make package\s*$/)
+upload = build.fetch("steps").find { |step| step["name"] == "Upload package artifact" }
+raise "missing universal package upload step" unless upload
+upload_path = upload.fetch("with").fetch("path")
+raise "release uploads an architecture-specific server package" if upload_path.match?(/linux-(amd64|arm64)/)
+raise "release does not upload the universal server package" unless upload_path.include?("linux.tar.xz")
+
 publish = edge.fetch("steps").find { |step| step["name"] == "Publish versioned Edge release to CNB" }
 raise "missing Edge publish step" unless publish
 raise "Edge publish step must call the Make target" unless publish.fetch("run").include?("make publish-edge-version-attachments")
@@ -23,6 +34,12 @@ raise "Edge Go toolchain must be exact for immutable binary comparison" unless g
 
 release_needs = Array(jobs.fetch("release").fetch("needs"))
 raise "GitHub Release must wait for Edge publication" unless release_needs.sort == ["build", "edge-release"]
+release = jobs.fetch("release")
+publish_release = release.fetch("steps").find { |step| step["name"] == "Publish GitHub Release" }
+raise "missing GitHub Release publish step" unless publish_release
+release_run = publish_release.fetch("run")
+raise "GitHub Release still publishes architecture-specific server packages" if release_run.match?(/linux-(amd64|arm64)/)
+raise "GitHub Release does not publish the universal server package" unless release_run.include?("linux.tar.xz")
 ' "$workflow"
 
 if grep -Fq 'cnbcool/attachments:latest' "$makefile"; then

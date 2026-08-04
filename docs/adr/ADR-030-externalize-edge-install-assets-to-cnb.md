@@ -52,6 +52,11 @@ GitHub 的 `Release` workflow 在每个 `vMAJOR.MINOR.PATCH` tag 上自动执行
 
 标准安装包只携带 Edge 安装脚本、systemd unit、附件下载脚本、依赖 Release 锁文件和 bundle 构建脚本，不再默认携带大型二进制。
 
+Manager 的 Compose 运行时依赖 CNB 多架构镜像，包内其余配置、脚本和嵌入模型也与 CPU 架构无关，因此 GitHub Release 只生成一个
+`ongrid-<version>-linux.tar.xz` 通用安装包。新安装通过 `uname -m` 将
+`x86_64/amd64` 映射为 `linux-amd64`、将 `aarch64/arm64` 映射为
+`linux-arm64`，只下载宿主机对应的 Edge 附件；不支持的宿主机架构在修改安装目录前失败。
+
 `install.sh` 和 `upgrade.sh` 执行以下步骤：
 
 1. 从公共依赖 Release 下载目标架构归档，从当前 Ongrid Release 下载 `ongrid-edge`；
@@ -70,13 +75,14 @@ Manager、Nginx 和 Edge 设备继续使用既有 `/edge/` URL、文件名、man
 
 隔离环境可在构建安装包时设置 `ONGRID_BUNDLE_EDGE_ASSETS=1`，恢复原有内嵌二进制布局。Make 入口会先构建自研 Edge 并获取所选架构的全部公共组件；打包器和安装器都会校验完整文件集合，缺任一组件即失败，不会生成或接受不完整的离线包。安装器检测到完整的内嵌 `ongrid-edge-linux-*` 后跳过 CNB 下载，其余 bundle 和目录替换路径不变。
 
-默认只服务 `linux-amd64` Edge；需要同时服务两种架构时设置 `ONGRID_EDGE_TARGETS="linux-amd64 linux-arm64"`。安装器会持久化实际架构集合，普通升级优先继承已安装值，只有显式设置该变量才改变选择。私有代理或镜像站可通过 `ONGRID_EDGE_ARTIFACT_BASE_URL` 覆盖下载根地址。
+在线新安装默认服务宿主机对应的 Edge 架构；需要服务另一种架构或同时服务两种架构时设置 `ONGRID_EDGE_TARGETS="linux-amd64 linux-arm64"`。安装器会持久化实际架构集合，普通升级优先继承已安装值，只有显式设置该变量才改变选择。离线包必须通过 `EDGE_PLUGIN_ARCHES` 显式声明并内嵌目标架构。私有代理或镜像站可通过 `ONGRID_EDGE_ARTIFACT_BASE_URL` 覆盖下载根地址。
 
 ## 后果
 
 ### 正面影响
 
 - Manager 安装包不再重复携带约 500 MiB 裸 Edge 公共组件；
+- AMD64 与 ARM64 Manager 共用一个通用 Linux 安装包；
 - 公共组件跨 Ongrid 版本只存储和上传一次；
 - 常规发版只新增两个较小的自研 `ongrid-edge` 二进制及 checksum；
 - 目标主机无需为了获取二进制而拉 OCI 镜像；
@@ -100,4 +106,5 @@ Manager、Nginx 和 Edge 设备继续使用既有 `/edge/` URL、文件名、man
 - Release 创建脚本必须在目标已存在时幂等复用，API 权限不足时失败且不得输出 Token；
 - GitHub Release workflow 必须等待 CNB `edge-release` job 成功；
 - 发布包测试必须证明默认包包含依赖 tag 锁文件和下载脚本，但不包含 Edge 大型二进制；
+- Release workflow 必须只发布一个通用 Linux 安装包；安装测试必须覆盖 AMD64/ARM64 自动识别和不支持架构的拒绝路径；
 - 升级脚本必须保持“附件预取成功后才停止旧服务”的顺序。

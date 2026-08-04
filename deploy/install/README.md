@@ -25,16 +25,16 @@ Manager 仅支持 Docker Compose 部署。`install.sh` 拉取版本锁定的容�
 - Prometheus：随 compose 启动，但默认不暴露到 host；从机器内或容器内验证。
 - Grafana：随 compose 启动，通过 nginx 暴露为 `https://<host>:8443/grafana/`。
 
-下面命令中的 `<arch>` 按目标服务器 CPU 选择 `amd64` 或 `arm64`。
+同一个通用 Linux 包支持 AMD64 和 ARM64；安装脚本会自动识别宿主机架构。
 
 ```bash
 # 1. 把发布包上传到目标主机
-scp ongrid-v0.1.0-linux-<arch>.tar.xz user@vps:~/
+scp ongrid-v0.1.0-linux.tar.xz user@vps:~/
 
 # 2. 登录目标主机并解压
 ssh user@vps
-tar xf ongrid-v0.1.0-linux-<arch>.tar.xz
-cd ongrid-v0.1.0-linux-<arch>
+tar xf ongrid-v0.1.0-linux.tar.xz
+cd ongrid-v0.1.0-linux
 
 # 3. （可选）先编辑 .env.example，自定义端口或 OpenAI key
 #    不编辑也行，install.sh 会把 .env.example 复制成 .env 并为空密码自动生成随机值。
@@ -69,10 +69,10 @@ sudo ./install.sh
 新版本发布包同样包含 `upgrade.sh`：
 
 ```bash
-scp ongrid-v0.2.0-linux-<arch>.tar.xz user@vps:~/
+scp ongrid-v0.2.0-linux.tar.xz user@vps:~/
 ssh user@vps
-tar xf ongrid-v0.2.0-linux-<arch>.tar.xz
-cd ongrid-v0.2.0-linux-<arch>
+tar xf ongrid-v0.2.0-linux.tar.xz
+cd ongrid-v0.2.0-linux
 sudo ./upgrade.sh
 ```
 
@@ -89,11 +89,11 @@ sudo ./upgrade.sh
 
 ### Edge 制品来源
 
-默认安装直接访问 `https://cnb.cool/ongridio/ongrid-edge/-/releases/download/`。公共组件位于安装包锁定的不可变 `edge-deps-*` Release，只有组件版本或布局变化才重新上传；自研 `ongrid-edge` 位于当前 Ongrid 版本（例如 `v0.11.1`）Release。默认只准备 `linux-amd64`：
+默认安装直接访问 `https://cnb.cool/ongridio/ongrid-edge/-/releases/download/`。公共组件位于安装包锁定的不可变 `edge-deps-*` Release，只有组件版本或布局变化才重新上传；自研 `ongrid-edge` 位于当前 Ongrid 版本（例如 `v0.11.1`）Release。新安装根据宿主机架构只准备 `linux-amd64` 或 `linux-arm64` 中匹配的一种：
 
 | 变量 | 说明 |
 |------|------|
-| `ONGRID_EDGE_TARGETS` | 需要在 Manager `/edge/` 服务的架构列表；默认 `linux-amd64`，双架构可设为 `linux-amd64 linux-arm64`。选择会写入 `/opt/ongrid/edge/edge-artifacts.env`，后续升级默认继承 |
+| `ONGRID_EDGE_TARGETS` | 需要在 Manager `/edge/` 服务的架构列表；未设置时新安装自动匹配宿主机，双架构可设为 `linux-amd64 linux-arm64`。选择会写入 `/opt/ongrid/edge/edge-artifacts.env`，后续升级默认继承 |
 | `ONGRID_EDGE_ARTIFACT_BASE_URL` | 覆盖 Release 下载根地址，适合 CNB 私有镜像仓库或内网代理 |
 | `ONGRID_EDGE_DEPS_TAG` | 覆盖公共依赖 Release tag；标准包已在 `edge/edge-artifacts.env` 固定，不建议安装时修改 |
 | `ONGRID_EDGE_ARTIFACT_CACHE_DIR` | 校验通过后的本地下载缓存；默认 `/var/cache/ongrid/edge-artifacts` |

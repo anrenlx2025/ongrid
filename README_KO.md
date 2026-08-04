@@ -42,32 +42,18 @@
 
 ## 설치
 
-서버 아키텍처(`linux-amd64` 또는 `linux-arm64`)에 맞는 최신 릴리스를 다운로드하고 압축을 푼 다음 설치 스크립트를 실행하세요 (Ubuntu 22.04+, Debian 12+, RHEL/Rocky 9):
+범용 Linux 릴리스를 다운로드하고 압축을 푼 다음 설치 스크립트를 실행하세요(Ubuntu 22.04+, Debian 12+, RHEL/Rocky 9, AMD64/ARM64 지원). 설치 프로그램이 호스트 아키텍처를 감지하고 해당 Edge 자산을 다운로드합니다:
 
-서버 아키텍처에 맞는 명령을 선택하세요:
-
-**AMD64**
 ```bash
-wget https://github.com/ongridio/ongrid/releases/download/v0.11.1/ongrid-v0.11.1-linux-amd64.tar.xz
-tar -xf ongrid-v0.11.1-linux-amd64.tar.xz && cd ongrid-v0.11.1-linux-amd64
+wget https://github.com/ongridio/ongrid/releases/download/v0.11.1/ongrid-v0.11.1-linux.tar.xz
+tar -xf ongrid-v0.11.1-linux.tar.xz && cd ongrid-v0.11.1-linux
 sudo ./install.sh
 ```
 
-**ARM64**
-```bash
-wget https://github.com/ongridio/ongrid/releases/download/v0.11.1/ongrid-v0.11.1-linux-arm64.tar.xz
-tar -xf ongrid-v0.11.1-linux-arm64.tar.xz && cd ongrid-v0.11.1-linux-arm64
-sudo ./install.sh
-```
-
-**🇨🇳 중국 본토 사용자** — GitHub이 느리면 아키텍처에 맞는 CDN 미러 URL을 사용하세요:
+**🇨🇳 중국 본토 사용자** — GitHub이 느리면 CDN 미러 URL을 사용하세요:
 
 ```bash
-# AMD64
-wget https://ongrid.cloud/dl/ongrid-v0.11.1-linux-amd64.tar.xz
-
-# ARM64
-wget https://ongrid.cloud/dl/ongrid-v0.11.1-linux-arm64.tar.xz
+wget https://ongrid.cloud/dl/ongrid-v0.11.1-linux.tar.xz
 ```
 
 ## 제품 둘러보기

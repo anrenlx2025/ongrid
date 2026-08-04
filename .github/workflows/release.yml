@@ -70,21 +70,10 @@ jobs:
           make publish-k8s-chart
 
   build:
-    name: Build ${{ matrix.arch }} package
-    runs-on: ${{ matrix.runner }}
+    name: Build universal Linux package
+    runs-on: ubuntu-24.04
     needs: image
     timeout-minutes: 180
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            platform: linux/amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout
@@ -128,29 +117,28 @@ jobs:
           set -euo pipefail
           make fetch-embedding-model
 
-      - name: Build ${{ matrix.arch }} package
+      - name: Build universal Linux package
         shell: bash
         run: |
           set -euo pipefail
-          make package TARGET_OS=linux TARGET_ARCH=${{ matrix.arch }} PLATFORM=${{ matrix.platform }}
+          make package
 
       - name: Verify package
         shell: bash
         run: |
           set -euo pipefail
           tag="${{ steps.tag.outputs.tag }}"
-          arch="${{ matrix.arch }}"
-          test -s "dist/out/ongrid-${tag}-linux-${arch}.tar.xz"
-          test -s "dist/out/ongrid-${tag}-linux-${arch}.tar.xz.sha256"
-          (cd dist/out && sha256sum -c "ongrid-${tag}-linux-${arch}.tar.xz.sha256")
+          test -s "dist/out/ongrid-${tag}-linux.tar.xz"
+          test -s "dist/out/ongrid-${tag}-linux.tar.xz.sha256"
+          (cd dist/out && sha256sum -c "ongrid-${tag}-linux.tar.xz.sha256")
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-assets-${{ matrix.arch }}
+          name: release-assets
           path: |
-            dist/out/ongrid-${{ steps.tag.outputs.tag }}-linux-${{ matrix.arch }}.tar.xz
-            dist/out/ongrid-${{ steps.tag.outputs.tag }}-linux-${{ matrix.arch }}.tar.xz.sha256
+            dist/out/ongrid-${{ steps.tag.outputs.tag }}-linux.tar.xz
+            dist/out/ongrid-${{ steps.tag.outputs.tag }}-linux.tar.xz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -224,20 +212,17 @@ jobs:
       - name: Download package artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: release-assets-*
+          name: release-assets
           path: dist/out
-          merge-multiple: true
 
       - name: Verify release assets
         shell: bash
         run: |
           set -euo pipefail
           tag="${{ steps.tag.outputs.tag }}"
-          for arch in amd64 arm64; do
-            test -s "dist/out/ongrid-${tag}-linux-${arch}.tar.xz"
-            test -s "dist/out/ongrid-${tag}-linux-${arch}.tar.xz.sha256"
-            (cd dist/out && sha256sum -c "ongrid-${tag}-linux-${arch}.tar.xz.sha256")
-          done
+          test -s "dist/out/ongrid-${tag}-linux.tar.xz"
+          test -s "dist/out/ongrid-${tag}-linux.tar.xz.sha256"
+          (cd dist/out && sha256sum -c "ongrid-${tag}-linux.tar.xz.sha256")
 
       - name: Write release metadata
         shell: bash
@@ -253,13 +238,9 @@ jobs:
             "published_at": "${published_at}",
             "download_base": "https://ongrid.cloud/dl",
             "assets": {
-              "linux-amd64": {
-                "package": "ongrid-${tag}-linux-amd64.tar.xz",
-                "sha256": "ongrid-${tag}-linux-amd64.tar.xz.sha256"
-              },
-              "linux-arm64": {
-                "package": "ongrid-${tag}-linux-arm64.tar.xz",
-                "sha256": "ongrid-${tag}-linux-arm64.tar.xz.sha256"
+              "linux": {
+                "package": "ongrid-${tag}-linux.tar.xz",
+                "sha256": "ongrid-${tag}-linux.tar.xz.sha256"
               }
             }
           }
@@ -276,17 +257,13 @@ jobs:
 
           Ubuntu 22.04+, Debian 12+, RHEL/Rocky 9 are supported.
 
-          ### AMD64
+          ### Linux (AMD64 / ARM64)
           \`\`\`bash
-          wget https://github.com/ongridio/ongrid/releases/download/${tag}/ongrid-${tag}-linux-amd64.tar.xz
-          tar -xf ongrid-${tag}-linux-amd64.tar.xz && cd ongrid-${tag}-linux-amd64 && sudo ./install.sh
+          wget https://github.com/ongridio/ongrid/releases/download/${tag}/ongrid-${tag}-linux.tar.xz
+          tar -xf ongrid-${tag}-linux.tar.xz && cd ongrid-${tag}-linux && sudo ./install.sh
           \`\`\`
 
-          ### ARM64
-          \`\`\`bash
-          wget https://github.com/ongridio/ongrid/releases/download/${tag}/ongrid-${tag}-linux-arm64.tar.xz
-          tar -xf ongrid-${tag}-linux-arm64.tar.xz && cd ongrid-${tag}-linux-arm64 && sudo ./install.sh
-          \`\`\`
+          The installer detects the host architecture and downloads the matching checksum-verified Edge assets from CNB.
           EOF
 
       - name: Publish GitHub Release
@@ -298,10 +275,8 @@ jobs:
           tag="${{ steps.tag.outputs.tag }}"
           release_notes="$(cat "$RUNNER_TEMP/release-notes.md")"
           gh release create "$tag" \
-            "dist/out/ongrid-${tag}-linux-amd64.tar.xz" \
-            "dist/out/ongrid-${tag}-linux-amd64.tar.xz.sha256" \
-            "dist/out/ongrid-${tag}-linux-arm64.tar.xz" \
-            "dist/out/ongrid-${tag}-linux-arm64.tar.xz.sha256" \
+            "dist/out/ongrid-${tag}-linux.tar.xz" \
+            "dist/out/ongrid-${tag}-linux.tar.xz.sha256" \
             "dist/out/latest.json" \
             --verify-tag \
             --title "Ongrid ${tag}" \

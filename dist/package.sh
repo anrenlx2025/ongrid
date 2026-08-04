@@ -4,15 +4,15 @@
 # Usage: package.sh <VERSION> <STAGE_DIR> <OUT_DIR>
 #
 #   VERSION     e.g. v0.1.0
-#   STAGE_DIR   staging directory whose basename is "ongrid-<VERSION>-linux-<arch>"
+#   STAGE_DIR   staging directory whose basename is "ongrid-<VERSION>-linux"
 #   OUT_DIR     directory in which the final tarball is written
 #
 # Produces:
-#   <OUT_DIR>/ongrid-<VERSION>-linux-<arch>.tar.xz
-#   <OUT_DIR>/ongrid-<VERSION>-linux-<arch>.tar.xz.sha256
+#   <OUT_DIR>/ongrid-<VERSION>-linux.tar.xz
+#   <OUT_DIR>/ongrid-<VERSION>-linux.tar.xz.sha256
 #
 # Optional env:
-#   PACKAGE_TARGET  linux-amd64 (default) or linux-arm64
+#   PACKAGE_TARGET  linux (default)
 #   ONGRID_BUNDLE_EDGE_ASSETS=1 restores legacy embedded Edge binaries
 #   ONGRID_EDGE_DEPS_TAG immutable CNB Release tag for public dependencies
 #   EDGE_TARGETS    legacy embedded Edge targets (default linux-amd64)
@@ -45,14 +45,14 @@ if [[ -z "$PACKAGE_TARGET" ]]; then
     if [[ "$STAGE_BASE" == "$STAGE_PREFIX"* ]]; then
         PACKAGE_TARGET="${STAGE_BASE#${STAGE_PREFIX}}"
     else
-        PACKAGE_TARGET="linux-amd64"
+        PACKAGE_TARGET="linux"
     fi
 fi
 
 case "$PACKAGE_TARGET" in
-    linux-amd64|linux-arm64) ;;
+    linux) ;;
     *)
-        echo "[pkg] error: unsupported PACKAGE_TARGET=${PACKAGE_TARGET}; expected linux-amd64 or linux-arm64" >&2
+        echo "[pkg] error: unsupported PACKAGE_TARGET=${PACKAGE_TARGET}; expected linux" >&2
         exit 2
         ;;
 esac
@@ -299,7 +299,9 @@ fi
 {
     [[ -z "${ONGRID_EDGE_DEPS_TAG:-}" ]] \
         || printf 'ONGRID_EDGE_DEPS_TAG=%s\n' "$ONGRID_EDGE_DEPS_TAG"
-    printf 'ONGRID_EDGE_TARGETS=%s\n' "$EDGE_TARGETS"
+    if [[ "$BUNDLE_EDGE_ASSETS" == "1" ]]; then
+        printf 'ONGRID_EDGE_TARGETS=%s\n' "$EDGE_TARGETS"
+    fi
 } > "${STAGE_DIR}/edge/edge-artifacts.env"
 chmod 0644 "${STAGE_DIR}/edge/edge-artifacts.env"
 log "  + edge/edge-artifacts.env"

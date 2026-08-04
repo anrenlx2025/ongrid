@@ -40,6 +40,23 @@ if ongrid_normalize_edge_targets 'linux-amd64 linux-ppc64le' >/dev/null; then
     fail "an unsupported Edge target was accepted"
 fi
 
+[[ "$(ongrid_detect_host_edge_target x86_64)" == linux-amd64 ]] \
+    || fail "x86_64 host architecture was not mapped to linux-amd64"
+[[ "$(ongrid_detect_host_edge_target aarch64)" == linux-arm64 ]] \
+    || fail "aarch64 host architecture was not mapped to linux-arm64"
+if ongrid_detect_host_edge_target ppc64le >/dev/null 2>&1; then
+    fail "an unsupported host architecture was accepted"
+fi
+
+host_bin="$tmp_dir/host-bin"
+mkdir -p "$host_bin"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" aarch64\n' > "$host_bin/uname"
+chmod 0755 "$host_bin/uname"
+resolved=$(PATH="$host_bin:$PATH" ongrid_resolve_edge_targets "" \
+    /does/not/exist /does/not/exist "$tmp_dir/no-existing-assets")
+[[ "$resolved" == linux-arm64 ]] \
+    || fail "a fresh universal package did not select the host architecture"
+
 ongrid_write_edge_artifact_config "$tmp_dir/written.env" edge-deps-test \
     'linux-amd64 linux-arm64'
 grep -Fxq 'ONGRID_EDGE_DEPS_TAG=edge-deps-test' "$tmp_dir/written.env"

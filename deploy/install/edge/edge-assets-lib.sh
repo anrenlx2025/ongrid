@@ -7,6 +7,19 @@ ongrid_edge_config_value() {
     sed -n "s/^${key}=//p" "$file" | tail -n 1
 }
 
+ongrid_detect_host_edge_target() {
+    local arch=${1:-}
+    [[ -n "$arch" ]] || arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64) printf '%s\n' linux-amd64 ;;
+        aarch64|arm64) printf '%s\n' linux-arm64 ;;
+        *)
+            printf '[ERROR] unsupported host architecture: %s\n' "$arch" >&2
+            return 1
+            ;;
+    esac
+}
+
 ongrid_normalize_edge_targets() {
     local raw=${1:-linux-amd64} target normalized=""
     local targets=()
@@ -54,7 +67,10 @@ ongrid_resolve_edge_targets() {
             raw=$(ongrid_edge_targets_from_directory "$existing_edge_dir" 2>/dev/null || true)
         fi
     fi
-    ongrid_normalize_edge_targets "${raw:-linux-amd64}"
+    if [[ -z "$raw" ]]; then
+        raw=$(ongrid_detect_host_edge_target) || return 1
+    fi
+    ongrid_normalize_edge_targets "$raw"
 }
 
 ongrid_write_edge_artifact_config() {

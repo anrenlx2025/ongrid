@@ -16,6 +16,7 @@ if [[ -f "$CONFIG_FILE" ]]; then
     CONFIG_TARGETS=$(sed -n 's/^ONGRID_EDGE_TARGETS=//p' "$CONFIG_FILE" | tail -n 1)
 fi
 VERIFY_DEPS_SCRIPT="$SCRIPT_DIR/verify-edge-deps-archive.sh"
+EDGE_ASSETS_LIB="$SCRIPT_DIR/edge-assets-lib.sh"
 
 BASE_URL=${ONGRID_EDGE_ARTIFACT_BASE_URL:-https://cnb.cool/ongridio/ongrid-edge/-/releases/download}
 DEPS_TAG=${ONGRID_EDGE_DEPS_TAG:-$CONFIG_DEPS_TAG}
@@ -30,7 +31,17 @@ CURL_FLAGS=(
 if (( $# > 0 )); then
     TARGETS=("$@")
 else
-    read -r -a TARGETS <<<"${ONGRID_EDGE_TARGETS:-${CONFIG_TARGETS:-linux-amd64}}"
+    raw_targets=${ONGRID_EDGE_TARGETS:-$CONFIG_TARGETS}
+    if [[ -z "$raw_targets" ]]; then
+        [[ -r "$EDGE_ASSETS_LIB" ]] || {
+            echo "missing Edge target selector: $EDGE_ASSETS_LIB" >&2
+            exit 1
+        }
+        # shellcheck source=deploy/install/edge/edge-assets-lib.sh
+        source "$EDGE_ASSETS_LIB"
+        raw_targets=$(ongrid_detect_host_edge_target)
+    fi
+    read -r -a TARGETS <<<"$raw_targets"
 fi
 
 log() { printf '[edge-assets] %s\n' "$*" >&2; }

@@ -9,16 +9,14 @@ pulled separately from the project CNB registry.
 A single tarball:
 
 ```
-dist/out/ongrid-v<VERSION>-linux-amd64.tar.xz
-dist/out/ongrid-v<VERSION>-linux-amd64.tar.xz.sha256
-dist/out/ongrid-v<VERSION>-linux-arm64.tar.xz
-dist/out/ongrid-v<VERSION>-linux-arm64.tar.xz.sha256
+dist/out/ongrid-v<VERSION>-linux.tar.xz
+dist/out/ongrid-v<VERSION>-linux.tar.xz.sha256
 ```
 
 Unpacked layout:
 
 ```
-ongrid-v<VERSION>-linux-<arch>/
+ongrid-v<VERSION>-linux/
   VERSION
   README.md              (from deploy/install/README.md)
   install.sh             (from deploy/install/install.sh)
@@ -51,20 +49,18 @@ installer downloads checksum-verified third-party dependencies and the current
 
 1. Bump the version in `VERSION`, commit the change, and push the matching tag
    to GitHub. The `Release` GitHub Actions workflow publishes runtime images,
-   the Helm chart, and both thin server packages.
+   the Helm chart, and the universal thin Linux server package.
 2. The `Release` GitHub Actions workflow runs on `v*.*.*` tag pushes and
    publishes the multi-architecture manager, Web, and Kubernetes Edge images
-   plus the matching Helm chart before building both server packages. The chart is published as an
+   plus the matching Helm chart before building the universal server package. The chart is published as an
    OCI artifact at `oci://helm.cnb.cool/ongridio/ongrid-edge`; it is not copied
-   into the manager installation tarball. Use
-   `make package TARGET_ARCH=arm64` locally only when you need a single ARM64
-   package. The release build will:
+   into the manager installation tarball. The release build will:
    - `docker-push-release-images` — publish manager, Web, and Edge amd64/arm64 images to CNB
    - `verify-release-images` — verify both architectures exist on all three image manifests
    - `publish-k8s-chart` — package and publish the version-matched Helm chart
    - `package` — stage the thin Compose install assets without Edge binaries
-   - stage everything under `dist/stage/ongrid-<VERSION>-linux-<arch>/`
-   - emit the amd64/arm64 tarballs + sha256 files under `dist/out/`
+   - stage everything under `dist/stage/ongrid-<VERSION>-linux/`
+   - emit one architecture-neutral tarball plus its sha256 file under `dist/out/`
 3. The `edge-release` job verifies that the immutable shared dependency
    Release is complete, creates the version-matched CNB Release in the
    lightweight `ongridio/ongrid-edge` repository, and uploads only the two
@@ -85,13 +81,18 @@ installer downloads checksum-verified third-party dependencies and the current
    versions. The version Release contains only two `ongrid-edge` binaries and
    their checksums. Both publishers are idempotent: complete Releases are
    reused and partially populated immutable Releases fail closed.
-4. Ship the matching package, for example:
-   `scp dist/out/ongrid-v<VERSION>-linux-<arch>.tar.xz user@host:~/`.
+4. Ship the universal package, for example:
+   `scp dist/out/ongrid-v<VERSION>-linux.tar.xz user@host:~/`.
 5. On the target: untar, `sudo ./install.sh`.
+
+On a fresh install, `install.sh` maps `x86_64/amd64` to `linux-amd64` and
+`aarch64/arm64` to `linux-arm64`, then downloads only the matching Edge
+attachments. Upgrades preserve the already installed Edge target set unless
+`ONGRID_EDGE_TARGETS` explicitly overrides it.
 
 ## Checksum
 
-`dist/out/ongrid-v<VERSION>-linux-<arch>.tar.xz.sha256` sits next to the
+`dist/out/ongrid-v<VERSION>-linux.tar.xz.sha256` sits next to the
 tarball. The install script can verify integrity with `sha256sum -c` on
 Linux or `shasum -a 256 -c` on macOS.
 

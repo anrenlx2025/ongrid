@@ -227,7 +227,7 @@ prepare_edge_assets() {
         "$INSTALL_DIR/edge/edge-artifacts.env" \
         "$EDGE_STAGE_DIR/edge-artifacts.env" \
         "$INSTALL_DIR/edge"); then
-        log_error "invalid ONGRID_EDGE_TARGETS; supported values: linux-amd64 linux-arm64"
+        log_error "cannot resolve Edge target; supported hosts are x86_64/amd64 and aarch64/arm64, and ONGRID_EDGE_TARGETS accepts linux-amd64 linux-arm64"
         return 1
     fi
     read -r -a edge_targets <<<"$resolved_targets"
