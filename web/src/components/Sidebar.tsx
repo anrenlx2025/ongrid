@@ -416,7 +416,7 @@ export function Sidebar() {
             icon={Network}
             label={tr('网络设备', 'Network devices')}
           />
-          <SidebarNavItem to="/kubernetes" icon={ShipWheel} label="Kubernetes" />
+          <SidebarNavItem to="/kubernetes" icon={ShipWheel} iconSize={16} label="Kubernetes" />
           <SidebarNavItem to="/topology" icon={Share2} label={tr('拓扑', 'Topology')} />
         </CollapsibleSection>
 
@@ -748,6 +748,7 @@ function CollapsibleSection({
 function SidebarNavItem({
   to,
   icon: Icon,
+  iconSize = 14,
   label,
   exact,
   exactQuery,
@@ -758,6 +759,7 @@ function SidebarNavItem({
 }: {
   to?: string;
   icon: IconType;
+  iconSize?: number;
   label: string;
   exact?: boolean;
   exactQuery?: boolean;
@@ -786,7 +788,7 @@ function SidebarNavItem({
           muted ? 'text-zinc-300' : 'text-zinc-500'
         )}
       >
-        <Icon size={14} className="text-zinc-500" />
+        <Icon size={iconSize} className="shrink-0 text-zinc-500" />
         <span>{label}</span>
       </div>
     );
@@ -824,7 +826,7 @@ function SidebarNavItem({
         isActive && 'bg-zinc-800 text-zinc-100'
       )}
     >
-      <Icon size={14} className="text-zinc-400" />
+      <Icon size={iconSize} className="shrink-0 text-zinc-400" />
       <span className="flex-1 truncate">{label}</span>
       {badge != null && badge > 0 && (
         <span
