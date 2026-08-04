@@ -136,10 +136,10 @@ fi
 publisher_output=$(run_publisher)
 grep -Fq 'PLUGIN_TAG=vtest' "$tmp_dir/docker.log"
 grep -Fq "$plugin_image" "$tmp_dir/docker.log"
-grep -Fq '[cnb-attachments] ##[set-output FILES=one%2Cone.sha256]' \
+grep -Fq '[cnb-attachments] [runner-command set-output FILES=one%2Cone.sha256]' \
     <<<"$publisher_output" \
     || { echo "uploader output was not escaped from GitHub runner command parsing" >&2; exit 1; }
-if grep -Eq '^##\[' <<<"$publisher_output"; then
+if grep -Fq '##[' <<<"$publisher_output"; then
     echo "uploader output can still be parsed as a GitHub runner command" >&2
     exit 1
 fi
