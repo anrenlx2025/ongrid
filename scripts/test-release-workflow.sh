@@ -4,7 +4,6 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 workflow="$repo_root/.github/workflows/release.yml"
 makefile="$repo_root/Makefile"
-cnb_pipeline="$repo_root/.cnb.yml"
 
 command -v ruby >/dev/null 2>&1 || { echo "ruby is required" >&2; exit 1; }
 
@@ -26,26 +25,18 @@ release_needs = Array(jobs.fetch("release").fetch("needs"))
 raise "GitHub Release must wait for Edge publication" unless release_needs.sort == ["build", "edge-release"]
 ' "$workflow"
 
-if grep -Fq 'cnbcool/attachments:latest' "$makefile" "$cnb_pipeline"; then
+if grep -Fq 'cnbcool/attachments:latest' "$makefile"; then
     echo "release configuration uses a mutable attachment uploader image" >&2
     exit 1
 fi
 grep -Eq '^CNB_ATTACHMENTS_IMAGE \?= cnbcool/attachments@sha256:[0-9a-f]{64}$' "$makefile" \
     || { echo "Makefile attachment uploader is not pinned by digest" >&2; exit 1; }
-grep -Eq 'image: cnbcool/attachments@sha256:[0-9a-f]{64}$' "$cnb_pipeline" \
-    || { echo "CNB attachment uploader is not pinned by digest" >&2; exit 1; }
-grep -Fq 'image: golang:1.25.11-bookworm' "$cnb_pipeline" \
-    || { echo "CNB Edge build toolchain is not pinned exactly" >&2; exit 1; }
 grep -Fq 'CNB dependency release $(EDGE_DEPS_TAG) is complete; skip build and upload' "$makefile" \
     || { echo "complete dependency Releases are not skipped before rebuilding" >&2; exit 1; }
 grep -Fq 'scripts/verify-cnb-release-attachments.sh' "$makefile" \
     || { echo "Makefile release skip does not verify attachment contents" >&2; exit 1; }
-grep -Fq 'make verify-edge-deps-release' "$cnb_pipeline" \
-    || { echo "CNB version pipeline does not verify dependency contents" >&2; exit 1; }
-if grep -Fq 'curl -fsSIL' "$cnb_pipeline"; then
-    echo "CNB pipeline still treats attachment existence as integrity verification" >&2
-    exit 1
-fi
+[[ ! -e "$repo_root/.cnb.yml" ]] \
+    || { echo "a second CNB tag publisher can bypass GitHub immutable checks" >&2; exit 1; }
 
 ruby -e '
 makefile = File.read(ARGV.fetch(0))
