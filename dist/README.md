@@ -65,25 +65,26 @@ installer downloads checksum-verified third-party dependencies and the current
    - `package` — stage the thin Compose install assets without Edge binaries
    - stage everything under `dist/stage/ongrid-<VERSION>-linux-<arch>/`
    - emit the amd64/arm64 tarballs + sha256 files under `dist/out/`
-3. Mirror the release commit to the CNB code repository and push attachment
-   tags there. `.cnb.yml` creates the CNB Release and uploads direct files:
+3. The `edge-release` job verifies that the immutable shared dependency
+   Release is complete, creates the version-matched CNB Release in the
+   lightweight `ongridio/ongrid-edge` repository, and uploads only the two
+   self-developed `ongrid-edge` binaries plus their checksums. The final
+   GitHub Release waits for this job, so it cannot publish with missing Edge
+   downloads. Configure the GitHub Actions `CNB_TOKEN` secret with registry
+   and Helm access plus CNB `repo-release:rw` and `repo-contents:rw` scopes.
+
+   Shared dependencies are not rebuilt on every release. Only when
+   `make edge-deps-tag` changes or the corresponding immutable Release is
+   absent, publish them once:
 
    ```bash
-   # Run the dependency tag only when `make edge-deps-tag` changes or is absent.
-   deps_tag=$(make --no-print-directory edge-deps-tag)
-   git tag "$deps_tag"
-   git push cnb "$deps_tag"
-
-   # Run for every Ongrid release; VERSION and tag must match.
-   version=$(cat VERSION)
-   git push cnb "$version"
+   CNB_TOKEN=... make publish-edge-deps-attachments
    ```
 
    The dependency Release contains two archives and is reused across Ongrid
    versions. The version Release contains only two `ongrid-edge` binaries and
-   their checksums. For an already-created CNB Release, a maintainer can instead
-   run `CNB_TOKEN=... make publish-edge-attachments`; the token needs
-   `repo-contents` read/write permission.
+   their checksums. Both publishers are idempotent: complete Releases are
+   reused and partially populated immutable Releases fail closed.
 4. Ship the matching package, for example:
    `scp dist/out/ongrid-v<VERSION>-linux-<arch>.tar.xz user@host:~/`.
 5. On the target: untar, `sudo ./install.sh`.

@@ -35,8 +35,8 @@ run_publisher() {
     FAKE_UPLOAD_STATE="$tmp_dir/uploaded" \
     PATH="$tmp_dir/bin:$PATH" \
     CNB_TOKEN=test-token \
-        bash "$publisher" vtest ongridio/ongrid \
-        https://cnb.test/ongridio/ongrid/-/releases/download \
+        bash "$publisher" vtest ongridio/ongrid-edge \
+        https://cnb.test/ongridio/ongrid-edge/-/releases/download \
         cnbcool/attachments:latest "$tmp_dir/files/one" "$tmp_dir/files/two"
 }
 

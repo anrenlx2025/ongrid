@@ -11,6 +11,8 @@ shift 4
 (( $# > 0 )) || { echo "publish-cnb-attachments: no files supplied" >&2; exit 2; }
 
 : "${CNB_TOKEN:?CNB_TOKEN with repo-contents read/write permission is required}"
+API_ENDPOINT=${CNB_API_ENDPOINT:-https://api.cnb.cool}
+WEB_ENDPOINT=${CNB_WEB_ENDPOINT:-https://cnb.cool}
 command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
 command -v cmp >/dev/null 2>&1 || { echo "cmp is required" >&2; exit 1; }
@@ -59,8 +61,8 @@ done
 
 docker run --rm \
     -e CNB_TOKEN \
-    -e CNB_API_ENDPOINT=https://api.cnb.cool \
-    -e CNB_WEB_ENDPOINT=https://cnb.cool \
+    -e CNB_API_ENDPOINT="$API_ENDPOINT" \
+    -e CNB_WEB_ENDPOINT="$WEB_ENDPOINT" \
     -e CNB_REPO_SLUG="$REPO_SLUG" \
     -e CNB_IS_TAG=true \
     -e PLUGIN_TAG="$TAG" \

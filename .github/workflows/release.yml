@@ -154,10 +154,47 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  edge-release:
+    name: Publish versioned Edge release to CNB
+    runs-on: ubuntu-24.04
+    needs: image
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || "$version" != "$tag" ]]; then
+            echo "VERSION ($version) must match release tag ($tag)" >&2
+            exit 2
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache: true
+
+      - name: Publish versioned Edge release to CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          make publish-edge-version-attachments
+
   release:
     name: Publish release
     runs-on: ubuntu-24.04
-    needs: build
+    needs:
+      - build
+      - edge-release
     timeout-minutes: 30
 
     steps:

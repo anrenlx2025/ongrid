@@ -41,6 +41,11 @@ Manager 当前通过本地 `/opt/ongrid/edge` 同时提供 Edge 网络安装器�
 
 安装端使用普通 HTTPS `curl` 直接下载，不需要 Docker 拉取制品镜像、创建临时容器或从镜像层复制文件。
 
+GitHub 的 `Release` workflow 在每个 `vMAJOR.MINOR.PATCH` tag 上自动执行
+`edge-release` job：校验公共依赖 Release、在轻量 `ongridio/ongrid-edge`
+仓库中幂等创建同版本 CNB Release、构建两个 Linux 架构的自研二进制并上传。
+最终 GitHub Release 必须等待该 job 成功，避免主 Release 已发布而 Edge 下载缺失。
+
 ### 3. Manager 安装时预取并重建兼容目录
 
 标准安装包只携带 Edge 安装脚本、systemd unit、附件下载脚本、依赖 Release 锁文件和 bundle 构建脚本，不再默认携带大型二进制。
@@ -77,7 +82,8 @@ Manager、Nginx 和 Edge 设备继续使用既有 `/edge/` URL、文件名、man
 ### 负面影响与权衡
 
 - 标准在线安装新增对 CNB Release 附件直链的依赖；
-- CNB 仓库必须先存在对应 tag 和 Release，上传凭据需要 `repo-contents` 读写权限；
+- GitHub Actions 需要配置 `CNB_TOKEN`；自动创建 Release 需要
+  `repo-release:rw`，附件插件需要 `repo-contents:rw`，同时还需保留现有镜像和 Helm 发布权限；
 - Manager 主机仍需保留解压后的单文件和兼容 bundle，节省的是发布包、传输和远端重复制品，不是运行目录全部空间；
 - 服务多个 Edge 架构会增加 Manager 本地缓存和提取空间；
 - 公共组件升级必须创建新的不可变依赖 tag，不能覆盖旧附件。
@@ -87,5 +93,7 @@ Manager、Nginx 和 Edge 设备继续使用既有 `/edge/` URL、文件名、man
 - 附件构建必须验证两个 Linux 架构的必需组件全集并生成内外两层 checksum；
 - 下载脚本测试必须覆盖直链路径、缓存复用、完整提取和 checksum 篡改拒绝；
 - 发布脚本必须完整存在时幂等跳过、部分存在时拒绝覆盖；
+- Release 创建脚本必须在目标已存在时幂等复用，API 权限不足时失败且不得输出 Token；
+- GitHub Release workflow 必须等待 CNB `edge-release` job 成功；
 - 发布包测试必须证明默认包包含依赖 tag 锁文件和下载脚本，但不包含 Edge 大型二进制；
 - 升级脚本必须保持“附件预取成功后才停止旧服务”的顺序。

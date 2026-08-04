@@ -48,6 +48,8 @@ EDGE_ATTACHMENTS_OUT ?= $(OUT)/edge-attachments
 CNB_RELEASE_BASE_URL ?= https://cnb.cool/ongridio/ongrid-edge/-/releases/download
 CNB_REPO_SLUG ?= ongridio/ongrid-edge
 CNB_ATTACHMENTS_IMAGE ?= cnbcool/attachments:latest
+CNB_API_ENDPOINT ?= https://api.cnb.cool
+CNB_RELEASE_TARGET_COMMITISH ?= main
 K8S_CHART_VERSION ?= $(patsubst v%,%,$(VERSION))
 K8S_CHART_PACKAGE ?= $(BIN_DIR)/k8s/ongrid-edge.tgz
 K8S_CHART_REF ?= oci://helm.cnb.cool/ongridio/ongrid-edge
@@ -620,9 +622,23 @@ check-release-target:
 # Direct CNB Release attachments. Target-specific EDGE_PLUGIN_ARCHES makes the
 # existing fetch targets populate both Linux architectures. The dependency tag
 # is immutable; the publisher skips it once every expected file exists.
-.PHONY: edge-deps-tag build-edge-deps-attachments build-edge-version-attachments build-edge-attachments publish-edge-deps-attachments publish-edge-version-attachments publish-edge-attachments test-edge-attachments
+.PHONY: edge-deps-tag verify-edge-deps-release build-edge-deps-attachments build-edge-version-attachments build-edge-attachments publish-edge-deps-attachments publish-edge-version-attachments publish-edge-attachments test-edge-attachments test-release-workflow
 edge-deps-tag: ## [release] 打印当前不可变公共依赖 Release tag
 	@printf '%s\n' "$(EDGE_DEPS_TAG)"
+
+verify-edge-deps-release: ## [release] 校验一次性公共 Edge 依赖 Release 已完整发布
+	@command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
+	@for target in $(EDGE_ATTACHMENT_TARGETS); do \
+		for suffix in .tar.xz .tar.xz.sha256; do \
+			url="$(CNB_RELEASE_BASE_URL)/$(EDGE_DEPS_TAG)/edge-deps-$$target$$suffix"; \
+			curl -fsSIL -o /dev/null "$$url" || { \
+				echo "missing immutable Edge dependency attachment: $$url" >&2; \
+				echo "publish it once with: CNB_TOKEN=... make publish-edge-deps-attachments" >&2; \
+				exit 1; \
+			}; \
+		done; \
+	done
+	@echo "verified immutable Edge dependency release $(EDGE_DEPS_TAG)"
 
 build-edge-deps-attachments: EDGE_PLUGIN_ARCHES := $(EDGE_ATTACHMENT_TARGETS)
 build-edge-deps-attachments: fetch-promtail fetch-otelcol fetch-node-exporter fetch-process-exporter fetch-db-exporters ## [release] 构建一次性公共 Edge 依赖附件
@@ -641,23 +657,39 @@ build-edge-version-attachments: build-edge-linux-amd64 build-edge-linux-arm64 ##
 
 build-edge-attachments: build-edge-deps-attachments build-edge-version-attachments ## [release] 构建全部 CNB Edge 直链附件
 
-publish-edge-deps-attachments: build-edge-deps-attachments ## [release] 幂等上传一次性公共依赖到已有 CNB Release
+publish-edge-deps-attachments: build-edge-deps-attachments ## [release] 幂等创建并上传一次性公共依赖 Release
+	@CNB_API_ENDPOINT="$(CNB_API_ENDPOINT)" \
+	CNB_RELEASE_TARGET_COMMITISH="$(CNB_RELEASE_TARGET_COMMITISH)" \
+		bash scripts/ensure-cnb-release.sh "$(EDGE_DEPS_TAG)" "$(CNB_REPO_SLUG)" \
+		"Ongrid Edge shared dependencies" \
+		"Immutable third-party Edge runtime dependencies. Source: https://github.com/ongridio/ongrid"
 	@files=""; for target in $(EDGE_ATTACHMENT_TARGETS); do \
 		files="$$files $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/edge-deps-$$target.tar.xz $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/edge-deps-$$target.tar.xz.sha256"; \
 	done; \
-	bash scripts/publish-cnb-release-attachments.sh "$(EDGE_DEPS_TAG)" "$(CNB_REPO_SLUG)" "$(CNB_RELEASE_BASE_URL)" "$(CNB_ATTACHMENTS_IMAGE)" $$files
+	CNB_API_ENDPOINT="$(CNB_API_ENDPOINT)" \
+		bash scripts/publish-cnb-release-attachments.sh "$(EDGE_DEPS_TAG)" "$(CNB_REPO_SLUG)" "$(CNB_RELEASE_BASE_URL)" "$(CNB_ATTACHMENTS_IMAGE)" $$files
 
-publish-edge-version-attachments: build-edge-version-attachments ## [release] 上传当前 VERSION 的 ongrid-edge 到已有 CNB Release
+publish-edge-version-attachments: verify-edge-deps-release build-edge-version-attachments ## [release] 自动创建并上传当前 VERSION 的 ongrid-edge Release
+	@CNB_API_ENDPOINT="$(CNB_API_ENDPOINT)" \
+	CNB_RELEASE_TARGET_COMMITISH="$(CNB_RELEASE_TARGET_COMMITISH)" \
+		bash scripts/ensure-cnb-release.sh "$(VERSION)" "$(CNB_REPO_SLUG)" \
+		"Ongrid Edge $(VERSION)" \
+		"Ongrid Edge binaries for $(VERSION). Source: https://github.com/ongridio/ongrid"
 	@files=""; for target in $(EDGE_ATTACHMENT_TARGETS); do \
 		files="$$files $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/ongrid-edge-$$target-$(VERSION) $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/ongrid-edge-$$target-$(VERSION).sha256"; \
 	done; \
-	bash scripts/publish-cnb-release-attachments.sh "$(VERSION)" "$(CNB_REPO_SLUG)" "$(CNB_RELEASE_BASE_URL)" "$(CNB_ATTACHMENTS_IMAGE)" $$files
+	CNB_API_ENDPOINT="$(CNB_API_ENDPOINT)" \
+		bash scripts/publish-cnb-release-attachments.sh "$(VERSION)" "$(CNB_REPO_SLUG)" "$(CNB_RELEASE_BASE_URL)" "$(CNB_ATTACHMENTS_IMAGE)" $$files
 
 publish-edge-attachments: publish-edge-deps-attachments publish-edge-version-attachments ## [release] 上传公共依赖与当前版本 Edge 附件
 
 test-edge-attachments: ## [test] 校验附件构建、直链下载和 checksum 拒绝路径
 	bash scripts/test-edge-assets.sh
+	bash scripts/test-ensure-cnb-release.sh
 	bash scripts/test-publish-cnb-release-attachments.sh
+
+test-release-workflow: ## [test] 校验 GitHub Release 必须等待 CNB Edge Release 发布
+	bash scripts/test-release-workflow.sh
 
 # Edge binaries are no longer package prerequisites. install.sh/upgrade.sh
 # download and verify CNB Release files before changing the Manager /edge tree.
