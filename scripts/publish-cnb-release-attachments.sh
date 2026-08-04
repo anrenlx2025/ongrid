@@ -114,8 +114,9 @@ for file in "${files[@]}"; do
     attachment_list="${attachment_list:+$attachment_list,}$rel"
 done
 
-# Prefix every plugin line so legacy output such as `##[set-output ...]` cannot
-# be interpreted as a GitHub runner command. pipefail preserves docker errors.
+# Rewrite legacy command markers anywhere in plugin output before forwarding it
+# to the log. GitHub Runner recognizes `##[...]` even after a line prefix.
+# pipefail preserves docker errors through the sanitizing pipeline.
 docker run --rm \
     -e CNB_TOKEN \
     -e CNB_API_ENDPOINT="$API_ENDPOINT" \
@@ -126,7 +127,8 @@ docker run --rm \
     -e PLUGIN_ATTACHMENTS="$attachment_list" \
     -v "$repo_root:$repo_root" \
     -w "$repo_root" \
-    "$PLUGIN_IMAGE" 2>&1 | sed 's/^/[cnb-attachments] /'
+    "$PLUGIN_IMAGE" 2>&1 \
+    | sed -e 's/##\[/[runner-command /g' -e 's/^/[cnb-attachments] /'
 
 verify_remote_release || {
     echo "publish-cnb-attachments: uploaded attachment verification failed" >&2
