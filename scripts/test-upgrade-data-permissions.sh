@@ -245,6 +245,14 @@ grep -Fq 'ongrid_restore_existing_stack "$INSTALL_DIR"' "$upgrade_script" \
     || fail "upgrade.sh does not restore the existing stack after preparation failure"
 grep -Fq 'ongrid_restore_edge_directory "$INSTALL_DIR" "$EDGE_BACKUP_DIR"' "$upgrade_script" \
     || fail "upgrade.sh does not restore the previous Edge directory after a post-swap failure"
+grep -Fq 'upgrade health check failed: ongrid did not become healthy within 90s' "$upgrade_script" \
+    || fail "upgrade.sh still reports a failed health check as a warning"
+grep -Fq 'manual Edge rollback: rm -rf --' "$upgrade_script" \
+    || fail "upgrade.sh does not print an actionable Edge rollback command"
+grep -Fq 'docker compose --env-file .env up -d --force-recreate ongrid nginx' "$upgrade_script" \
+    || fail "manual Edge rollback does not recreate containers with Edge bind mounts"
+grep -Fq 'trap - ERR' "$upgrade_script" \
+    || fail "upgrade.sh health failure can trigger a partial automatic Edge-only rollback"
 for persistent_dir in mysql prometheus loki tempo grafana skills pages workspace tools; do
     if grep -Eq "chown -R .*ONGRID_DATA_DIR/${persistent_dir}" "$upgrade_script"; then
         fail "upgrade.sh directly recurses through $persistent_dir outside the repair helper"

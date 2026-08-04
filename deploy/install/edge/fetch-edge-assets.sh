@@ -67,15 +67,16 @@ verify_checksum_sidecar() {
 
 download_verified() {
     local tag=$1 filename=$2
-    local cached="$CACHE_DIR/$filename" sidecar="$CACHE_DIR/$filename.sha256"
+    local cache_tag_dir="$CACHE_DIR/$tag"
+    local cached="$cache_tag_dir/$filename" sidecar="$cache_tag_dir/$filename.sha256"
     if verify_checksum_sidecar "$cached" "$sidecar"; then
-        log "using verified cache $filename"
+        log "using verified cache $tag/$filename"
         printf '%s\n' "$cached"
         return 0
     fi
 
-    local incoming="$work/incoming/$filename"
-    mkdir -p "$(dirname "$incoming")"
+    local incoming="$work/incoming/$tag/$filename"
+    mkdir -p "$(dirname "$incoming")" "$cache_tag_dir"
     log "downloading $BASE_URL/$tag/$filename"
     curl "${CURL_FLAGS[@]}" -o "$incoming" "$BASE_URL/$tag/$filename"
     curl "${CURL_FLAGS[@]}" -o "$incoming.sha256" "$BASE_URL/$tag/$filename.sha256"
@@ -99,6 +100,8 @@ verify_dependency_manifest() {
     line_count=$(awk 'NF {count++} END {print count + 0}' "$manifest")
     [[ "$line_count" == "${#required[@]}" ]] || return 1
     for name in "${required[@]}"; do
+        [[ -f "$extract_dir/$name" && ! -L "$extract_dir/$name" && -s "$extract_dir/$name" ]] \
+            || return 1
         if ! line=$(awk -v expected="$name" '
             NF {
                 recorded=$2
@@ -145,16 +148,28 @@ for target in "${TARGETS[@]}"; do
     verify_dependency_manifest "$extract_dir" || die "dependency manifest failed for $target"
     [[ "$(tr -d '[:space:]' < "$extract_dir/TARGET")" == "$target" ]] \
         || die "dependency archive target does not match $target"
+    if ! dependency_release_tag=$(awk -F= '
+        $1 == "release_tag" {
+            value=substr($0, index($0, "=") + 1)
+            count++
+        }
+        END {
+            if (count != 1) exit 1
+            print value
+        }
+    ' "$extract_dir/DEPENDENCIES"); then
+        die "$deps_name has an invalid dependency release tag"
+    fi
+    [[ "$dependency_release_tag" == "$DEPS_TAG" ]] \
+        || die "dependency archive release tag does not match $DEPS_TAG"
 
     for component in "${deps[@]}"; do
-        [[ -f "$extract_dir/$component" && ! -L "$extract_dir/$component" && -s "$extract_dir/$component" ]] \
-            || die "$deps_name is missing regular file $component"
         install -m 0755 "$extract_dir/$component" "$DEST_DIR/${component}-${target}"
     done
     install -m 0755 "$edge_binary" "$DEST_DIR/ongrid-edge-${target}"
 
-    deps_sha=$(sha256sum "$CACHE_DIR/$deps_name" | awk 'NR == 1 {print $1}')
-    edge_sha=$(sha256sum "$CACHE_DIR/$edge_name" | awk 'NR == 1 {print $1}')
+    deps_sha=$(sha256sum "$deps_archive" | awk 'NR == 1 {print $1}')
+    edge_sha=$(sha256sum "$edge_binary" | awk 'NR == 1 {print $1}')
     printf 'deps=%s/%s/%s sha256:%s\nedge=%s/%s/%s sha256:%s\n' \
         "$BASE_URL" "$DEPS_TAG" "$deps_name" "$deps_sha" \
         "$BASE_URL" "$VERSION" "$edge_name" "$edge_sha" \

@@ -62,7 +62,7 @@ GitHub 的 `Release` workflow 在每个 `vMAJOR.MINOR.PATCH` tag 上自动执行
 
 升级预取发生在停止旧 Compose 栈之前。网络不可达、附件缺失、checksum 不符或架构不匹配时，旧服务和旧 `/edge` 目录保持不变。
 
-完成 `/edge` 原子替换后、健康检查成功前发生错误时，错误处理会恢复交换前的 Edge 目录；健康检查仅超时时保留并输出备份路径，供运维人员手工判断和回滚。
+完成 `/edge` 原子替换后、健康检查成功前发生错误时，错误处理会恢复交换前的 Edge 目录；健康检查仅超时时保留并输出备份路径与人工回滚命令、以非零状态退出，供运维人员判断和回滚，禁止自动化误判为升级成功。
 
 Manager、Nginx 和 Edge 设备继续使用既有 `/edge/` URL、文件名、manifest 与 apply 流程，不感知外部附件来源。
 
@@ -96,7 +96,7 @@ Manager、Nginx 和 Edge 设备继续使用既有 `/edge/` URL、文件名、man
 
 - 附件构建必须验证两个 Linux 架构的必需组件全集并生成内外两层 checksum；
 - 下载脚本测试必须覆盖直链路径、缓存复用、完整提取和 checksum 篡改拒绝；
-- 发布脚本必须完整存在时幂等跳过、部分存在时拒绝覆盖；
+- 发布脚本必须在完整附件逐一通过 sidecar checksum 后幂等跳过、部分存在或内容损坏时拒绝覆盖；
 - Release 创建脚本必须在目标已存在时幂等复用，API 权限不足时失败且不得输出 Token；
 - GitHub Release workflow 必须等待 CNB `edge-release` job 成功；
 - 发布包测试必须证明默认包包含依赖 tag 锁文件和下载脚本，但不包含 Edge 大型二进制；

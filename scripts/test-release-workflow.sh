@@ -35,5 +35,13 @@ grep -Fq 'CNB dependency release $(EDGE_DEPS_TAG) is complete; skip build and up
     || { echo "complete dependency Releases are not skipped before rebuilding" >&2; exit 1; }
 grep -Fq 'CNB Edge release $(VERSION) is complete; skip build and upload' "$makefile" \
     || { echo "complete versioned Edge Releases are not skipped before rebuilding" >&2; exit 1; }
+grep -Fq 'scripts/verify-cnb-release-attachments.sh' "$makefile" \
+    || { echo "Makefile release skip does not verify attachment contents" >&2; exit 1; }
+grep -Fq 'make verify-edge-deps-release' "$cnb_pipeline" \
+    || { echo "CNB version pipeline does not verify dependency contents" >&2; exit 1; }
+if grep -Fq 'curl -fsSIL' "$cnb_pipeline"; then
+    echo "CNB pipeline still treats attachment existence as integrity verification" >&2
+    exit 1
+fi
 
 echo "release workflow tests passed"

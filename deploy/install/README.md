@@ -83,7 +83,7 @@ sudo ./upgrade.sh
 3. `docker compose down`（保留数据），随后覆盖 `docker-compose.yml`、`nginx.conf`、`prometheus.yml`、`grafana/`、`edge/`、`VERSION`。
 4. **不覆盖 `.env` 和 `certs/`**；只把 `.env` 中的 `ONGRID_VERSION` 更新为新版本，并补齐新版本必需的缺省项。
 5. `docker compose up -d` 启动新版。
-6. 轮询 `https://localhost:${ONGRID_HTTP_PORT}/healthz`（`-k` 跳过自签校验）最多 90 秒（库迁移可能稍慢）。
+6. 轮询 `https://localhost:${ONGRID_HTTP_PORT}/healthz`（`-k` 跳过自签校验）最多 90 秒（库迁移可能稍慢）；超时会保留旧 Edge 备份、输出人工回滚命令并以非零状态退出，不会误报升级成功。
 
 数据库 schema 由 gorm AutoMigrate 在 ongrid 启动时自动处理。
 

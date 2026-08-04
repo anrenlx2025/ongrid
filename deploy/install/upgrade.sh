@@ -648,8 +648,21 @@ for i in $(seq 1 45); do
 done
 printf '\n'
 if [[ $HEALTH_OK -eq 0 ]]; then
-    log_warn "ongrid did not become healthy within 90s"
-    log_warn "check: docker compose -f $INSTALL_DIR/docker-compose.yml logs ongrid"
+    log_error "upgrade health check failed: ongrid did not become healthy within 90s"
+    log_error "check: docker compose -f $INSTALL_DIR/docker-compose.yml logs ongrid"
+    if [[ -n "$EDGE_BACKUP_DIR" && -d "$EDGE_BACKUP_DIR/edge" ]]; then
+        printf -v rollback_current '%q' "$INSTALL_DIR/edge"
+        printf -v rollback_source '%q' "$EDGE_BACKUP_DIR/edge"
+        printf -v rollback_install_dir '%q' "$INSTALL_DIR"
+        log_warn "previous Edge assets retained at $EDGE_BACKUP_DIR"
+        log_warn "manual Edge rollback: rm -rf -- $rollback_current && mv -- $rollback_source $rollback_current && cd $rollback_install_dir && docker compose --env-file .env up -d --force-recreate ongrid nginx"
+    fi
+    # A health timeout needs operator diagnosis, so keep the previous Edge tree
+    # available instead of letting the ERR trap perform a partial automatic
+    # rollback while Compose and .env remain on the new version.
+    EDGE_SWAP_COMPLETE=0
+    trap - ERR
+    exit 1
 fi
 
 # ---------- post-success cleanup (only when healthy) ----------
@@ -721,10 +734,6 @@ if [[ $HEALTH_OK -eq 1 ]]; then
         done
 
     log_info "disk now: $(df -h "$INSTALL_DIR" | awk 'NR==2 {print $4 " free of " $2}')"
-fi
-
-if [[ $HEALTH_OK -eq 0 && -n "$EDGE_BACKUP_DIR" ]]; then
-    log_warn "previous Edge assets retained at $EDGE_BACKUP_DIR for manual rollback"
 fi
 
 echo ""

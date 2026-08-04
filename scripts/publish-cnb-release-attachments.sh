@@ -17,11 +17,16 @@ shift 4
 : "${CNB_TOKEN:?CNB_TOKEN with repo-contents read/write permission is required}"
 API_ENDPOINT=${CNB_API_ENDPOINT:-https://api.cnb.cool}
 WEB_ENDPOINT=${CNB_WEB_ENDPOINT:-https://cnb.cool}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+VERIFY_SCRIPT="$SCRIPT_DIR/verify-cnb-release-attachments.sh"
 command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
 command -v cmp >/dev/null 2>&1 || { echo "cmp is required" >&2; exit 1; }
+[[ -x "$VERIFY_SCRIPT" ]] || { echo "publish-cnb-attachments: missing $VERIFY_SCRIPT" >&2; exit 1; }
 
 files=()
+payload_files=()
+payload_names=()
 present=0
 for file in "$@"; do
     if [[ "$file" != /* ]]; then
@@ -29,6 +34,17 @@ for file in "$@"; do
     fi
     [[ -s "$file" ]] || { echo "publish-cnb-attachments: missing $file" >&2; exit 1; }
     files+=("$file")
+    case "$file" in
+        *.sha256) ;;
+        *)
+            [[ -s "$file.sha256" ]] || {
+                echo "publish-cnb-attachments: missing checksum sidecar $file.sha256" >&2
+                exit 1
+            }
+            payload_files+=("$file")
+            payload_names+=("$(basename "$file")")
+            ;;
+    esac
     asset_url="$BASE_URL/$TAG/$(basename "$file")"
     if ! probe_status=$(curl -sSIL -o /dev/null -w '%{http_code}' "$asset_url"); then
         echo "publish-cnb-attachments: cannot inspect $asset_url" >&2
@@ -43,18 +59,41 @@ for file in "$@"; do
             ;;
     esac
 done
+(( ${#payload_names[@]} > 0 )) || {
+    echo "publish-cnb-attachments: no payload attachments supplied" >&2
+    exit 2
+}
+for payload_file in "${payload_files[@]}"; do
+    sidecar_supplied=0
+    for file in "${files[@]}"; do
+        if [[ "$file" == "$payload_file.sha256" ]]; then
+            sidecar_supplied=1
+            break
+        fi
+    done
+    (( sidecar_supplied == 1 )) || {
+        echo "publish-cnb-attachments: checksum sidecar was not supplied for $payload_file" >&2
+        exit 1
+    }
+done
 
-if (( present == ${#files[@]} )); then
+verify_remote_release() {
+    local file
     for file in "${files[@]}"; do
         case "$file" in
             *.sha256)
                 curl -fsSL "$BASE_URL/$TAG/$(basename "$file")" | cmp -s - "$file" || {
                     echo "publish-cnb-attachments: remote checksum differs for $(basename "$file")" >&2
-                    exit 1
+                    return 1
                 }
                 ;;
         esac
     done
+    bash "$VERIFY_SCRIPT" "$BASE_URL" "$TAG" "${payload_names[@]}" >/dev/null
+}
+
+if (( present == ${#files[@]} )); then
+    verify_remote_release || exit 1
     echo "CNB release $TAG already has all ${#files[@]} immutable attachment(s); skip"
     exit 0
 fi
@@ -85,18 +124,8 @@ docker run --rm \
     -w "$repo_root" \
     "$PLUGIN_IMAGE"
 
-for file in "${files[@]}"; do
-    curl -fsSIL -o /dev/null "$BASE_URL/$TAG/$(basename "$file")" || {
-        echo "publish-cnb-attachments: upload verification failed for $(basename "$file")" >&2
-        exit 1
-    }
-    case "$file" in
-        *.sha256)
-            curl -fsSL "$BASE_URL/$TAG/$(basename "$file")" | cmp -s - "$file" || {
-                echo "publish-cnb-attachments: uploaded checksum differs for $(basename "$file")" >&2
-                exit 1
-            }
-            ;;
-    esac
-done
+verify_remote_release || {
+    echo "publish-cnb-attachments: uploaded attachment verification failed" >&2
+    exit 1
+}
 echo "published and verified ${#files[@]} attachment(s) on CNB release $TAG"

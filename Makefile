@@ -627,30 +627,19 @@ edge-deps-tag: ## [release] 打印当前不可变公共依赖 Release tag
 	@printf '%s\n' "$(EDGE_DEPS_TAG)"
 
 verify-edge-deps-release: ## [release] 校验一次性公共 Edge 依赖 Release 已完整发布
-	@command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
-	@for target in $(EDGE_ATTACHMENT_TARGETS); do \
-		for suffix in .tar.xz .tar.xz.sha256; do \
-			url="$(CNB_RELEASE_BASE_URL)/$(EDGE_DEPS_TAG)/edge-deps-$$target$$suffix"; \
-			curl -fsSIL -o /dev/null "$$url" || { \
-				echo "missing immutable Edge dependency attachment: $$url" >&2; \
-				echo "publish it once with: CNB_TOKEN=... make publish-edge-deps-attachments" >&2; \
-				exit 1; \
-			}; \
-		done; \
-	done
+	@files=""; for target in $(EDGE_ATTACHMENT_TARGETS); do \
+		files="$$files edge-deps-$$target.tar.xz"; \
+	done; \
+	bash "$(CURDIR)/scripts/verify-cnb-release-attachments.sh" \
+		"$(CNB_RELEASE_BASE_URL)" "$(EDGE_DEPS_TAG)" $$files
 	@echo "verified immutable Edge dependency release $(EDGE_DEPS_TAG)"
 
 verify-edge-version-release: ## [release] 校验当前 VERSION 的 Edge Release 已完整发布
-	@command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
-	@for target in $(EDGE_ATTACHMENT_TARGETS); do \
-		for suffix in '' .sha256; do \
-			url="$(CNB_RELEASE_BASE_URL)/$(VERSION)/ongrid-edge-$$target-$(VERSION)$$suffix"; \
-			curl -fsSIL -o /dev/null "$$url" || { \
-				echo "missing versioned Edge attachment: $$url" >&2; \
-				exit 1; \
-			}; \
-		done; \
-	done
+	@files=""; for target in $(EDGE_ATTACHMENT_TARGETS); do \
+		files="$$files ongrid-edge-$$target-$(VERSION)"; \
+	done; \
+	bash "$(CURDIR)/scripts/verify-cnb-release-attachments.sh" \
+		"$(CNB_RELEASE_BASE_URL)" "$(VERSION)" $$files
 	@echo "verified immutable Edge release $(VERSION)"
 
 build-edge-deps-attachments: EDGE_PLUGIN_ARCHES := $(EDGE_ATTACHMENT_TARGETS)
@@ -711,6 +700,7 @@ publish-edge-attachments: publish-edge-deps-attachments publish-edge-version-att
 
 test-edge-attachments: ## [test] 校验附件构建、直链下载和 checksum 拒绝路径
 	bash scripts/test-edge-assets.sh
+	bash scripts/test-verify-cnb-release-attachments.sh
 	bash scripts/test-ensure-cnb-release.sh
 	bash scripts/test-publish-cnb-release-attachments.sh
 

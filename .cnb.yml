@@ -17,13 +17,7 @@ $:
                   echo "VERSION ($version) must match release tag ($CNB_BRANCH)" >&2
                   exit 2
                 }
-                for target in linux-amd64 linux-arm64; do
-                  curl -fsSIL -o /dev/null \
-                    "https://cnb.cool/ongridio/ongrid-edge/-/releases/download/$deps_tag/edge-deps-$target.tar.xz" || {
-                    echo "publish the immutable dependency Release $deps_tag first" >&2
-                    exit 2
-                  }
-                done
+                make verify-edge-deps-release
                 make build-edge-version-attachments
                 ;;
               *)
