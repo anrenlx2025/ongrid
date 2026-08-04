@@ -6,6 +6,7 @@ export type DeviceClusterSummary = {
   cluster: TopologyNode;
   members: Device[];
   memberRelations: TopologyRelation[];
+  externalRelations: TopologyRelation[];
   profiles: EdgeEnrollmentProfile[];
   online: number;
   offline: number;
@@ -34,6 +35,14 @@ export function buildDeviceClusterSummaries(
         (relation) =>
           relation.type === "member_of" && relation.dst_id === cluster.id,
       );
+      const memberRelationIDs = new Set(
+        memberRelations.map((relation) => relation.id),
+      );
+      const externalRelations = relations.filter(
+        (relation) =>
+          (relation.src_id === cluster.id || relation.dst_id === cluster.id) &&
+          !memberRelationIDs.has(relation.id),
+      );
       const members = memberRelations
         .map((relation) => devicesByNodeID.get(relation.src_id))
         .filter((device): device is Device => Boolean(device))
@@ -52,6 +61,7 @@ export function buildDeviceClusterSummaries(
         cluster,
         members,
         memberRelations,
+        externalRelations,
         profiles: clusterProfiles,
         online,
         offline: members.length - online,

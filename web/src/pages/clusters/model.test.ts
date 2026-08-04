@@ -48,6 +48,13 @@ const relations: TopologyRelation[] = [
     props: { source: "manual" },
     created_at: "2026-07-31T01:00:00Z",
   },
+  {
+    id: 704,
+    src_id: 501,
+    dst_id: 801,
+    type: "depends_on",
+    created_at: "2026-07-31T01:00:00Z",
+  },
 ];
 
 const profiles: EdgeEnrollmentProfile[] = [
@@ -89,6 +96,9 @@ describe("device cluster model", () => {
     expect(result[0].online).toBe(1);
     expect(result[0].offline).toBe(1);
     expect(result[0].activeProfiles).toBe(1);
+    expect(result[0].externalRelations.map((relation) => relation.id)).toEqual([
+      704,
+    ]);
   });
 
   it("maps each device node to its non-Kubernetes cluster", () => {
