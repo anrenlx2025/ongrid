@@ -46,6 +46,8 @@ cat > "$tmp_dir/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+printf '%s\n' '##[set-output FILES=one%2Cone.sha256]'
+[[ ${FAKE_DOCKER_FAIL:-} != 1 ]] || exit 42
 : > "$FAKE_UPLOAD_STATE"
 cp "$FAKE_LOCAL_ROOT/one" "$FAKE_LOCAL_ROOT/one.sha256" "$FAKE_REMOTE_ROOT/"
 EOF
@@ -57,6 +59,7 @@ run_publisher() {
     FAKE_UPLOAD_STATE="$tmp_dir/uploaded" \
     FAKE_LOCAL_ROOT="$tmp_dir/files" \
     FAKE_REMOTE_ROOT="$tmp_dir/remote" \
+    FAKE_DOCKER_FAIL="${FAKE_DOCKER_FAIL:-}" \
     PATH="$tmp_dir/bin:$PATH" \
     CNB_TOKEN=test-token \
         bash "$publisher" vtest ongridio/ongrid-edge \
@@ -124,9 +127,22 @@ fi
 : > "$tmp_dir/docker.log"
 rm -f "$tmp_dir/uploaded"
 rm -f "$tmp_dir/remote/one" "$tmp_dir/remote/one.sha256"
-run_publisher
+if FAKE_DOCKER_FAIL=1 run_publisher >/dev/null 2>&1; then
+    echo "uploader failure was hidden by output sanitization" >&2
+    exit 1
+fi
+[[ ! -e "$tmp_dir/remote/one" ]] \
+    || { echo "failed uploader unexpectedly populated the release" >&2; exit 1; }
+publisher_output=$(run_publisher)
 grep -Fq 'PLUGIN_TAG=vtest' "$tmp_dir/docker.log"
 grep -Fq "$plugin_image" "$tmp_dir/docker.log"
+grep -Fq '[cnb-attachments] ##[set-output FILES=one%2Cone.sha256]' \
+    <<<"$publisher_output" \
+    || { echo "uploader output was not escaped from GitHub runner command parsing" >&2; exit 1; }
+if grep -Eq '^##\[' <<<"$publisher_output"; then
+    echo "uploader output can still be parsed as a GitHub runner command" >&2
+    exit 1
+fi
 cmp -s "$tmp_dir/files/one" "$tmp_dir/remote/one" \
     || { echo "uploaded payload was not verified from the remote release" >&2; exit 1; }
 

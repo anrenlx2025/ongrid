@@ -56,6 +56,14 @@ CNB_HELM_REGISTRY ?= helm.cnb.cool
 CNB_HELM_USERNAME ?= cnb
 RELEASE_MANIFEST_PLATFORM_FILTER ?= $(CURDIR)/scripts/release-manifest-platforms.jq
 RELEASE_IMAGE_PUBLISHER ?= $(CURDIR)/scripts/publish-release-image.sh
+RELEASE_IMAGE_PLATFORM_PUBLISHER ?= $(CURDIR)/scripts/publish-release-image-platform.sh
+RELEASE_IMAGE_MANIFEST_MERGER ?= $(CURDIR)/scripts/merge-release-image-manifest.sh
+RELEASE_IMAGE_PLATFORM ?= linux/amd64
+RELEASE_IMAGE_DIGEST_DIR ?= dist/release-digests
+RELEASE_IMAGE_METADATA_FILE ?= $(RELEASE_IMAGE_DIGEST_DIR)/manager-$(subst /,-,$(RELEASE_IMAGE_PLATFORM)).metadata.json
+RELEASE_IMAGE_DIGEST_FILE ?= $(RELEASE_IMAGE_DIGEST_DIR)/manager-$(subst /,-,$(RELEASE_IMAGE_PLATFORM)).digest
+RELEASE_MANAGER_AMD64_DIGEST_FILE ?= $(RELEASE_IMAGE_DIGEST_DIR)/manager-linux-amd64.digest
+RELEASE_MANAGER_ARM64_DIGEST_FILE ?= $(RELEASE_IMAGE_DIGEST_DIR)/manager-linux-arm64.digest
 
 DB_DSN     ?= root:root@tcp(127.0.0.1:3306)/ongrid?charset=utf8mb4&parseTime=true&loc=Local
 MIGRATIONS := db/migrations
@@ -272,8 +280,8 @@ docker-build-web: ## [release] 构建 ongrid-web:$(VERSION) 镜像（前端 SPA 
 		$(DOCKER_BUILD_WEB_CACHE_ARGS) \
 		--load .
 
-.PHONY: docker-push-cloud-images docker-push-release-images release-image-refs verify-release-images test-release-manifest-filter test-release-image-publish
-docker-push-cloud-images: ## [release] 发布 manager + Web 多架构镜像到 CNB
+.PHONY: docker-push-cloud-manager docker-push-cloud-manager-platform docker-merge-cloud-manager docker-push-cloud-web docker-push-cloud-images docker-push-release-images release-image-refs verify-release-images test-release-manifest-filter test-release-image-publish
+docker-push-cloud-manager: ## [release] 发布 manager 多架构镜像到 CNB（兼容本地串行发布）
 	bash "$(RELEASE_IMAGE_PUBLISHER)" \
 		"$(CLOUD_MANAGER_IMAGE_REF)" \
 		"$(RELEASE_MANIFEST_PLATFORM_FILTER)" \
@@ -284,6 +292,32 @@ docker-push-cloud-images: ## [release] 发布 manager + Web 多架构镜像到 C
 		-f deploy/Dockerfile.ongrid \
 		$(DOCKER_BUILD_CACHE_ARGS) \
 		--push .
+
+docker-push-cloud-manager-platform: ## [release] 发布一个原生 manager 平台 digest，供 CI 并行聚合
+	bash "$(RELEASE_IMAGE_PLATFORM_PUBLISHER)" \
+		"$(CLOUD_MANAGER_IMAGE_REF)" \
+		"$(RELEASE_MANIFEST_PLATFORM_FILTER)" \
+		"$(RELEASE_IMAGE_METADATA_FILE)" \
+		"$(RELEASE_IMAGE_DIGEST_FILE)" \
+		-- docker buildx build \
+		--platform "$(RELEASE_IMAGE_PLATFORM)" \
+		--build-arg VERSION=$(VERSION) \
+		--provenance=false \
+		--metadata-file "$(RELEASE_IMAGE_METADATA_FILE)" \
+		--output "type=image,name=$(CLOUD_IMAGE_REPO),push-by-digest=true,name-canonical=true,push=true" \
+		-f deploy/Dockerfile.ongrid \
+		$(DOCKER_BUILD_CACHE_ARGS) \
+		.
+
+docker-merge-cloud-manager: ## [release] 将原生 amd64/arm64 manager digest 聚合为不可变版本标签
+	bash "$(RELEASE_IMAGE_MANIFEST_MERGER)" \
+		"$(CLOUD_MANAGER_IMAGE_REF)" \
+		"$(CLOUD_IMAGE_REPO)" \
+		"$(RELEASE_MANIFEST_PLATFORM_FILTER)" \
+		"$(RELEASE_MANAGER_AMD64_DIGEST_FILE)" \
+		"$(RELEASE_MANAGER_ARM64_DIGEST_FILE)"
+
+docker-push-cloud-web: ## [release] 发布 Web 多架构镜像到 CNB
 	bash "$(RELEASE_IMAGE_PUBLISHER)" \
 		"$(CLOUD_WEB_IMAGE_REF)" \
 		"$(RELEASE_MANIFEST_PLATFORM_FILTER)" \
@@ -294,6 +328,8 @@ docker-push-cloud-images: ## [release] 发布 manager + Web 多架构镜像到 C
 		-f deploy/Dockerfile.web \
 		$(DOCKER_BUILD_WEB_CACHE_ARGS) \
 		--push .
+
+docker-push-cloud-images: docker-push-cloud-manager docker-push-cloud-web ## [release] 发布 manager + Web 多架构镜像到 CNB
 
 .PHONY: docker-build-k8s-edge docker-push-k8s-edge k8s-edge-image-ref
 docker-build-k8s-edge: ## [dev] 构建本地 Kubernetes ongrid-edge 镜像（默认 linux/amd64）
@@ -349,6 +385,7 @@ test-release-manifest-filter: ## [test] 校验 release manifest 架构过滤器
 
 test-release-image-publish: test-release-manifest-filter ## [test] 校验 release 镜像幂等发布
 	bash scripts/test-publish-release-image.sh
+	bash scripts/test-release-image-platform-publish.sh
 
 .PHONY: verify-compose-images
 verify-compose-images: ## [test] 渲染并校验 Compose 运行镜像全部按预期指向 CNB

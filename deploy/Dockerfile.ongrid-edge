@@ -15,7 +15,8 @@ ARG PROCESS_EXPORTER_VERSION=0.8.4
 ARG OTELCOL_VERSION=0.118.0
 
 # ---------- Stage 1: builder ----------
-FROM golang:1.25-alpine AS builder
+# The edge binary is pure Go, so cross-compile on the native build platform.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 ARG VERSION
 ARG TARGETARCH
@@ -37,7 +38,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o /out/ongrid-edge ./cmd/ongrid-edge
 
 # ---------- Stage 2: bundled logs plugin ----------
-FROM alpine:3.20 AS promtail
+# Download target-specific assets on the native build platform; none of these
+# stages executes the downloaded binaries.
+FROM --platform=$BUILDPLATFORM alpine:3.20 AS promtail
 
 ARG PROMTAIL_VERSION
 ARG TARGETARCH
@@ -61,7 +64,7 @@ RUN set -eux; \
     rm -f /tmp/promtail.zip
 
 # ---------- Stage 3: bundled host metrics plugin ----------
-FROM alpine:3.20 AS node-exporter
+FROM --platform=$BUILDPLATFORM alpine:3.20 AS node-exporter
 
 ARG NODE_EXPORTER_VERSION
 ARG TARGETARCH
@@ -86,7 +89,7 @@ RUN set -eux; \
     rm -f /tmp/node_exporter.tgz
 
 # ---------- Stage 4: bundled process metrics plugin ----------
-FROM alpine:3.20 AS process-exporter
+FROM --platform=$BUILDPLATFORM alpine:3.20 AS process-exporter
 
 ARG PROCESS_EXPORTER_VERSION
 ARG TARGETARCH
@@ -112,7 +115,7 @@ RUN set -eux; \
     rm -f /tmp/process_exporter.tgz
 
 # ---------- Stage 5: bundled traces plugin ----------
-FROM alpine:3.20 AS otelcol-contrib
+FROM --platform=$BUILDPLATFORM alpine:3.20 AS otelcol-contrib
 
 ARG OTELCOL_VERSION
 ARG TARGETARCH
