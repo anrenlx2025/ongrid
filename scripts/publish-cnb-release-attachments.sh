@@ -20,6 +20,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VERIFY_SCRIPT="$SCRIPT_DIR/verify-cnb-release-attachments.sh"
 command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 command -v cmp >/dev/null 2>&1 || { echo "cmp is required" >&2; exit 1; }
+command -v sed >/dev/null 2>&1 || { echo "sed is required" >&2; exit 1; }
 [[ -x "$VERIFY_SCRIPT" ]] || { echo "publish-cnb-attachments: missing $VERIFY_SCRIPT" >&2; exit 1; }
 
 files=()
@@ -113,6 +114,8 @@ for file in "${files[@]}"; do
     attachment_list="${attachment_list:+$attachment_list,}$rel"
 done
 
+# Prefix every plugin line so legacy output such as `##[set-output ...]` cannot
+# be interpreted as a GitHub runner command. pipefail preserves docker errors.
 docker run --rm \
     -e CNB_TOKEN \
     -e CNB_API_ENDPOINT="$API_ENDPOINT" \
@@ -123,7 +126,7 @@ docker run --rm \
     -e PLUGIN_ATTACHMENTS="$attachment_list" \
     -v "$repo_root:$repo_root" \
     -w "$repo_root" \
-    "$PLUGIN_IMAGE"
+    "$PLUGIN_IMAGE" 2>&1 | sed 's/^/[cnb-attachments] /'
 
 verify_remote_release || {
     echo "publish-cnb-attachments: uploaded attachment verification failed" >&2
