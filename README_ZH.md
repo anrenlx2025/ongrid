@@ -42,18 +42,32 @@
 
 ## 安装
 
-下载通用 Linux Release，解压后运行安装脚本（支持 Ubuntu 22.04+、Debian 12+、RHEL/Rocky 9，以及 AMD64、ARM64）。安装程序会自动识别宿主机架构并下载对应的 Edge 制品：
+按服务器架构下载最新 release（`linux-amd64` 或 `linux-arm64`），解压后运行安装脚本（Ubuntu 22.04+、Debian 12+、RHEL/Rocky 9）：
 
+按服务器架构选择对应命令：
+
+**AMD64**
 ```bash
-wget https://github.com/ongridio/ongrid/releases/download/v0.11.1/ongrid-v0.11.1-linux.tar.xz
-tar -xf ongrid-v0.11.1-linux.tar.xz && cd ongrid-v0.11.1-linux
+wget https://github.com/ongridio/ongrid/releases/download/v0.11.0/ongrid-v0.11.0-linux-amd64.tar.xz
+tar -xf ongrid-v0.11.0-linux-amd64.tar.xz && cd ongrid-v0.11.0-linux-amd64
 sudo ./install.sh
 ```
 
-**🇨🇳 中国大陆用户** — GitHub 较慢时，可使用 CDN 镜像地址下载：
+**ARM64**
+```bash
+wget https://github.com/ongridio/ongrid/releases/download/v0.11.0/ongrid-v0.11.0-linux-arm64.tar.xz
+tar -xf ongrid-v0.11.0-linux-arm64.tar.xz && cd ongrid-v0.11.0-linux-arm64
+sudo ./install.sh
+```
+
+**🇨🇳 中国大陆用户** — GitHub 较慢时，选择对应架构的 CDN 镜像地址下载：
 
 ```bash
-wget https://ongrid.cloud/dl/ongrid-v0.11.1-linux.tar.xz
+# AMD64
+wget https://ongrid.cloud/dl/ongrid-v0.11.0-linux-amd64.tar.xz
+
+# ARM64
+wget https://ongrid.cloud/dl/ongrid-v0.11.0-linux-arm64.tar.xz
 ```
 
 ## 产品导览

@@ -42,18 +42,32 @@
 
 ## Installation
 
-Laden Sie das universelle Linux-Release herunter, entpacken Sie es und führen Sie das Installationsskript aus (Ubuntu 22.04+, Debian 12+, RHEL/Rocky 9; AMD64 und ARM64 werden unterstützt). Der Installer erkennt die Host-Architektur und lädt die passenden Edge-Artefakte herunter:
+Laden Sie das aktuelle Release für Ihre Serverarchitektur (`linux-amd64` oder `linux-arm64`) herunter, entpacken Sie es und führen Sie das Installationsskript aus (Ubuntu 22.04+, Debian 12+, RHEL/Rocky 9):
 
+Wählen Sie den Befehl für Ihre Serverarchitektur:
+
+**AMD64**
 ```bash
-wget https://github.com/ongridio/ongrid/releases/download/v0.11.1/ongrid-v0.11.1-linux.tar.xz
-tar -xf ongrid-v0.11.1-linux.tar.xz && cd ongrid-v0.11.1-linux
+wget https://github.com/ongridio/ongrid/releases/download/v0.11.0/ongrid-v0.11.0-linux-amd64.tar.xz
+tar -xf ongrid-v0.11.0-linux-amd64.tar.xz && cd ongrid-v0.11.0-linux-amd64
 sudo ./install.sh
 ```
 
-**🇨🇳 Festlandchina** — Wenn GitHub langsam ist, verwenden Sie die CDN-Mirror-URL:
+**ARM64**
+```bash
+wget https://github.com/ongridio/ongrid/releases/download/v0.11.0/ongrid-v0.11.0-linux-arm64.tar.xz
+tar -xf ongrid-v0.11.0-linux-arm64.tar.xz && cd ongrid-v0.11.0-linux-arm64
+sudo ./install.sh
+```
+
+**🇨🇳 Festlandchina** — Wenn GitHub langsam ist, verwenden Sie die passende CDN-Mirror-URL für Ihre Architektur:
 
 ```bash
-wget https://ongrid.cloud/dl/ongrid-v0.11.1-linux.tar.xz
+# AMD64
+wget https://ongrid.cloud/dl/ongrid-v0.11.0-linux-amd64.tar.xz
+
+# ARM64
+wget https://ongrid.cloud/dl/ongrid-v0.11.0-linux-arm64.tar.xz
 ```
 
 ## Produkttour

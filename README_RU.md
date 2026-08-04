@@ -42,18 +42,32 @@
 
 ## Установка
 
-Скачайте универсальный релиз для Linux, распакуйте и запустите скрипт установки (Ubuntu 22.04+, Debian 12+, RHEL/Rocky 9; поддерживаются AMD64 и ARM64). Установщик определит архитектуру хоста и загрузит соответствующие Edge-артефакты:
+Скачайте последний релиз для архитектуры вашего сервера (`linux-amd64` или `linux-arm64`), распакуйте и запустите скрипт установки (Ubuntu 22.04+, Debian 12+, RHEL/Rocky 9):
 
+Выберите команду для архитектуры вашего сервера:
+
+**AMD64**
 ```bash
-wget https://github.com/ongridio/ongrid/releases/download/v0.11.1/ongrid-v0.11.1-linux.tar.xz
-tar -xf ongrid-v0.11.1-linux.tar.xz && cd ongrid-v0.11.1-linux
+wget https://github.com/ongridio/ongrid/releases/download/v0.11.0/ongrid-v0.11.0-linux-amd64.tar.xz
+tar -xf ongrid-v0.11.0-linux-amd64.tar.xz && cd ongrid-v0.11.0-linux-amd64
 sudo ./install.sh
 ```
 
-**🇨🇳 Материковый Китай** — если GitHub медленный, используйте URL CDN-зеркала:
+**ARM64**
+```bash
+wget https://github.com/ongridio/ongrid/releases/download/v0.11.0/ongrid-v0.11.0-linux-arm64.tar.xz
+tar -xf ongrid-v0.11.0-linux-arm64.tar.xz && cd ongrid-v0.11.0-linux-arm64
+sudo ./install.sh
+```
+
+**🇨🇳 Материковый Китай** — если GitHub медленный, используйте URL CDN-зеркала для вашей архитектуры:
 
 ```bash
-wget https://ongrid.cloud/dl/ongrid-v0.11.1-linux.tar.xz
+# AMD64
+wget https://ongrid.cloud/dl/ongrid-v0.11.0-linux-amd64.tar.xz
+
+# ARM64
+wget https://ongrid.cloud/dl/ongrid-v0.11.0-linux-arm64.tar.xz
 ```
 
 ## Обзор продукта
