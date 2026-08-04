@@ -8,7 +8,7 @@
 - Docker >= 24.0；Docker Compose v2（即 `docker compose` 子命令，不是旧版 `docker-compose`）。
 - 至少 2 GB 内存、10 GB 可用磁盘。
 - 以 root 身份或具备 sudo 权限的用户执行脚本。
-- 可访问 `docker.cnb.cool`；manager、Web 及全部静态运行依赖都从项目 CNB 仓库拉取，发布包不携带容器镜像或 Manager 原生二进制。
+- 可访问 `docker.cnb.cool` 和 `cnb.cool`；manager、Web 镜像从 CNB 制品库拉取，Edge 安装制品从 CNB Release 附件直链下载。发布包不携带容器镜像、Manager 原生二进制或大型 Edge 二进制。
 
 ## 安装形态
 
@@ -47,13 +47,14 @@ sudo ./install.sh
 
 1. 自检 Docker 环境；非 root 自动 `sudo` 重入。
 2. 创建 `/opt/ongrid/`（可通过 `ONGRID_INSTALL_DIR` 覆盖）。
-3. 拷贝 `docker-compose.yml`、`nginx.conf`、`prometheus.yml`、`grafana/`、`edge/`、`VERSION` 到安装目录。
-4. **生成自签 TLS 证书**（首次安装且 `certs/tls.crt` 不存在时）：通过临时 OpenSSL 配置生成 CN=ongrid、SAN 包含 `ongrid` / `localhost` / `127.0.0.1` 的 365 天证书，落到 `${INSTALL_DIR}/certs/`，私钥 `chmod 600`。脚本不交互，直接生成；末尾 banner 提示替换真证书。
-5. 若 `/opt/ongrid/.env` 不存在则从 `.env.example` 创建，并对空字段（`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、`ONGRID_JWT_SECRET`、`ONGRID_ADMIN_PASSWORD`）生成随机值，文件权限置 `600`。
-6. 先渲染 Compose 配置并从 `docker.cnb.cool/ongridio/ongrid` 拉取全部精确镜像；任一镜像不可用即停止，不启动半套服务。
-7. `docker compose up -d` 启动 MySQL + ongrid + frontier + nginx + prometheus（ADR-009）。
-8. 轮询 `https://localhost:${ONGRID_HTTP_PORT}/healthz`（nginx 透传到 manager，`-k` 跳过自签校验）最多 60 秒。
-9. 打印安装摘要，包括 **Web URL**、**API URL** 与 **管理员初始密码**（只显示一次，务必立即记录）。
+3. 从 CNB Release 直链下载一次性公共依赖压缩包和当前版本 `ongrid-edge` 裸二进制，校验附件 SHA-256、压缩包内部 manifest 和架构，在 staging 目录重建原有 `edge/` 单文件及一键升级 bundle；全部成功后再原子安装到 `/opt/ongrid/edge`。
+4. 拷贝 `docker-compose.yml`、`nginx.conf`、`prometheus.yml`、`grafana/`、`edge/`、`VERSION` 到安装目录。
+5. **生成自签 TLS 证书**（首次安装且 `certs/tls.crt` 不存在时）：通过临时 OpenSSL 配置生成 CN=ongrid、SAN 包含 `ongrid` / `localhost` / `127.0.0.1` 的 365 天证书，落到 `${INSTALL_DIR}/certs/`，私钥 `chmod 600`。脚本不交互，直接生成；末尾 banner 提示替换真证书。
+6. 若 `/opt/ongrid/.env` 不存在则从 `.env.example` 创建，并对空字段（`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、`ONGRID_JWT_SECRET`、`ONGRID_ADMIN_PASSWORD`）生成随机值，文件权限置 `600`。
+7. 先渲染 Compose 配置并从 `docker.cnb.cool/ongridio/ongrid` 拉取全部精确镜像；任一镜像不可用即停止，不启动半套服务。
+8. `docker compose up -d` 启动 MySQL + ongrid + frontier + nginx + prometheus（ADR-009）。
+9. 轮询 `https://localhost:${ONGRID_HTTP_PORT}/healthz`（nginx 透传到 manager，`-k` 跳过自签校验）最多 60 秒。
+10. 打印安装摘要，包括 **Web URL**、**API URL** 与 **管理员初始密码**（只显示一次，务必立即记录）。
 
 ### 可选参数
 
@@ -77,7 +78,7 @@ sudo ./upgrade.sh
 
 升级脚本会：
 
-1. 使用新版本号渲染 Compose，并从 CNB 拉取全部运行镜像；任一镜像失败时旧栈保持运行。
+1. 从 CNB 预取并校验新版本 Edge 制品，再使用新版本号渲染 Compose 并拉取全部运行镜像；任一镜像或 Edge 制品失败时旧栈与旧 `/edge` 目录保持不变。
 2. 检查 legacy volume 迁移参数，并创建/修正各 bind-mount 的顶层目录；普通升级不会递归扫描已有数据。
 3. `docker compose down`（保留数据），随后覆盖 `docker-compose.yml`、`nginx.conf`、`prometheus.yml`、`grafana/`、`edge/`、`VERSION`。
 4. **不覆盖 `.env` 和 `certs/`**；只把 `.env` 中的 `ONGRID_VERSION` 更新为新版本，并补齐新版本必需的缺省项。
@@ -85,6 +86,19 @@ sudo ./upgrade.sh
 6. 轮询 `https://localhost:${ONGRID_HTTP_PORT}/healthz`（`-k` 跳过自签校验）最多 90 秒（库迁移可能稍慢）。
 
 数据库 schema 由 gorm AutoMigrate 在 ongrid 启动时自动处理。
+
+### Edge 制品来源
+
+默认安装直接访问 `https://cnb.cool/ongridio/ongrid-edge/-/releases/download/`。公共组件位于安装包锁定的不可变 `edge-deps-*` Release，只有组件版本或布局变化才重新上传；自研 `ongrid-edge` 位于当前 Ongrid 版本（例如 `v0.11.1`）Release。默认只准备 `linux-amd64`：
+
+| 变量 | 说明 |
+|------|------|
+| `ONGRID_EDGE_TARGETS` | 需要在 Manager `/edge/` 服务的架构列表；默认 `linux-amd64`，双架构可设为 `linux-amd64 linux-arm64` |
+| `ONGRID_EDGE_ARTIFACT_BASE_URL` | 覆盖 Release 下载根地址，适合 CNB 私有镜像仓库或内网代理 |
+| `ONGRID_EDGE_DEPS_TAG` | 覆盖公共依赖 Release tag；标准包已在 `edge/edge-artifacts.env` 固定，不建议安装时修改 |
+| `ONGRID_EDGE_ARTIFACT_CACHE_DIR` | 校验通过后的本地下载缓存；默认 `/var/cache/ongrid/edge-artifacts` |
+
+完全离线的自定义安装包可在构建时执行 `ONGRID_BUNDLE_EDGE_ASSETS=1 make package ...`，恢复旧版内嵌二进制方式；标准 Release 不启用该选项。
 
 仅当数据目录被人工改乱、从不保留属主的备份恢复，或升级说明明确指出容器 UID 发生变化时，才执行显式权限修复。该操作会遍历历史数据，大目录可能耗时较长：
 

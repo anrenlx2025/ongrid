@@ -39,6 +39,15 @@ K8S_EDGE_IMAGE_PLATFORMS ?= linux/amd64,linux/arm64
 K8S_EDGE_IMAGE_TAG ?= $(VERSION)
 K8S_EDGE_IMAGE_REPO ?= docker.cnb.cool/ongridio/ongrid-edge
 K8S_EDGE_IMAGE_REF ?= $(K8S_EDGE_IMAGE_REPO):$(K8S_EDGE_IMAGE_TAG)
+# Edge installer payloads are direct CNB Release attachments. Public
+# dependencies use an immutable tag derived from every upstream version and
+# are uploaded only once; the small self-developed binary follows VERSION.
+EDGE_ATTACHMENT_TARGETS ?= linux-amd64 linux-arm64
+EDGE_DEPS_TAG ?= edge-deps-layout1-p$(PROMTAIL_VERSION)-o$(OTELCOL_VERSION)-n$(NODE_EXPORTER_VERSION)-pr$(PROCESS_EXPORTER_VERSION)-my$(MYSQLD_EXPORTER_VERSION)-pg$(POSTGRES_EXPORTER_VERSION)-r$(REDIS_EXPORTER_VERSION)-m$(MONGODB_EXPORTER_VERSION)
+EDGE_ATTACHMENTS_OUT ?= $(OUT)/edge-attachments
+CNB_RELEASE_BASE_URL ?= https://cnb.cool/ongridio/ongrid-edge/-/releases/download
+CNB_REPO_SLUG ?= ongridio/ongrid-edge
+CNB_ATTACHMENTS_IMAGE ?= cnbcool/attachments:latest
 K8S_CHART_VERSION ?= $(patsubst v%,%,$(VERSION))
 K8S_CHART_PACKAGE ?= $(BIN_DIR)/k8s/ongrid-edge.tgz
 K8S_CHART_REF ?= oci://helm.cnb.cool/ongridio/ongrid-edge
@@ -193,10 +202,10 @@ run-ongrid-edge: ## 本地直接跑 ongrid-edge
 #     dist/out/ongrid-$(VERSION)-linux-amd64.tar.xz
 #     dist/out/ongrid-$(VERSION)-linux-arm64.tar.xz  (make package TARGET_ARCH=arm64)
 #
-# Pipeline (wired via `make package`):
-#   1. build-edge-all   — cross-compile ongrid-edge targets.
-#   2. dist/package.sh  — stage Compose install files and Edge binaries,
-#                        then emit tar.xz + sha256.
+# Pipeline:
+#   1. build-edge-attachments — build public dependency archives plus the
+#      release-versioned ongrid-edge binaries for direct CNB downloads.
+#   2. package — stage the thin Compose installer without those binaries.
 
 .PHONY: build-linux
 build-linux: ## [release] 交叉编译 ongrid linux/amd64
@@ -608,19 +617,61 @@ check-release-target:
 		*) echo "unsupported PACKAGE_TARGET=$(PACKAGE_TARGET); expected linux-amd64 or linux-arm64"; exit 2 ;; \
 	esac
 
-# Order matters: fetch-* / build-edge-all populate bin/, then package rebuilds
-# the Edge upgrade bundle and dist/package.sh assembles the release tarball.
+# Direct CNB Release attachments. Target-specific EDGE_PLUGIN_ARCHES makes the
+# existing fetch targets populate both Linux architectures. The dependency tag
+# is immutable; the publisher skips it once every expected file exists.
+.PHONY: edge-deps-tag build-edge-deps-attachments build-edge-version-attachments build-edge-attachments publish-edge-deps-attachments publish-edge-version-attachments publish-edge-attachments test-edge-attachments
+edge-deps-tag: ## [release] 打印当前不可变公共依赖 Release tag
+	@printf '%s\n' "$(EDGE_DEPS_TAG)"
+
+build-edge-deps-attachments: EDGE_PLUGIN_ARCHES := $(EDGE_ATTACHMENT_TARGETS)
+build-edge-deps-attachments: fetch-promtail fetch-otelcol fetch-node-exporter fetch-process-exporter fetch-db-exporters ## [release] 构建一次性公共 Edge 依赖附件
+	PROMTAIL_VERSION="$(PROMTAIL_VERSION)" \
+	OTELCOL_VERSION="$(OTELCOL_VERSION)" \
+	NODE_EXPORTER_VERSION="$(NODE_EXPORTER_VERSION)" \
+	PROCESS_EXPORTER_VERSION="$(PROCESS_EXPORTER_VERSION)" \
+	MYSQLD_EXPORTER_VERSION="$(MYSQLD_EXPORTER_VERSION)" \
+	POSTGRES_EXPORTER_VERSION="$(POSTGRES_EXPORTER_VERSION)" \
+	REDIS_EXPORTER_VERSION="$(REDIS_EXPORTER_VERSION)" \
+	MONGODB_EXPORTER_VERSION="$(MONGODB_EXPORTER_VERSION)" \
+		bash dist/build-edge-attachments.sh deps "$(EDGE_DEPS_TAG)" "$(EDGE_ATTACHMENTS_OUT)" $(EDGE_ATTACHMENT_TARGETS)
+
+build-edge-version-attachments: build-edge-linux-amd64 build-edge-linux-arm64 ## [release] 构建随 VERSION 变化的 ongrid-edge 附件
+	bash dist/build-edge-attachments.sh edge "$(VERSION)" "$(EDGE_ATTACHMENTS_OUT)" $(EDGE_ATTACHMENT_TARGETS)
+
+build-edge-attachments: build-edge-deps-attachments build-edge-version-attachments ## [release] 构建全部 CNB Edge 直链附件
+
+publish-edge-deps-attachments: build-edge-deps-attachments ## [release] 幂等上传一次性公共依赖到已有 CNB Release
+	@files=""; for target in $(EDGE_ATTACHMENT_TARGETS); do \
+		files="$$files $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/edge-deps-$$target.tar.xz $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/edge-deps-$$target.tar.xz.sha256"; \
+	done; \
+	bash scripts/publish-cnb-release-attachments.sh "$(EDGE_DEPS_TAG)" "$(CNB_REPO_SLUG)" "$(CNB_RELEASE_BASE_URL)" "$(CNB_ATTACHMENTS_IMAGE)" $$files
+
+publish-edge-version-attachments: build-edge-version-attachments ## [release] 上传当前 VERSION 的 ongrid-edge 到已有 CNB Release
+	@files=""; for target in $(EDGE_ATTACHMENT_TARGETS); do \
+		files="$$files $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/ongrid-edge-$$target-$(VERSION) $(CURDIR)/$(EDGE_ATTACHMENTS_OUT)/ongrid-edge-$$target-$(VERSION).sha256"; \
+	done; \
+	bash scripts/publish-cnb-release-attachments.sh "$(VERSION)" "$(CNB_REPO_SLUG)" "$(CNB_RELEASE_BASE_URL)" "$(CNB_ATTACHMENTS_IMAGE)" $$files
+
+publish-edge-attachments: publish-edge-deps-attachments publish-edge-version-attachments ## [release] 上传公共依赖与当前版本 Edge 附件
+
+test-edge-attachments: ## [test] 校验附件构建、直链下载和 checksum 拒绝路径
+	bash scripts/test-edge-assets.sh
+	bash scripts/test-publish-cnb-release-attachments.sh
+
+# Edge binaries are no longer package prerequisites. install.sh/upgrade.sh
+# download and verify CNB Release files before changing the Manager /edge tree.
 #
 # NB: fetch-embedding-model is intentionally NOT a dep — pulling the BGE
 # model is slow/brittle over CN networks, so it stays a one-off step.
 # For offline RAG (ONGRID_EMBEDDING_PROVIDER=local) run
 # `make fetch-embedding-model` once before `make package`, otherwise
 # dist/package.sh warns and ships a tarball without the model.
-package: check-release-target fetch-promtail fetch-otelcol fetch-node-exporter fetch-process-exporter fetch-db-exporters build-edge-all ## [release] 打单架构 release tarball 到 dist/out/（TARGET_ARCH 可覆盖）
+package: check-release-target ## [release] 打单架构精简 release tarball 到 dist/out/（Edge 制品安装时从 CNB 拉取）
 	@if [ "$(PACKAGE_CLEAN)" = "1" ]; then rm -rf dist/stage dist/out; fi
 	@mkdir -p dist/stage dist/out
-	@$(MAKE) --no-print-directory build-edge-bundle
 	PACKAGE_TARGET="$(PACKAGE_TARGET)" \
+	ONGRID_EDGE_DEPS_TAG="$(EDGE_DEPS_TAG)" \
 		bash dist/package.sh "$(VERSION)" "$(STAGE)" "$(OUT)"
 	@echo ""
 	@echo "=== release artefact ==="
@@ -644,6 +695,7 @@ package-all: ## [release] 打 amd64 + arm64 两个生产安装包到 dist/out/
 test-release-package: ## [test] 校验安装 URL 与 Compose 发布包内容
 	bash scripts/test-public-url.sh
 	bash scripts/test-upgrade-data-permissions.sh
+	$(MAKE) --no-print-directory test-edge-attachments
 	bash scripts/test-compose-release-package.sh
 
 .PHONY: dist-clean

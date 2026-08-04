@@ -13,7 +13,9 @@
 #
 # Optional env:
 #   PACKAGE_TARGET  linux-amd64 (default) or linux-arm64
-#   EDGE_TARGETS    edge binary targets to bundle (default linux-amd64)
+#   ONGRID_BUNDLE_EDGE_ASSETS=1 restores legacy embedded Edge binaries
+#   ONGRID_EDGE_DEPS_TAG immutable CNB Release tag for public dependencies
+#   EDGE_TARGETS    legacy embedded Edge targets (default linux-amd64)
 #   ONGRID_BUNDLE_EMBEDDING_MODEL=0 omits the local embedding model
 #
 # The script is tolerant of missing deploy/install/* files: it warns and
@@ -175,11 +177,13 @@ if [[ "$BUNDLE_EMB" == "1" ]]; then
     fi
 fi
 
-# --- edge binaries -----------------------------------------------------------
-# Edges are amd64-only in our deployments, so both compatibility-named server
-# packages carry the same linux/amd64 Edge payload. Override EDGE_TARGETS to
-# bundle more Edge architectures when the deployment policy changes.
+# --- optional legacy embedded edge binaries ---------------------------------
+# Default packages intentionally contain no large Edge/plugin binaries. The
+# installer downloads checksum-verified CNB Release attachments instead. The opt-in
+# remains for air-gapped/private rebuilds and keeps the old file layout intact.
 EDGE_TARGETS="${EDGE_TARGETS:-linux-amd64}"
+BUNDLE_EDGE_ASSETS="${ONGRID_BUNDLE_EDGE_ASSETS:-0}"
+if [[ "$BUNDLE_EDGE_ASSETS" == "1" ]]; then
 for target in ${EDGE_TARGETS}; do
     src="${REPO_ROOT}/bin/${target}/ongrid-edge"
     dst="${STAGE_DIR}/edge/ongrid-edge-${target}"
@@ -270,6 +274,14 @@ for exporter in mysqld_exporter postgres_exporter redis_exporter mongodb_exporte
         fi
     done
 done
+else
+    : "${ONGRID_EDGE_DEPS_TAG:?ONGRID_EDGE_DEPS_TAG is required for a thin package}"
+    printf 'ONGRID_EDGE_DEPS_TAG=%s\n' "$ONGRID_EDGE_DEPS_TAG" \
+        > "${STAGE_DIR}/edge/edge-artifacts.env"
+    chmod 0644 "${STAGE_DIR}/edge/edge-artifacts.env"
+    log "  edge binaries: direct CNB Release attachments (not embedded)"
+    log "  + edge/edge-artifacts.env"
+fi
 
 # --- loki config (ADR-012) --------------------------------------------------
 copy_opt "${REPO_ROOT}/deploy/install/loki-config.yaml" \
@@ -311,15 +323,13 @@ copy_opt "${REPO_ROOT}/deploy/install/apply-pending-upgrade.sh" \
 # the loose binaries already staged in edge/.
 copy_opt "${REPO_ROOT}/deploy/install/edge/build-edge-bundle.sh" \
          "${STAGE_DIR}/edge/build-edge-bundle.sh" 755
+copy_opt "${REPO_ROOT}/deploy/install/edge/fetch-edge-assets.sh" \
+         "${STAGE_DIR}/edge/fetch-edge-assets.sh" 755
 
 # --- edge bundle for ADR-024 one-button upgrade -----------------------------
-# We deliberately do NOT pack edge-bundle-<arch>-<version>.tar.gz into the
-# release tarball anymore. Those bundles are byte-for-byte copies of the loose
-# linux binaries already staged above, and being pre-gzipped they added
-# ~120 MB+ of incompressible payload to every release (they are still published
-# as standalone GitHub release assets by `make build-edge-bundle`).
-# install.sh / upgrade.sh now reassemble it on the manager host via
-# edge/build-edge-bundle.sh after extracting STAGE_DIR/edge/* to
+# We do not pack edge-bundle-<arch>-<version>.tar.gz into the release tarball.
+# install.sh / upgrade.sh first verify the CNB downloads, then
+# reassemble the compatibility bundle via edge/build-edge-bundle.sh under
 # /opt/ongrid/edge/, where docker-compose bind-mounts it into ongrid-web's
 # nginx html and it is served from /edge/ exactly as before.
 

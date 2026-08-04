@@ -161,6 +161,9 @@ ensure_host_gateway_env() {
 
 on_error() {
     local exit_code=$?
+    if [[ -n "${EDGE_STAGE_DIR:-}" && -d "${EDGE_STAGE_DIR:-}" ]]; then
+        rm -rf "$EDGE_STAGE_DIR"
+    fi
     log_error "install failed at line $1 (exit $exit_code)"
     log_error "check output above; fix and re-run sudo ./install.sh"
 }
@@ -345,6 +348,48 @@ INSTALL_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
 log_info "install dir: $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 
+EDGE_ASSET_VERSION=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION" 2>/dev/null || true)
+if [[ -z "$EDGE_ASSET_VERSION" ]]; then
+    EDGE_ASSET_VERSION=$(grep -E '^ONGRID_VERSION=' "$SCRIPT_DIR/.env.example" | cut -d= -f2- | tr -d '[:space:]' || true)
+fi
+[[ -n "$EDGE_ASSET_VERSION" ]] || { log_error "cannot determine Edge asset version"; exit 1; }
+
+# Prepare the complete Edge tree on the same filesystem before replacing the
+# served directory. Legacy/offline packages that embed binaries still work;
+# thin packages download direct CNB Release files and verify their checksums.
+EDGE_STAGE_DIR=""
+prepare_edge_assets() {
+    local source_dir="$SCRIPT_DIR/edge" edge_bin edge_arch
+    [[ -d "$source_dir" ]] || return 0
+
+    EDGE_STAGE_DIR=$(mktemp -d "$INSTALL_DIR/.edge-stage.XXXXXX")
+    cp -rf "$source_dir/." "$EDGE_STAGE_DIR/"
+    find "$EDGE_STAGE_DIR" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
+
+    local embedded=0
+    for edge_bin in "$EDGE_STAGE_DIR"/ongrid-edge-linux-*; do
+        if [[ -f "$edge_bin" ]]; then embedded=1; break; fi
+    done
+    if (( embedded == 0 )); then
+        [[ -x "$EDGE_STAGE_DIR/fetch-edge-assets.sh" ]] || {
+            log_error "thin package is missing edge/fetch-edge-assets.sh"
+            return 1
+        }
+        log_info "prefetching checksum-verified Edge assets from CNB"
+        "$EDGE_STAGE_DIR/fetch-edge-assets.sh" "$EDGE_STAGE_DIR" "$EDGE_ASSET_VERSION"
+    else
+        log_info "using Edge binaries embedded by an offline/legacy package"
+    fi
+
+    for edge_bin in "$EDGE_STAGE_DIR"/ongrid-edge-linux-*; do
+        [[ -f "$edge_bin" ]] || continue
+        edge_arch="${edge_bin##*/ongrid-edge-}"
+        "$EDGE_STAGE_DIR/build-edge-bundle.sh" "$EDGE_STAGE_DIR" "$EDGE_ASSET_VERSION" "$edge_arch"
+    done
+}
+
+prepare_edge_assets
+
 # ---------- copy assets ----------
 log_info "copying assets into $INSTALL_DIR"
 cp -f "$SCRIPT_DIR/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml"
@@ -391,30 +436,21 @@ if [[ -d "$SCRIPT_DIR/searxng" ]]; then
     mkdir -p "$INSTALL_DIR/searxng"
     cp -rf "$SCRIPT_DIR/searxng/." "$INSTALL_DIR/searxng/"
 fi
-if [[ -d "$SCRIPT_DIR/edge" ]]; then
-    mkdir -p "$INSTALL_DIR/edge"
-    cp -rf "$SCRIPT_DIR/edge/." "$INSTALL_DIR/edge/"
-    find "$INSTALL_DIR/edge" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
-    # Rebuild the ADR-024 one-button upgrade bundle from the loose edge
-    # binaries we just staged. The release tarball no longer double-packs a
-    # pre-built copy (it duplicated these same binaries at ~120 MB of
-    # incompressible payload); nginx serves the reassembled file from /edge/
-    # unchanged. Best-effort: a failure here only disables one-button edge
-    # upgrade until the next install, so warn and continue.
-    _edge_ver=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION" 2>/dev/null || true)
-    if [[ -x "$INSTALL_DIR/edge/build-edge-bundle.sh" && -n "$_edge_ver" ]]; then
-        # Build a bundle only for the edge arch(es) actually staged. The package
-        # may ship amd64-only (see EDGE_TARGETS in package.sh / EDGE_PLUGIN_ARCHES
-        # in the Makefile), so we glob the present ongrid-edge-linux-* binaries
-        # instead of assuming both arches — otherwise the host-side rebuild warns
-        # loudly about the arm64 binaries we deliberately didn't ship.
-        for _edge_bin in "$INSTALL_DIR"/edge/ongrid-edge-linux-*; do
-            [[ -f "$_edge_bin" ]] || continue   # no-match glob stays literal; skip
-            _edge_arch="${_edge_bin##*/ongrid-edge-}"   # ongrid-edge-linux-amd64 -> linux-amd64
-            "$INSTALL_DIR/edge/build-edge-bundle.sh" "$INSTALL_DIR/edge" "$_edge_ver" "$_edge_arch" \
-                || log_warn "edge upgrade bundle rebuild failed for $_edge_arch; one-button edge upgrade disabled for that arch until next install"
-        done
+if [[ -n "$EDGE_STAGE_DIR" ]]; then
+    EDGE_BACKUP_DIR=""
+    if [[ -d "$INSTALL_DIR/edge" ]]; then
+        EDGE_BACKUP_DIR=$(mktemp -d "$INSTALL_DIR/.edge-backup.XXXXXX")
+        mv "$INSTALL_DIR/edge" "$EDGE_BACKUP_DIR/edge"
     fi
+    if ! mv "$EDGE_STAGE_DIR" "$INSTALL_DIR/edge"; then
+        if [[ -n "$EDGE_BACKUP_DIR" && -d "$EDGE_BACKUP_DIR/edge" ]]; then
+            mv "$EDGE_BACKUP_DIR/edge" "$INSTALL_DIR/edge"
+        fi
+        log_error "could not atomically install the prepared Edge assets"
+        exit 1
+    fi
+    EDGE_STAGE_DIR=""
+    [[ -z "$EDGE_BACKUP_DIR" ]] || rm -rf "$EDGE_BACKUP_DIR"
 fi
 
 # ---------- host data dirs (bind-mount targets) ----------

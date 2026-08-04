@@ -1,0 +1,45 @@
+$:
+  tag_push:
+    - docker:
+        image: golang:1.25-bookworm
+      stages:
+        - name: Build direct Edge attachments
+          script: |
+            set -euo pipefail
+            apt-get update
+            apt-get install -y --no-install-recommends curl xz-utils unzip
+            version=$(tr -d '[:space:]' < VERSION)
+            deps_tag=$(make --no-print-directory edge-deps-tag)
+            case "$CNB_BRANCH" in
+              "$deps_tag") make build-edge-deps-attachments ;;
+              v*)
+                test "$CNB_BRANCH" = "$version" || {
+                  echo "VERSION ($version) must match release tag ($CNB_BRANCH)" >&2
+                  exit 2
+                }
+                for target in linux-amd64 linux-arm64; do
+                  curl -fsSIL -o /dev/null \
+                    "https://cnb.cool/ongridio/ongrid-edge/-/releases/download/$deps_tag/edge-deps-$target.tar.xz" || {
+                    echo "publish the immutable dependency Release $deps_tag first" >&2
+                    exit 2
+                  }
+                done
+                make build-edge-version-attachments
+                ;;
+              *)
+                echo "unsupported Edge attachment tag: $CNB_BRANCH" >&2
+                exit 2
+                ;;
+            esac
+        - name: Create CNB Release
+          type: git:release
+          options:
+            overlying: true
+            title: Edge assets $CNB_BRANCH
+            description: Checksum-verified direct downloads for Ongrid Edge installation.
+            latest: false
+        - name: Upload CNB Release attachments
+          image: cnbcool/attachments:latest
+          settings:
+            attachments:
+              - ./dist/out/edge-attachments/*

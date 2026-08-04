@@ -205,7 +205,46 @@ preflight_runtime_images() {
     done <<<"$images"
 }
 
-trap 'log_error "upgrade failed at line $LINENO"' ERR
+EDGE_STAGE_DIR=""
+EDGE_BACKUP_DIR=""
+prepare_edge_assets() {
+    local source_dir="$SCRIPT_DIR/edge" edge_bin edge_arch
+    [[ -d "$source_dir" ]] || return 0
+
+    EDGE_STAGE_DIR=$(mktemp -d "$INSTALL_DIR/.edge-stage.XXXXXX")
+    cp -rf "$source_dir/." "$EDGE_STAGE_DIR/"
+    find "$EDGE_STAGE_DIR" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
+
+    local embedded=0
+    for edge_bin in "$EDGE_STAGE_DIR"/ongrid-edge-linux-*; do
+        if [[ -f "$edge_bin" ]]; then embedded=1; break; fi
+    done
+    if (( embedded == 0 )); then
+        [[ -x "$EDGE_STAGE_DIR/fetch-edge-assets.sh" ]] || {
+            log_error "thin package is missing edge/fetch-edge-assets.sh"
+            return 1
+        }
+        log_info "prefetching checksum-verified Edge assets before stopping the old stack"
+        "$EDGE_STAGE_DIR/fetch-edge-assets.sh" "$EDGE_STAGE_DIR" "$NEW_VERSION"
+    else
+        log_info "using Edge binaries embedded by an offline/legacy package"
+    fi
+
+    for edge_bin in "$EDGE_STAGE_DIR"/ongrid-edge-linux-*; do
+        [[ -f "$edge_bin" ]] || continue
+        edge_arch="${edge_bin##*/ongrid-edge-}"
+        "$EDGE_STAGE_DIR/build-edge-bundle.sh" "$EDGE_STAGE_DIR" "$NEW_VERSION" "$edge_arch"
+    done
+}
+
+on_upgrade_error() {
+    local exit_code=$? line=$1
+    if [[ -n "${EDGE_STAGE_DIR:-}" && -d "${EDGE_STAGE_DIR:-}" ]]; then
+        rm -rf "$EDGE_STAGE_DIR"
+    fi
+    log_error "upgrade failed at line $line (exit $exit_code)"
+}
+trap 'on_upgrade_error $LINENO' ERR
 
 UPGRADE_ARGS=("$@")
 MIGRATE_VOLUMES="${MIGRATE_VOLUMES:-}"
@@ -275,6 +314,11 @@ if [[ -n "$CONFIGURED_PUBLIC_URL" ]] && ! ongrid_is_valid_public_url "$CONFIGURE
     log_error "correct it before retrying; the existing stack was not stopped"
     exit 1
 fi
+
+# Download, extract, and checksum the Edge payload while the current service is
+# still online. A network, architecture, or checksum failure therefore leaves
+# both the running stack and the currently served /edge directory untouched.
+prepare_edge_assets
 
 # Validate the new Compose model and pull every exact image before stopping the
 # existing stack. Registry or manifest failures therefore leave the old version
@@ -491,26 +535,19 @@ if [[ -d "$SCRIPT_DIR/grafana" ]]; then
     mkdir -p "$INSTALL_DIR/grafana"
     cp -rf "$SCRIPT_DIR/grafana/." "$INSTALL_DIR/grafana/"
 fi
-if [[ -d "$SCRIPT_DIR/edge" ]]; then
-    rm -rf "$INSTALL_DIR/edge"
-    mkdir -p "$INSTALL_DIR/edge"
-    cp -rf "$SCRIPT_DIR/edge/." "$INSTALL_DIR/edge/"
-    find "$INSTALL_DIR/edge" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
-    # Reassemble the ADR-024 one-button upgrade bundle from the loose edge
-    # binaries (no longer double-packed in the tarball — see install.sh /
-    # deploy/install/edge/build-edge-bundle.sh). Best-effort; warn on failure.
-    if [[ -x "$INSTALL_DIR/edge/build-edge-bundle.sh" && -n "$NEW_VERSION" ]]; then
-        # Only rebuild for the edge arch(es) actually staged. v0.9.0+ ships
-        # amd64-only edge binaries (EDGE_TARGETS in package.sh), so glob the
-        # present ongrid-edge-linux-* instead of assuming both arches —
-        # otherwise upgrade warns about the arm64 binaries we didn't ship.
-        for _edge_bin in "$INSTALL_DIR"/edge/ongrid-edge-linux-*; do
-            [[ -f "$_edge_bin" ]] || continue   # no-match glob stays literal; skip
-            _edge_arch="${_edge_bin##*/ongrid-edge-}"   # ongrid-edge-linux-amd64 -> linux-amd64
-            "$INSTALL_DIR/edge/build-edge-bundle.sh" "$INSTALL_DIR/edge" "$NEW_VERSION" "$_edge_arch" \
-                || log_warn "edge upgrade bundle rebuild failed for $_edge_arch; one-button edge upgrade unavailable for that arch until next upgrade"
-        done
+if [[ -n "$EDGE_STAGE_DIR" ]]; then
+    if [[ -d "$INSTALL_DIR/edge" ]]; then
+        EDGE_BACKUP_DIR=$(mktemp -d "$INSTALL_DIR/.edge-backup.XXXXXX")
+        mv "$INSTALL_DIR/edge" "$EDGE_BACKUP_DIR/edge"
     fi
+    if ! mv "$EDGE_STAGE_DIR" "$INSTALL_DIR/edge"; then
+        if [[ -n "$EDGE_BACKUP_DIR" && -d "$EDGE_BACKUP_DIR/edge" ]]; then
+            mv "$EDGE_BACKUP_DIR/edge" "$INSTALL_DIR/edge"
+        fi
+        log_error "could not atomically install the prepared Edge assets"
+        exit 1
+    fi
+    EDGE_STAGE_DIR=""
 fi
 
 # Bump ONGRID_VERSION in .env only.
@@ -640,6 +677,14 @@ if [[ $HEALTH_OK -eq 1 ]]; then
             | xargs -r docker rmi 2>&1 | grep -v "image is being used" || true
     done
 
+    # The replacement was fully prepared before downtime. Once the new stack
+    # is healthy the old served Edge tree is no longer needed; verified direct
+    # downloads remain in /var/cache/ongrid for later installs/upgrades.
+    if [[ -n "$EDGE_BACKUP_DIR" && -d "$EDGE_BACKUP_DIR" ]]; then
+        rm -rf "$EDGE_BACKUP_DIR"
+        EDGE_BACKUP_DIR=""
+    fi
+
     # (3) Cap release tarballs in $INSTALL_DIR — keep the two newest
     # (so operators can roll back one version) and drop the rest.
     # Match both the legacy .tar.gz and the current .tar.xz (release packages
@@ -657,6 +702,10 @@ if [[ $HEALTH_OK -eq 1 ]]; then
         done
 
     log_info "disk now: $(df -h "$INSTALL_DIR" | awk 'NR==2 {print $4 " free of " $2}')"
+fi
+
+if [[ $HEALTH_OK -eq 0 && -n "$EDGE_BACKUP_DIR" ]]; then
+    log_warn "previous Edge assets retained at $EDGE_BACKUP_DIR for manual rollback"
 fi
 
 echo ""

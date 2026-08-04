@@ -31,8 +31,9 @@ ongrid-v<VERSION>-linux-<arch>/
   prometheus.yml         (Compose scrape config)
   embeddings/            (optional bundled local embedding model)
   edge/
-    ongrid-edge-linux-amd64
-    bundled plugin binaries
+    fetch-edge-assets.sh
+    edge-artifacts.env   (immutable public dependency Release tag)
+    build-edge-bundle.sh
     install-edge.sh
     ongrid-edge.env.example
     ongrid-edge.service
@@ -41,14 +42,16 @@ ongrid-v<VERSION>-linux-<arch>/
 The package supports Compose installation only and does not embed image
 tarballs or Manager systemd binaries. `install.sh` renders the production
 Compose model, pulls every exact image from `docker.cnb.cool/ongridio/ongrid`,
-then runs `docker compose up -d`. Edge binaries remain bundled for device
-installation and one-button upgrades.
+then runs `docker compose up -d`. Before changing the served `/edge` tree, the
+installer downloads checksum-verified third-party dependencies and the current
+`ongrid-edge` binary directly from CNB Release attachments. Set
+`ONGRID_BUNDLE_EDGE_ASSETS=1` only for an intentionally offline package.
 
 ## Release flow
 
-1. Bump the version: edit `VERSION` at the repo root (e.g. `v0.1.1`), commit
-   the change, then tag that commit with the same value:
-   `git tag v0.1.1 && git push origin v0.1.1`.
+1. Bump the version in `VERSION`, commit the change, and push the matching tag
+   to GitHub. The `Release` GitHub Actions workflow publishes runtime images,
+   the Helm chart, and both thin server packages.
 2. The `Release` GitHub Actions workflow runs on `v*.*.*` tag pushes and
    publishes the multi-architecture manager, Web, and Kubernetes Edge images
    plus the matching Helm chart before building both server packages. The chart is published as an
@@ -59,13 +62,31 @@ installation and one-button upgrades.
    - `docker-push-release-images` — publish manager, Web, and Edge amd64/arm64 images to CNB
    - `verify-release-images` — verify both architectures exist on all three image manifests
    - `publish-k8s-chart` — package and publish the version-matched Helm chart
-   - `build-edge-all`    — cross-compile ongrid-edge for 4 targets
-   - `package`           — stage Compose install assets and Edge binaries
+   - `package` — stage the thin Compose install assets without Edge binaries
    - stage everything under `dist/stage/ongrid-<VERSION>-linux-<arch>/`
    - emit the amd64/arm64 tarballs + sha256 files under `dist/out/`
-3. Ship the matching package, for example:
+3. Mirror the release commit to the CNB code repository and push attachment
+   tags there. `.cnb.yml` creates the CNB Release and uploads direct files:
+
+   ```bash
+   # Run the dependency tag only when `make edge-deps-tag` changes or is absent.
+   deps_tag=$(make --no-print-directory edge-deps-tag)
+   git tag "$deps_tag"
+   git push cnb "$deps_tag"
+
+   # Run for every Ongrid release; VERSION and tag must match.
+   version=$(cat VERSION)
+   git push cnb "$version"
+   ```
+
+   The dependency Release contains two archives and is reused across Ongrid
+   versions. The version Release contains only two `ongrid-edge` binaries and
+   their checksums. For an already-created CNB Release, a maintainer can instead
+   run `CNB_TOKEN=... make publish-edge-attachments`; the token needs
+   `repo-contents` read/write permission.
+4. Ship the matching package, for example:
    `scp dist/out/ongrid-v<VERSION>-linux-<arch>.tar.xz user@host:~/`.
-4. On the target: untar, `sudo ./install.sh`.
+5. On the target: untar, `sudo ./install.sh`.
 
 ## Checksum
 
@@ -100,5 +121,5 @@ ls -R
   `docker-compose.yml`. Owned by the install-agent.
 - `deploy/Dockerfile.*`, `deploy/docker-compose.yml` — build contexts and dev
   compose file.
-- Static third-party runtime images are mirrored out of band; this release
-  pipeline only pushes the project's manager, Web, and Edge images.
+- Edge public dependencies are immutable CNB Release attachments. Their tag
+  changes only when the component versions or archive layout changes.

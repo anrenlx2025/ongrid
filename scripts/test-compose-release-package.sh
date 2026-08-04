@@ -34,6 +34,7 @@ stage="$tmp_dir/stage/ongrid-vtest-linux-amd64"
 out="$tmp_dir/out"
 PACKAGE_TARGET=linux-amd64 \
 EDGE_TARGETS=linux-test \
+ONGRID_EDGE_DEPS_TAG=edge-deps-test \
 ONGRID_BUNDLE_EMBEDDING_MODEL=0 \
   bash "$repo_root/dist/package.sh" vtest "$stage" "$out" \
     >"$tmp_dir/package.log" 2>&1 || {
@@ -52,19 +53,27 @@ for required in \
   ongrid-vtest-linux-amd64/public-url.sh \
   ongrid-vtest-linux-amd64/data-permissions.sh \
   ongrid-vtest-linux-amd64/docker-compose.yml \
-  ongrid-vtest-linux-amd64/prometheus.yml; do
+  ongrid-vtest-linux-amd64/prometheus.yml \
+  ongrid-vtest-linux-amd64/edge/fetch-edge-assets.sh \
+  ongrid-vtest-linux-amd64/edge/build-edge-bundle.sh \
+  ongrid-vtest-linux-amd64/edge/edge-artifacts.env; do
   grep -Fxq "$required" "$tmp_dir/archive.list"
 done
 
 mkdir -p "$tmp_dir/extracted"
 tar -xf "$archive" -C "$tmp_dir/extracted"
+grep -Fxq 'ONGRID_EDGE_DEPS_TAG=edge-deps-test' \
+  "$tmp_dir/extracted/ongrid-vtest-linux-amd64/edge/edge-artifacts.env"
 bash "$tmp_dir/extracted/ongrid-vtest-linux-amd64/install.sh" --help >/dev/null
 bash "$tmp_dir/extracted/ongrid-vtest-linux-amd64/upgrade.sh" --help >/dev/null
 
 for forbidden in \
   ongrid-vtest-linux-amd64/bin/ \
   ongrid-vtest-linux-amd64/systemd/ \
-  ongrid-vtest-linux-amd64/prometheus/prometheus.yml; do
+  ongrid-vtest-linux-amd64/prometheus/prometheus.yml \
+  ongrid-vtest-linux-amd64/edge/ongrid-edge-linux-test \
+  ongrid-vtest-linux-amd64/edge/promtail-linux-test \
+  ongrid-vtest-linux-amd64/edge/otelcol-contrib-linux-test; do
   if grep -Fq "$forbidden" "$tmp_dir/archive.list"; then
     echo "release package contains removed path: $forbidden" >&2
     exit 1
