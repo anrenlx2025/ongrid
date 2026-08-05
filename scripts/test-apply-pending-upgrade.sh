@@ -19,6 +19,7 @@ run_hook() {
   ONGRID_EDGE_UPGRADE_STAGE_DIR="$stage" \
   ONGRID_EDGE_UPGRADE_BIN_DIR="$bin_dir" \
   ONGRID_EDGE_UPGRADE_LIB_DIR="$lib_dir" \
+  ONGRID_EDGE_UPGRADE_LEGACY_TARGET="$bin_dir/ongrid-edge" \
     bash "$hook"
 }
 
@@ -84,5 +85,17 @@ run_hook
 grep -Fxq new-agent "$bin_dir/ongrid-edge"
 test -d "$lib_dir/not-a-file"
 test ! -e "$stage/incoming"
+
+# A stale legacy single-file payload must never overwrite a newer whole-bundle
+# Agent after the bundle's remaining plugins have already been swapped.
+rmdir "$lib_dir/not-a-file"
+write_bundle v4 bundle-agent bundle-plugin
+printf 'stale-legacy-agent\n' > "$stage/pending"
+sha256_file "$stage/pending" > "$stage/pending.sha256"
+run_hook
+grep -Fxq bundle-agent "$bin_dir/ongrid-edge"
+grep -Fxq bundle-plugin "$lib_dir/plugin"
+test ! -e "$stage/pending"
+test ! -e "$stage/pending.sha256"
 
 echo "apply-pending-upgrade tests passed"

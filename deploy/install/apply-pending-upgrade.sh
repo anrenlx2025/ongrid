@@ -44,7 +44,7 @@ TARGET_BIN_DIR=${ONGRID_EDGE_UPGRADE_BIN_DIR:-/usr/local/bin}
 TARGET_LIB_DIR=${ONGRID_EDGE_UPGRADE_LIB_DIR:-/usr/local/lib/ongrid-edge}
 
 # Legacy single-file paths (kept for back-compat — see mode 3 below).
-LEGACY_TARGET=/usr/local/bin/ongrid-edge
+LEGACY_TARGET=${ONGRID_EDGE_UPGRADE_LEGACY_TARGET:-/usr/local/bin/ongrid-edge}
 LEGACY_PENDING=$STAGE_DIR/pending
 LEGACY_PENDING_SHA=$STAGE_DIR/pending.sha256
 LEGACY_PREVIOUS=$STAGE_DIR/previous
@@ -311,11 +311,16 @@ apply_legacy() {
   log "legacy apply: applied pending single-file upgrade"
 }
 
-# Run mode 1 first. If it touched anything (rolled back), skip mode 2 so
-# the rollback effect lands cleanly on the next boot. Mode 3 runs
-# unconditionally since the two staging dirs don't overlap.
+# Run mode 1 first. If it touched anything (rolled back), do not apply another
+# payload during the same boot. A whole bundle supersedes the legacy single-
+# file staging path: applying both would replace the freshly upgraded Agent
+# with a stale pending binary while leaving the new plugins in place.
 if maybe_rollback; then
-  apply_bundle
+  if [[ -f $MANIFEST ]]; then
+    apply_bundle
+    rm -f "$LEGACY_PENDING" "$LEGACY_PENDING_SHA"
+  else
+    apply_legacy
+  fi
 fi
-apply_legacy
 exit 0
