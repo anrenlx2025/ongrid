@@ -697,13 +697,59 @@ describe("EdgesPage", () => {
 
     await screen.findAllByText("core-switch");
     const table = screen.getByRole("table");
-    expect(table).toHaveClass("w-full", "min-w-[1400px]", "table-auto");
+    expect(table).toHaveClass("w-full", "min-w-[1140px]", "table-fixed");
     expect(table.querySelectorAll("col")).toHaveLength(11);
     expect(screen.queryByRole("button", { name: "网络发现" })).not.toBeInTheDocument();
+    expect(screen.queryByText("WebSSH 会话")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批量安装设备" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "新建设备" })).not.toBeInTheDocument();
     expect(await screen.findByText("Ongrid Labs · VirtualSwitch 24")).toBeInTheDocument();
     expect(screen.getByText("b2:94:4a:34:5b:fb")).toBeInTheDocument();
     expect(screen.getByText("可达")).toBeInTheDocument();
     expect(screen.getByText("scanner-host")).toBeInTheDocument();
+  });
+
+  it("网络发现页只统计等待校验的候选并隐藏主机操作", async () => {
+    server.use(
+      http.get("/api/v1/network-discovery/candidates", () =>
+        HttpResponse.json({
+          items: [
+            {
+              id: 1,
+              source: "arp",
+              ip_address: "10.20.0.1",
+              status: "candidate",
+              observer_edge_id: 9,
+              observer_host_name: "scanner-host",
+              confidence: 20,
+            },
+            {
+              id: 2,
+              source: "snmp",
+              ip_address: "10.20.0.2",
+              status: "promoted",
+              promoted_device_id: 140,
+              observer_edge_id: 9,
+              observer_host_name: "scanner-host",
+              confidence: 100,
+            },
+          ],
+          total: 2,
+        }),
+      ),
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/devices?view=network-discovery"]}>
+        <EdgesPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "网络发现" })).toBeInTheDocument();
+    expect(screen.getByText("1 个候选等待 SNMP 校验")).toBeInTheDocument();
+    expect(screen.queryByText("WebSSH 会话")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批量安装设备" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "新建设备" })).not.toBeInTheDocument();
   });
 });
 

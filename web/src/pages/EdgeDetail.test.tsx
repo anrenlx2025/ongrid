@@ -193,6 +193,19 @@ describe('EdgeDetailPage network device layout', () => {
     expect(await screen.findByText('eth0')).toBeInTheDocument();
     expect(screen.getByText('02:42:ac:14:00:03')).toBeInTheDocument();
   });
+
+  it('从查询参数直接打开网络拓扑页签', async () => {
+    render(
+      <MemoryRouter initialEntries={['/devices/140?tab=topology']}>
+        <Routes>
+          <Route path="/devices/:edgeId" element={<EdgeDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('ongrid-netdev-b');
+    expect(screen.getByRole('button', { name: '拓扑' })).toHaveClass('border-zinc-100');
+  });
 });
 
 describe('findNearestTooltipEntry', () => {

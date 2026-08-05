@@ -547,10 +547,35 @@ function NetworkDevicePage({
   onBack(): void;
 }) {
   const { tr } = useI18n();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [tab, setTab] = useState<NetworkTab>('overview');
   const interfaces = detail?.interfaces ?? [];
   const scanner = detail?.scanner_host_name || detail?.scanner_edge_name;
   const reachable = detail?.reachability_status === 'reachable';
+
+  useEffect(() => {
+    const requested = new URLSearchParams(location.search).get('tab');
+    if (
+      requested === 'overview' ||
+      requested === 'interfaces' ||
+      requested === 'topology' ||
+      requested === 'meta'
+    ) {
+      setTab(requested);
+    }
+  }, [location.search]);
+
+  const selectTab = (next: NetworkTab) => {
+    setTab(next);
+    const params = new URLSearchParams(location.search);
+    if (next === 'overview') params.delete('tab');
+    else params.set('tab', next);
+    navigate(
+      { pathname: location.pathname, search: params.toString() },
+      { replace: true },
+    );
+  };
 
   return (
     <main className="anim-fade flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -590,10 +615,10 @@ function NetworkDevicePage({
       </header>
 
       <div className="flex items-center gap-1 border-b border-zinc-800 px-6">
-        <TabBtn active={tab === 'overview'} onClick={() => setTab('overview')} label={tr('概览', 'Overview')} />
-        <TabBtn active={tab === 'interfaces'} onClick={() => setTab('interfaces')} label={tr('接口', 'Interfaces')} />
-        <TabBtn active={tab === 'topology'} onClick={() => setTab('topology')} label={tr('拓扑', 'Topology')} />
-        <TabBtn active={tab === 'meta'} onClick={() => setTab('meta')} label={tr('元数据', 'Metadata')} />
+        <TabBtn active={tab === 'overview'} onClick={() => selectTab('overview')} label={tr('概览', 'Overview')} />
+        <TabBtn active={tab === 'interfaces'} onClick={() => selectTab('interfaces')} label={tr('接口', 'Interfaces')} />
+        <TabBtn active={tab === 'topology'} onClick={() => selectTab('topology')} label={tr('拓扑', 'Topology')} />
+        <TabBtn active={tab === 'meta'} onClick={() => selectTab('meta')} label={tr('元数据', 'Metadata')} />
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-5">

@@ -280,6 +280,7 @@ export default function EdgesPage() {
     [location.search],
   );
   const headerTitle = (() => {
+    if (discoveryView) return tr("网络发现", "Network discovery");
     const pair = ROLE_FILTER_TITLES[rolesFilter];
     return pair ? tr(pair[0], pair[1]) : tr("设备", "Devices");
   })();
@@ -333,6 +334,10 @@ export default function EdgesPage() {
   // True while any batch RPC is in flight (disables the toolbar buttons).
   const [batchBusy, setBatchBusy] = useState(false);
   const [snmpTarget, setSnmpTarget] = useState<NetworkDiscoveryCandidate | null>(null);
+  const pendingCandidateCount = candidates.filter(
+    (candidate) =>
+      !candidate.promoted_device_id && candidate.status !== "promoted",
+  ).length;
 
   const refresh = useCallback(async () => {
     try {
@@ -708,10 +713,11 @@ export default function EdgesPage() {
             </h1>
             <p className="mt-0.5 text-xs text-zinc-500">
               {discoveryView
-                ? tr(`${candidates.length} 个候选 · 等待 SNMP 校验`, `${candidates.length} candidates · waiting for SNMP verification`)
+                ? tr(`${pendingCandidateCount} 个候选等待 SNMP 校验`, `${pendingCandidateCount} candidates awaiting SNMP verification`)
                 : tr(`${devices.length} 台设备 · 每 10 秒自动刷新`, `${devices.length} device(s) · auto-refresh every 10s`)}
             </p>
           </div>
+          {!discoveryView && rolesFilter !== "network" && (
           <div className="flex items-center gap-2">
             <Link
               to="/edges/shell-sessions"
@@ -724,7 +730,6 @@ export default function EdgesPage() {
               <TerminalSquare size={12} />{" "}
               {tr("WebSSH 会话", "WebSSH sessions")}
             </Link>
-            {!discoveryView && (
               <>
                 <button
                   type="button"
@@ -744,8 +749,8 @@ export default function EdgesPage() {
                   <Plus size={12} /> {tr("新建", "New")}
                 </button>
               </>
-            )}
           </div>
+          )}
         </header>
 
         <div className="min-w-0 flex-1 overflow-y-auto px-6 py-6">
@@ -818,23 +823,23 @@ export default function EdgesPage() {
               className={cn(
                 "min-w-full text-xs",
                 compactNetworkTable
-                  ? "w-full min-w-[1400px] table-auto"
+                  ? "w-full min-w-[1140px] table-fixed"
                   : "w-[1637px] table-fixed",
               )}
             >
               {compactNetworkTable ? (
                 <colgroup>
-                  <col style={{ width: 40 }} />
-                  <col style={{ width: 60 }} />
-                  <col style={{ width: "calc((100% - 950px) * 0.3)" }} />
-                  <col style={{ width: 120 }} />
-                  <col style={{ width: "calc((100% - 950px) * 0.3)" }} />
+                  <col style={{ width: 35 }} />
+                  <col style={{ width: 45 }} />
                   <col style={{ width: 150 }} />
-                  <col style={{ width: 160 }} />
-                  <col style={{ width: 110 }} />
-                  <col style={{ width: "calc((100% - 950px) * 0.4)" }} />
+                  <col style={{ width: 90 }} />
+                  <col style={{ width: 130 }} />
                   <col style={{ width: 120 }} />
-                  <col style={{ width: 190 }} />
+                  <col style={{ width: 110 }} />
+                  <col style={{ width: 105 }} />
+                  <col style={{ width: 105 }} />
+                  <col style={{ width: 90 }} />
+                  <col style={{ width: 160 }} />
                 </colgroup>
               ) : (
                 <colgroup>
@@ -1630,7 +1635,95 @@ function SNMPScanModal({
           <label className="text-zinc-400">{tr("版本", "Version")}<select value={input.version} onChange={(e) => set("version", e.target.value as "v2c" | "v3")} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100"><option value="v2c">SNMP v2c</option><option value="v3">SNMP v3</option></select></label>
           <label className="text-zinc-400">Port<input type="number" value={input.port ?? 161} onChange={(e) => set("port", Number(e.target.value))} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 font-mono text-zinc-100" /></label>
         </div>
-        {input.version === "v2c" ? <label className="block text-zinc-400">Community<input value={input.community ?? ""} onChange={(e) => set("community", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 font-mono text-zinc-100" /></label> : <div className="grid grid-cols-2 gap-3"><label className="text-zinc-400">Username<input value={input.username ?? ""} onChange={(e) => set("username", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100" /></label><label className="text-zinc-400">Auth protocol<input value={input.auth_protocol ?? "none"} onChange={(e) => set("auth_protocol", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100" /></label><label className="text-zinc-400">Auth secret<input type="password" value={input.auth_secret ?? ""} onChange={(e) => set("auth_secret", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100" /></label><label className="text-zinc-400">Privacy protocol<input value={input.privacy_protocol ?? "none"} onChange={(e) => set("privacy_protocol", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100" /></label><label className="text-zinc-400">Privacy secret<input type="password" value={input.privacy_secret ?? ""} onChange={(e) => set("privacy_secret", e.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100" /></label></div>}
+        {input.version === "v2c" ? (
+          <label className="block text-zinc-400">
+            Community
+            <input
+              value={input.community ?? ""}
+              onChange={(event) => set("community", event.target.value)}
+              className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 font-mono text-zinc-100"
+            />
+          </label>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            <label className="text-zinc-400">
+              Username
+              <input
+                value={input.username ?? ""}
+                onChange={(event) => set("username", event.target.value)}
+                className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100"
+              />
+            </label>
+            <label className="text-zinc-400">
+              {tr("认证协议", "Auth protocol")}
+              <select
+                value={input.auth_protocol ?? "none"}
+                onChange={(event) => {
+                  const authProtocol = event.target.value;
+                  setInput((current) => ({
+                    ...current,
+                    auth_protocol: authProtocol,
+                    ...(authProtocol === "none"
+                      ? {
+                          auth_secret: "",
+                          privacy_protocol: "none",
+                          privacy_secret: "",
+                        }
+                      : {}),
+                  }));
+                }}
+                className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100"
+              >
+                <option value="none">{tr("不认证", "No authentication")}</option>
+                <option value="sha256">SHA-256</option>
+                <option value="sha384">SHA-384</option>
+                <option value="sha512">SHA-512</option>
+                <option value="sha224">SHA-224</option>
+                <option value="sha1">{tr("SHA-1（旧）", "SHA-1 (legacy)")}</option>
+                <option value="md5">{tr("MD5（旧）", "MD5 (legacy)")}</option>
+              </select>
+            </label>
+            {input.auth_protocol && input.auth_protocol !== "none" && (
+              <label className="text-zinc-400">
+                {tr("认证密钥", "Auth secret")}
+                <input
+                  type="password"
+                  value={input.auth_secret ?? ""}
+                  onChange={(event) => set("auth_secret", event.target.value)}
+                  className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100"
+                />
+              </label>
+            )}
+            <label className="text-zinc-400">
+              {tr("隐私协议", "Privacy protocol")}
+              <select
+                value={input.privacy_protocol ?? "none"}
+                disabled={!input.auth_protocol || input.auth_protocol === "none"}
+                onChange={(event) => set("privacy_protocol", event.target.value)}
+                className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <option value="none">{tr("不加密", "No privacy")}</option>
+                <option value="aes128">AES-128</option>
+                <option value="aes256c">AES-256 (Reeder)</option>
+                <option value="aes192c">AES-192 (Reeder)</option>
+                <option value="aes256">AES-256 (Blumenthal)</option>
+                <option value="aes192">AES-192 (Blumenthal)</option>
+                <option value="des">{tr("DES（旧）", "DES (legacy)")}</option>
+              </select>
+            </label>
+            {input.privacy_protocol && input.privacy_protocol !== "none" && (
+              <label className="text-zinc-400">
+                {tr("隐私密钥", "Privacy secret")}
+                <input
+                  type="password"
+                  value={input.privacy_secret ?? ""}
+                  onChange={(event) => set("privacy_secret", event.target.value)}
+                  className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100"
+                />
+              </label>
+            )}
+          </div>
+        )}
       </div>
     </Modal>
   );
