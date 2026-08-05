@@ -31,6 +31,8 @@ import {
   ShipWheel,
   Boxes,
   Network,
+  EyeOff,
+  Settings2,
 } from 'lucide-react';
 import { Avatar } from './Avatar';
 import { AgentBadge } from './AgentBadge';
@@ -46,6 +48,17 @@ import { useIncidentBadge } from '@/store/incidentBadge';
 import { useMe, usePermissions } from '@/store/me';
 import { useChatSessions, invalidateChatSessions } from '@/store/chatSessions';
 import { deleteSession, renameSession, type ChatSession } from '@/api/chat';
+
+type SidebarSectionItem = {
+  key: string;
+  to: string;
+  icon: IconType;
+  iconSize?: number;
+  label: string;
+  exact?: boolean;
+  exactQuery?: boolean;
+  badge?: number;
+};
 
 export function Sidebar() {
   const { sidebarCollapsed, toggleSidebar } = useUi();
@@ -408,24 +421,30 @@ export function Sidebar() {
           <SidebarNavItem to="/knowledge/repos" icon={GitBranch} label={tr('代码仓库', 'Repos')} />
         </NavSection>
 
-        <CollapsibleSection storageKey="resources" title={tr('基础设施', 'Infrastructure')} defaultOpen>
-          <SidebarNavItem to="/devices" icon={HardDrive} label={tr('设备', 'Devices')} exactQuery />
-          <SidebarNavItem to="/clusters" icon={Boxes} label={tr('集群', 'Clusters')} />
-          <SidebarNavItem
-            to="/devices?roles=network"
-            icon={Network}
-            label={tr('网络设备', 'Network devices')}
-          />
-          <SidebarNavItem to="/kubernetes" icon={ShipWheel} iconSize={16} label="Kubernetes" />
-          <SidebarNavItem to="/topology" icon={Share2} label={tr('拓扑', 'Topology')} />
-        </CollapsibleSection>
+        <CollapsibleSection
+          storageKey="resources"
+          title={tr('基础设施', 'Infrastructure')}
+          defaultOpen
+          items={[
+            { key: 'devices', to: '/devices', icon: HardDrive, label: tr('设备', 'Devices'), exactQuery: true },
+            { key: 'clusters', to: '/clusters', icon: Boxes, label: tr('集群', 'Clusters') },
+            { key: 'network-devices', to: '/devices?roles=network', icon: Network, label: tr('网络设备', 'Network devices') },
+            { key: 'kubernetes', to: '/kubernetes', icon: ShipWheel, iconSize: 16, label: 'Kubernetes' },
+            { key: 'topology', to: '/topology', icon: Share2, label: tr('拓扑', 'Topology') },
+          ]}
+        />
 
-        <CollapsibleSection storageKey="observability" title={tr('监控告警', 'Observability')} defaultOpen={false}>
-          <SidebarNavItem to="/monitor" icon={ChartLine} label={tr('监控', 'Monitor')} />
-          <SidebarNavItem to="/logs" icon={FileText} label={tr('日志', 'Logs')} />
-          <SidebarNavItem to="/traces" icon={Waypoints} label={tr('链路', 'Traces')} />
-          <SidebarNavItem to="/alerts" icon={Siren} label={tr('告警', 'Alerts')} badge={incidentOpen} />
-        </CollapsibleSection>
+        <CollapsibleSection
+          storageKey="observability"
+          title={tr('监控告警', 'Observability')}
+          defaultOpen={false}
+          items={[
+            { key: 'monitor', to: '/monitor', icon: ChartLine, label: tr('监控', 'Monitor') },
+            { key: 'logs', to: '/logs', icon: FileText, label: tr('日志', 'Logs') },
+            { key: 'traces', to: '/traces', icon: Waypoints, label: tr('链路', 'Traces') },
+            { key: 'alerts', to: '/alerts', icon: Siren, label: tr('告警', 'Alerts'), badge: incidentOpen },
+          ]}
+        />
 
         <CollapsibleSection storageKey="operations" title={tr('日常', 'Daily')} defaultOpen={false}>
           <SidebarNavItem to="/tasks" icon={CalendarClock} label={tr('任务', 'Tasks')} />
@@ -696,13 +715,18 @@ function CollapsibleSection({
   storageKey,
   title,
   defaultOpen = false,
+  items,
   children,
 }: {
   storageKey: string;
   title: string;
   defaultOpen?: boolean;
-  children: React.ReactNode;
+  items?: SidebarSectionItem[];
+  children?: React.ReactNode;
 }) {
+  const { tr } = useI18n();
+  const manageRef = useRef<HTMLDivElement | null>(null);
+  const [manageOpen, setManageOpen] = useState(false);
   const [open, setOpen] = useState(() => {
     try {
       const raw = localStorage.getItem(`sidebar.section.${storageKey}`);
@@ -713,6 +737,34 @@ function CollapsibleSection({
     }
     return defaultOpen;
   });
+  const [hiddenKeys, setHiddenKeys] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(`sidebar.section.${storageKey}.hidden`);
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed)
+        ? parsed.filter((value): value is string => typeof value === 'string')
+        : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    if (!manageOpen) return;
+    const closeOnOutside = (event: MouseEvent) => {
+      if (!manageRef.current?.contains(event.target as Node)) setManageOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setManageOpen(false);
+    };
+    document.addEventListener('mousedown', closeOnOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [manageOpen]);
+
   const toggle = () => {
     setOpen((prev) => {
       const next = !prev;
@@ -724,23 +776,123 @@ function CollapsibleSection({
       return next;
     });
   };
+  const setItemVisible = (key: string, visible: boolean) => {
+    setHiddenKeys((current) => {
+      const next = visible
+        ? current.filter((itemKey) => itemKey !== key)
+        : current.includes(key)
+          ? current
+          : [...current, key];
+      try {
+        localStorage.setItem(`sidebar.section.${storageKey}.hidden`, JSON.stringify(next));
+      } catch {
+        /* localStorage unavailable */
+      }
+      return next;
+    });
+  };
+  const visibleItems = items?.filter((item) => !hiddenKeys.includes(item.key));
+
   return (
     <div>
-      <button
-        type="button"
-        onClick={toggle}
-        className="group mt-5 flex w-full items-center justify-between px-2 pb-1.5 text-left text-[13px] font-semibold text-zinc-300 transition-colors hover:text-zinc-100"
+      <div
+        ref={manageRef}
+        className="group/section relative mt-5 flex items-center px-2 pb-1.5"
       >
-        <span>{title}</span>
-        <ChevronRight
-          size={11}
-          className={cn(
-            'shrink-0 text-zinc-600 transition-transform duration-150 group-hover:text-zinc-400',
-            open && 'rotate-90',
-          )}
-        />
-      </button>
-      {open && <div className="space-y-0.5">{children}</div>}
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={open}
+          className="min-w-0 flex-1 text-left text-[13px] font-semibold text-zinc-300 transition-colors hover:text-zinc-100"
+        >
+          {title}
+        </button>
+        <div className="pointer-events-none flex items-center gap-0.5 opacity-0 transition-opacity group-hover/section:pointer-events-auto group-hover/section:opacity-100 group-focus-within/section:pointer-events-auto group-focus-within/section:opacity-100">
+          {items ? (
+            <button
+              type="button"
+              onClick={() => setManageOpen((current) => !current)}
+              aria-label={tr(`管理${title}菜单`, `Manage ${title} menu`)}
+              aria-expanded={manageOpen}
+              title={tr('管理菜单', 'Manage menu')}
+              className={cn(
+                'rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300',
+                hiddenKeys.length > 0 && 'text-zinc-400',
+              )}
+            >
+              <Settings2 size={12} />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={toggle}
+            aria-label={open ? tr(`折叠${title}`, `Collapse ${title}`) : tr(`展开${title}`, `Expand ${title}`)}
+            title={open ? tr('折叠', 'Collapse') : tr('展开', 'Expand')}
+            className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
+          >
+            <ChevronRight
+              size={11}
+              className={cn('transition-transform duration-150', open && 'rotate-90')}
+            />
+          </button>
+        </div>
+
+        {manageOpen && items ? (
+          <div
+            role="menu"
+            aria-label={tr(`${title}菜单项`, `${title} menu items`)}
+            className="anim-scale absolute right-1 top-full z-50 mt-1 w-52 rounded-lg bg-zinc-900 p-1.5 shadow-lg ring-1 ring-zinc-800"
+          >
+            <div className="px-2 py-1 text-[11px] font-medium text-zinc-500">
+              {tr('显示的菜单', 'Visible items')}
+            </div>
+            {items.map((item) => (
+              <label
+                key={item.key}
+                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-zinc-300 hover:bg-zinc-800"
+              >
+                <input
+                  type="checkbox"
+                  checked={!hiddenKeys.includes(item.key)}
+                  onChange={(event) => setItemVisible(item.key, event.target.checked)}
+                  className="h-3.5 w-3.5 accent-indigo-600"
+                />
+                <item.icon size={13} className="shrink-0 text-zinc-500" />
+                <span className="truncate">{item.label}</span>
+              </label>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {open ? (
+        <div className="space-y-0.5">
+          {items
+            ? visibleItems?.map((item) => (
+                <div key={item.key} className="group/item relative">
+                  <SidebarNavItem
+                    to={item.to}
+                    icon={item.icon}
+                    iconSize={item.iconSize}
+                    label={item.label}
+                    exact={item.exact}
+                    exactQuery={item.exactQuery}
+                    badge={item.badge}
+                    reserveTrailingAction
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setItemVisible(item.key, false)}
+                    aria-label={tr(`隐藏${item.label}`, `Hide ${item.label}`)}
+                    title={tr('隐藏菜单', 'Hide menu item')}
+                    className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-zinc-600 opacity-0 transition-opacity hover:bg-zinc-700 hover:text-zinc-200 group-hover/item:pointer-events-auto group-hover/item:opacity-100 group-focus-within/item:pointer-events-auto group-focus-within/item:opacity-100"
+                  >
+                    <EyeOff size={12} />
+                  </button>
+                </div>
+              ))
+            : children}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -756,6 +908,7 @@ function SidebarNavItem({
   muted,
   level,
   badge,
+  reserveTrailingAction,
 }: {
   to?: string;
   icon: IconType;
@@ -770,12 +923,14 @@ function SidebarNavItem({
   // badge: optional unread count rendered as a red pill on the right.
   // Hidden when 0 or undefined; capped to "99+" so widths stay sane.
   badge?: number;
+  reserveTrailingAction?: boolean;
 }) {
   const { tr } = useI18n();
   const indentCls = level === 1 ? '' : 'ml-2';
   const baseCls = cn(
     indentCls,
-    'flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] transition-colors'
+    'flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] transition-colors',
+    reserveTrailingAction && 'pr-8',
   );
   const location = useLocation();
   if (disabled || !to) {
