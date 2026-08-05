@@ -20,9 +20,9 @@ import {
   TerminalSquare,
   ShieldCheck,
   Network,
-  Boxes,
   HardDrive,
   Server,
+  ShipWheel,
 } from "lucide-react";
 import { StatusPill } from "@/components/StatusPill";
 import { Modal } from "@/components/Modal";
@@ -243,9 +243,9 @@ function DeviceTypeIcon({
     return (
       <span
         title={tr("Kubernetes 设备", "Kubernetes device")}
-        className="text-emerald-400"
+        className="text-sky-400"
       >
-        <Boxes className={iconClass} aria-hidden />
+        <ShipWheel className={iconClass} aria-hidden />
       </span>
     );
   }
