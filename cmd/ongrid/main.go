@@ -735,6 +735,10 @@ func main() {
 	deviceRepo := managerdevicedata.NewRepo(db)
 	edgeDeviceRepo := managerdevicedata.NewEdgeDeviceRepo(db)
 	deviceUC := managerbizdevice.NewUsecase(deviceRepo, edgeDeviceRepo, log)
+	networkDiscoveryRepo := managerdevicedata.NewNetworkDiscoveryRepo(db)
+	networkDiscoveryUC := managerbizdevice.NewNetworkDiscoveryUsecase(networkDiscoveryRepo)
+	networkDiscoveryUC.SetPromotionDependencies(networkDiscoveryRepo, deviceRepo, edgeDeviceRepo)
+	deviceUC.SetNetworkDiscovery(networkDiscoveryUC)
 	edgeUC := managerbizedge.NewUsecase(edgeRepo, deviceRepo, edgeDeviceRepo, log)
 
 	// Boot backfill: heal "stale online" edge rows. A manager crash or any
@@ -885,6 +889,7 @@ func main() {
 	// registers + any device that landed between migration and now.
 	edgeUC.SetNodeMirror(topologyUC)
 	deviceUC.SetTopologyMirror(topologyUC)
+	networkDiscoveryUC.SetTopologyMirror(topologyUC)
 	if n, err := deviceUC.ReconcileDeletedTopology(rootCtx); err != nil {
 		log.Warn("device: deleted topology reconcile on boot failed", slog.Any("err", err))
 	} else if n > 0 {
@@ -1110,6 +1115,7 @@ func main() {
 	// exists. Until this point UpgradeAgent surfaced a "not wired" error
 	// — by design, because we don't accept HTTP traffic until later.
 	edgeSvc.SetEdgeCaller(fbClient)
+	networkDiscoveryUC.SetEdgeCaller(fbClient)
 
 	// promIngester for the Wiring is typed as the interface; passing a
 	// typed-nil *Ingester would be a non-nil interface, so explicitly hand
@@ -1135,10 +1141,11 @@ func main() {
 		// DeviceResolver wires the post-split edge_id → device_id
 		// resolution path (push pipeline). The biz junction repo is the
 		// source of truth.
-		DeviceResolver: edgeDeviceRepo,
-		K8sRegistry:    k8sSvc,
-		K8sInventory:   k8sSvc,
-		Log:            log.With(slog.String("comp", "frontierbound")),
+		DeviceResolver:   edgeDeviceRepo,
+		K8sRegistry:      k8sSvc,
+		K8sInventory:     k8sSvc,
+		NetworkDiscovery: networkDiscoveryUC,
+		Log:              log.With(slog.String("comp", "frontierbound")),
 	}); err != nil {
 		log.Error("frontierbound: install handlers", slog.Any("err", err))
 		os.Exit(1)

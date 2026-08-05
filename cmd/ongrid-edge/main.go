@@ -210,6 +210,7 @@ func main() {
 	}
 	agent := edgebiz.NewAgent(client, collector, edgebiz.Config{
 		MetricsInterval:          cfg.Edge.CollectorInterval,
+		NetworkDiscoveryEnabled:  parseBoolEnv("ONGRID_NETWORK_DISCOVERY_ENABLED", false),
 		NetworkDiscoveryInterval: parseDurationEnv("ONGRID_NETWORK_DISCOVERY_INTERVAL", time.Minute),
 		AgentVersion:             version,
 		Kubernetes:               k8sInfo,

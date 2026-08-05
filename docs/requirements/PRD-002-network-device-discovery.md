@@ -29,6 +29,7 @@
 - Edge 配置提供 `network_discovery.enabled` 开关，默认关闭。
 - 默认发现默认网关、ARP/Neighbor、LLDP 邻居；不做 CIDR 全网扫描。
 - SNMP 使用管理员配置的只读凭据，仅查询 sysName、sysDescr 和 sysObjectID；一期凭据仅在单次扫描内存中使用，不落库、不回显，接口和 LLDP MIB enrichment 后续补齐。
+- SNMP 校验同时读取 IF-MIB 接口状态与 IPv4 地址归属；SNMPv3 支持 SHA-1/SHA-2 认证及 AES-128/192/256 隐私协议，配置项使用受控选项而非任意字符串。
 - 未通过 SNMP 校验的候选不能调用 promote 接口绕过准入。
 - 发现结果幂等写入 `devices`、`device_network`、`device_identifiers`、`network_interfaces`、`network_links`。
 - 自动发现设备与发现 Edge 建立 `edge_devices(type=discovered)` 关系。
@@ -63,6 +64,7 @@
 - [ ] 只有 IP/sysName 相同不会自动永久合并。
 - [ ] 自动发现设备获得 `network` 角色，人工角色不被覆盖。
 - [ ] 设备详情能列出来源、标识、置信度、接口和链路。
+- [ ] SNMP 接口快照能展示 ifIndex 对应的 IPv4 地址。
 - [x] SNMP 凭据不会出现在日志和 API 响应中。
 - [x] 候选设备单独展示在设备页“网络发现”标签，不污染“全部设备”。
 - [x] 只有 SNMP 身份校验成功的候选才会创建正式 Device。
@@ -76,3 +78,4 @@
 - [ ] Task 4：增加 tunnel 上报契约和 Edge 默认网关/LLDP 采集。
 - [x] Task 5：增加一次性 SNMP 只读探测与准入校验；凭据持久化仍待接入 Secret vault。
 - [ ] Task 6：设备详情和拓扑消费网络接口/链路。
+- [x] Task 7：补齐接口 IPv4 地址归属及 SNMPv3 SHA-2/AES-192/256 配置。

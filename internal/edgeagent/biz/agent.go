@@ -64,8 +64,12 @@ type Config struct {
 	MetricsInterval time.Duration // default 10s
 	// MetricsBatchSize is how many points to buffer before push.
 	MetricsBatchSize int // default 30 (5min at 10s)
-	// NetworkDiscoveryInterval controls passive gateway/ARP/LLDP reports.
-	// Zero uses one minute. The collector is optional and read-only.
+	// NetworkDiscoveryEnabled explicitly enables passive gateway/ARP/LLDP
+	// reports. It defaults to false so installing an Edge does not start
+	// network discovery without operator intent.
+	NetworkDiscoveryEnabled bool
+	// NetworkDiscoveryInterval controls passive gateway/ARP/LLDP reports when
+	// discovery is enabled. Zero uses one minute.
 	NetworkDiscoveryInterval time.Duration
 
 	// AgentVersion is reported on register_edge (optional).
@@ -212,7 +216,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.Go(func() error { return a.heartbeatLoop(egCtx) })
 	eg.Go(func() error { return a.metricsLoop(egCtx) })
-	if discovery, ok := a.collector.(NetworkDiscoveryCollector); ok {
+	if discovery, ok := a.collector.(NetworkDiscoveryCollector); ok && a.cfg.NetworkDiscoveryEnabled {
 		eg.Go(func() error { return a.networkDiscoveryLoop(egCtx, discovery) })
 	}
 	// One extra goroutine watches the upgrade-staged signal — return a
