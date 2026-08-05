@@ -173,6 +173,7 @@ on_error() {
         if [[ $restore_failed -eq 0 ]]; then
             [[ -z "${EDGE_BACKUP_DIR:-}" ]] || rm -rf "$EDGE_BACKUP_DIR"
             EDGE_SWAP_COMPLETE=0
+            EDGE_RECREATE_REQUIRED=0
             log_warn "restored the previous Edge directory after install failure"
         else
             log_error "could not fully restore the previous Edge directory; preserved backup at ${EDGE_BACKUP_DIR:-<none>}"
@@ -374,6 +375,7 @@ fi
 EDGE_STAGE_DIR=""
 EDGE_BACKUP_DIR=""
 EDGE_SWAP_COMPLETE=0
+EDGE_RECREATE_REQUIRED=0
 prepare_edge_assets() {
     local source_dir="$SCRIPT_DIR/edge" target deps_tag resolved_targets
     local edge_targets=()
@@ -478,6 +480,7 @@ if [[ -n "$EDGE_STAGE_DIR" ]]; then
     if [[ -d "$INSTALL_DIR/edge" ]]; then
         EDGE_BACKUP_DIR=$(mktemp -d "$INSTALL_DIR/.edge-backup.XXXXXX")
         mv "$INSTALL_DIR/edge" "$EDGE_BACKUP_DIR/edge"
+        EDGE_RECREATE_REQUIRED=1
     fi
     if ! mv "$EDGE_STAGE_DIR" "$INSTALL_DIR/edge"; then
         if [[ -n "$EDGE_BACKUP_DIR" && -d "$EDGE_BACKUP_DIR/edge" ]]; then
@@ -825,6 +828,17 @@ log_info "starting stack: docker compose ${COMPOSE_ARGS[*]} up -d"
     cd "$INSTALL_DIR"
     docker compose "${COMPOSE_ARGS[@]}" up -d
 )
+
+# A running container keeps its bind mount attached to the old directory inode
+# after an atomic host-side rename. On re-install, force only the two Edge
+# directory consumers to rebind even when the image/config version is unchanged.
+if [[ $EDGE_RECREATE_REQUIRED -eq 1 ]]; then
+    log_info "recreating Manager and nginx to activate the replaced Edge directory"
+    (
+        cd "$INSTALL_DIR"
+        docker compose "${COMPOSE_ARGS[@]}" up -d --no-deps --force-recreate ongrid nginx
+    )
+fi
 
 # ---------- wait for /healthz ----------
 # nginx terminates TLS on host port ${ONGRID_HTTP_PORT} (443 by default) and

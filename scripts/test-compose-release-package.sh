@@ -95,6 +95,8 @@ for arch in amd64 arm64; do
   grep -Fq 'EDGE_SWAP_COMPLETE=1' "$extract_dir/$package_root/install.sh"
   grep -Fq 'restored the previous Edge directory after install failure' \
     "$extract_dir/$package_root/install.sh"
+  grep -Fq -- '--no-deps --force-recreate ongrid nginx' \
+    "$extract_dir/$package_root/install.sh"
 
   if find "$extract_dir/$package_root/edge" -maxdepth 1 -type f \
       -name '*-linux-*' -print -quit | grep -q .; then
