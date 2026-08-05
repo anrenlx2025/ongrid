@@ -127,6 +127,43 @@ func TestQueryNetworkDevicesToolRejectsUnknownReachability(t *testing.T) {
 	}
 }
 
+func TestQueryNetworkInterfacesToolReturnsOnlyAttentionPorts(t *testing.T) {
+	lastSeen := time.Date(2026, time.August, 5, 10, 0, 0, 0, time.UTC)
+	devices := &fakeNetworkDeviceReader{getByID: map[uint64]*devicemodel.Device{
+		10: {ID: 10, Name: "core-sw-01", OS: "network", Roles: devicemodel.RoleBitNetwork},
+	}}
+	details := &fakeNetworkDetailReader{details: map[uint64]*devicebiz.NetworkDeviceDetail{
+		10: {Candidate: &devicemodel.NetworkDiscoveryCandidate{
+			LastSeenAt: lastSeen,
+			InterfacesJSON: `[
+				{"if_index":1,"name":"xe-0/0/1","admin_status":"up","oper_status":"up","addresses":["10.0.0.2"]},
+				{"if_index":2,"name":"xe-0/0/2","admin_status":"up","oper_status":"down","mac":"aa:bb:cc:dd:ee:ff"},
+				{"if_index":3,"name":"xe-0/0/3","admin_status":"down","oper_status":"down"}
+			]`,
+		}},
+	}}
+
+	tool := NewQueryNetworkInterfacesTool(devices, details, nil)
+	out, err := tool.InvokableRun(context.Background(), `{"network_device_id":10,"only_attention":true}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	var got struct {
+		NetworkDeviceID uint64                `json:"network_device_id"`
+		Interfaces      []networkInterfaceRow `json:"interfaces"`
+		Count           int                   `json:"count"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if got.NetworkDeviceID != 10 || got.Count != 1 || len(got.Interfaces) != 1 {
+		t.Fatalf("unexpected output: %#v", got)
+	}
+	if row := got.Interfaces[0]; row.Name != "xe-0/0/2" || !row.NeedsAttention || row.MAC != "aa:bb:cc:dd:ee:ff" {
+		t.Fatalf("unexpected interface row: %#v", row)
+	}
+}
+
 func TestGetNetworkNeighborsToolReturnsObservedAdjacency(t *testing.T) {
 	networkNodeID := uint64(42)
 	devices := &fakeNetworkDeviceReader{getByID: map[uint64]*devicemodel.Device{

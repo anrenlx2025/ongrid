@@ -3428,6 +3428,7 @@ var coordinatorExtraToolNames = []string{
 	// let explicit network-asset requests discover it through ToolSearch.
 	aiopstools.ToolSearchToolName,
 	aiopstools.ToolNameQueryNetworkDevices,
+	aiopstools.ToolNameQueryNetworkInterfaces,
 	aiopstools.ToolNameGetNetworkNeighbors,
 }
 

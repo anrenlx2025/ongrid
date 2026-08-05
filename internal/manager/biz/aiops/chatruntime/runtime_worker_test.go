@@ -449,12 +449,13 @@ func TestFilterCoordinatorToolsForIntent_NetworkInventoryUsesProgressiveDiscover
 	bag := []basetool.BaseTool{
 		&fakeTool{name: "ToolSearch", schema: `{"type":"object"}`},
 		&fakeTool{name: "query_network_devices", schema: `{"type":"object"}`},
+		&fakeTool{name: "query_network_interfaces", schema: `{"type":"object"}`},
 		&fakeTool{name: "get_network_neighbors", schema: `{"type":"object"}`},
 		&fakeTool{name: "query_devices", schema: `{"type":"object"}`},
 		&fakeTool{name: "host_bash", schema: `{"type":"object"}`},
 	}
 	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "列出 SNMP 已验证的交换机，并查看它们与主机的连接关系", true))
-	for _, want := range []string{"ToolSearch", "query_network_devices", "get_network_neighbors"} {
+	for _, want := range []string{"ToolSearch", "query_network_devices", "query_network_interfaces", "get_network_neighbors"} {
 		if !containsName(names, want) {
 			t.Fatalf("network inventory intent should keep %s, got %v", want, names)
 		}

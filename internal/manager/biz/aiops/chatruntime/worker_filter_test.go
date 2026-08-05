@@ -64,13 +64,14 @@ func TestFilterToolsForAgentRole_NetworkInventoryStaysWithNetworkSpecialist(t *t
 	bag := []basetool.BaseTool{
 		&originTool{name: "query_devices", class: "read", origin: basetool.OriginBuiltin},
 		&originTool{name: "query_network_devices", class: "read", origin: basetool.OriginBuiltin},
+		&originTool{name: "query_network_interfaces", class: "read", origin: basetool.OriginBuiltin},
 		&originTool{name: "get_network_neighbors", class: "read", origin: basetool.OriginBuiltin},
 		&originTool{name: "ToolSearch", class: "read", origin: basetool.OriginBuiltin},
 	}
 
 	coordinator := &Agent{Tools: []string{"query_devices"}}
 	coordinatorTools := filterToolsForAgentRole(bag, coordinator, true, false)
-	for _, name := range []string{"query_network_devices", "get_network_neighbors"} {
+	for _, name := range []string{"query_network_devices", "query_network_interfaces", "get_network_neighbors"} {
 		if toolbagHas(coordinatorTools, name) {
 			t.Errorf("coordinator must not receive network inventory tool %q", name)
 		}
@@ -78,6 +79,7 @@ func TestFilterToolsForAgentRole_NetworkInventoryStaysWithNetworkSpecialist(t *t
 
 	networkSpecialist := &Agent{Tools: []string{
 		"query_network_devices",
+		"query_network_interfaces",
 		"get_network_neighbors",
 		"ToolSearch",
 	}}

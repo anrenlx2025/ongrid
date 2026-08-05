@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	ToolNameQueryNetworkDevices  = "query_network_devices"
-	ToolNameGetNetworkNeighbors  = "get_network_neighbors"
-	networkInventoryCallTimeout  = 8 * time.Second
-	networkInventoryDefaultLimit = 50
-	networkInventoryMaxLimit     = 100
+	ToolNameQueryNetworkDevices    = "query_network_devices"
+	ToolNameGetNetworkNeighbors    = "get_network_neighbors"
+	ToolNameQueryNetworkInterfaces = "query_network_interfaces"
+	networkInventoryCallTimeout    = 8 * time.Second
+	networkInventoryDefaultLimit   = 50
+	networkInventoryMaxLimit       = 100
 )
 
 const queryNetworkDevicesDescription = "List verified network devices with SNMP identity, reachability, management address, discovery source, and interface/link counts. " +
@@ -51,6 +52,23 @@ var getNetworkNeighborsSchema = json.RawMessage(`{
   "properties": {
     "network_device_id": {"type": "integer", "minimum": 1, "description": "Verified network device id returned by query_network_devices."},
     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50, "description": "Maximum neighbors returned."}
+  },
+  "required": ["network_device_id"]
+}`)
+
+const queryNetworkInterfacesDescription = "List the latest SNMP interface snapshot for one verified network device, including interface name, MAC and IP addresses, admin state, operational state, and whether the port needs attention. It never returns SNMP credentials."
+
+const queryNetworkInterfacesWhenToUse = "Use after query_network_devices identifies a network device when the user asks about switch ports, interface status, down links, or addresses on a network device. " +
+	"The output is the last SNMP observation, not a live packet capture."
+
+var queryNetworkInterfacesSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "network_device_id": {"type": "integer", "minimum": 1, "description": "Verified network device id returned by query_network_devices."},
+    "name_contains": {"type": "string", "description": "Case-insensitive substring of an interface name or description."},
+    "oper_status": {"type": "string", "enum": ["up", "down", "unknown"], "description": "Optional operational state filter."},
+    "only_attention": {"type": "boolean", "default": false, "description": "When true, return interfaces that are administratively enabled but not operationally up."},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50, "description": "Maximum interfaces returned."}
   },
   "required": ["network_device_id"]
 }`)
@@ -188,6 +206,147 @@ type GetNetworkNeighborsTool struct {
 	devices  networkDeviceReader
 	topology networkTopologyReader
 	log      *slog.Logger
+}
+
+type queryNetworkInterfacesArgs struct {
+	NetworkDeviceID uint64 `json:"network_device_id"`
+	NameContains    string `json:"name_contains,omitempty"`
+	OperStatus      string `json:"oper_status,omitempty"`
+	OnlyAttention   bool   `json:"only_attention,omitempty"`
+	Limit           int    `json:"limit,omitempty"`
+}
+
+type networkInterfaceRow struct {
+	IfIndex        int      `json:"if_index,omitempty"`
+	Name           string   `json:"name,omitempty"`
+	Description    string   `json:"description,omitempty"`
+	MAC            string   `json:"mac,omitempty"`
+	Addresses      []string `json:"addresses,omitempty"`
+	InterfaceKind  string   `json:"interface_kind,omitempty"`
+	AdminStatus    string   `json:"admin_status,omitempty"`
+	OperStatus     string   `json:"oper_status,omitempty"`
+	NeedsAttention bool     `json:"needs_attention"`
+}
+
+// QueryNetworkInterfacesTool exposes the persisted latest SNMP port snapshot
+// to both chat and workflow execution. It is deliberately read-only; a
+// refresh remains an operator action because credentials are never retained.
+type QueryNetworkInterfacesTool struct {
+	devices networkDeviceReader
+	details networkDetailReader
+	log     *slog.Logger
+}
+
+func NewQueryNetworkInterfacesTool(devices networkDeviceReader, details networkDetailReader, log *slog.Logger) *QueryNetworkInterfacesTool {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &QueryNetworkInterfacesTool{devices: devices, details: details, log: log}
+}
+
+func (t *QueryNetworkInterfacesTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
+	return &basetool.ToolInfo{
+		Name:        ToolNameQueryNetworkInterfaces,
+		Description: queryNetworkInterfacesDescription,
+		WhenToUse:   queryNetworkInterfacesWhenToUse,
+		Parameters:  queryNetworkInterfacesSchema,
+		Class:       "read",
+	}, nil
+}
+
+func (t *QueryNetworkInterfacesTool) InvokableRun(ctx context.Context, argsJSON string, _ ...basetool.InvokeOption) (string, error) {
+	if t.devices == nil || t.details == nil {
+		return "", fmt.Errorf("query_network_interfaces: inventory is not configured")
+	}
+	var in queryNetworkInterfacesArgs
+	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil {
+		return "", fmt.Errorf("query_network_interfaces: bad args: %w", err)
+	}
+	if err := normalizeNetworkInterfaceArgs(&in); err != nil {
+		return "", err
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, networkInventoryCallTimeout)
+	defer cancel()
+	device, err := t.devices.Get(callCtx, in.NetworkDeviceID)
+	if err != nil {
+		return "", fmt.Errorf("query_network_interfaces: get device %d: %w", in.NetworkDeviceID, err)
+	}
+	if !isVerifiedNetworkDevice(device) {
+		return "", fmt.Errorf("query_network_interfaces: device %d is not a verified network device", in.NetworkDeviceID)
+	}
+	detail, err := t.details.GetNetworkDeviceDetail(callCtx, in.NetworkDeviceID)
+	if err != nil {
+		return "", fmt.Errorf("query_network_interfaces: get network detail for device %d: %w", in.NetworkDeviceID, err)
+	}
+	var reported []networkInterfaceRow
+	if detail != nil && detail.Candidate != nil && strings.TrimSpace(detail.Candidate.InterfacesJSON) != "" {
+		if err := json.Unmarshal([]byte(detail.Candidate.InterfacesJSON), &reported); err != nil {
+			return "", fmt.Errorf("query_network_interfaces: decode interface snapshot: %w", err)
+		}
+	}
+
+	rows := make([]networkInterfaceRow, 0, min(len(reported), in.Limit))
+	for _, row := range reported {
+		row.AdminStatus = strings.ToLower(strings.TrimSpace(row.AdminStatus))
+		row.OperStatus = strings.ToLower(strings.TrimSpace(row.OperStatus))
+		row.NeedsAttention = row.AdminStatus == "up" && row.OperStatus != "up"
+		if !matchesNetworkInterface(row, in) {
+			continue
+		}
+		rows = append(rows, row)
+		if len(rows) >= in.Limit {
+			break
+		}
+	}
+
+	lastObservedAt := (*time.Time)(nil)
+	if detail != nil && detail.Candidate != nil {
+		observed := detail.Candidate.LastSeenAt
+		lastObservedAt = &observed
+	}
+	out, err := json.Marshal(map[string]any{
+		"network_device_id": in.NetworkDeviceID,
+		"device_name":       device.Name,
+		"last_observed_at":  lastObservedAt,
+		"interfaces":        rows,
+		"count":             len(rows),
+	})
+	if err != nil {
+		return "", fmt.Errorf("query_network_interfaces: marshal: %w", err)
+	}
+	return string(out), nil
+}
+
+func normalizeNetworkInterfaceArgs(in *queryNetworkInterfacesArgs) error {
+	if in.NetworkDeviceID == 0 {
+		return fmt.Errorf("query_network_interfaces: network_device_id is required")
+	}
+	in.NameContains = strings.TrimSpace(in.NameContains)
+	in.OperStatus = strings.ToLower(strings.TrimSpace(in.OperStatus))
+	if in.OperStatus != "" && in.OperStatus != "up" && in.OperStatus != "down" && in.OperStatus != "unknown" {
+		return fmt.Errorf("query_network_interfaces: oper_status must be up|down|unknown")
+	}
+	if in.Limit <= 0 {
+		in.Limit = networkInventoryDefaultLimit
+	}
+	if in.Limit > networkInventoryMaxLimit {
+		in.Limit = networkInventoryMaxLimit
+	}
+	return nil
+}
+
+func matchesNetworkInterface(row networkInterfaceRow, in queryNetworkInterfacesArgs) bool {
+	if in.NameContains != "" {
+		name := strings.ToLower(row.Name + " " + row.Description)
+		if !strings.Contains(name, strings.ToLower(in.NameContains)) {
+			return false
+		}
+	}
+	if in.OperStatus != "" && row.OperStatus != in.OperStatus {
+		return false
+	}
+	return !in.OnlyAttention || row.NeedsAttention
 }
 
 func NewGetNetworkNeighborsTool(devices networkDeviceReader, topology networkTopologyReader, log *slog.Logger) *GetNetworkNeighborsTool {

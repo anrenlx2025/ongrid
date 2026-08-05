@@ -136,6 +136,7 @@ func (r *Registry) BuildBaseTools() *ToolBag {
 	}
 	if r.devices != nil && r.devices.NetworkDiscovery() != nil {
 		out = append(out, NewQueryNetworkDevicesTool(r.devices, r.devices.NetworkDiscovery(), r.log))
+		out = append(out, NewQueryNetworkInterfacesTool(r.devices, r.devices.NetworkDiscovery(), r.log))
 	}
 	if r.edges != nil {
 		out = append(out, NewGetTopologyTool(r.edges, r.alertUC, r.topology, r.log))

@@ -1163,11 +1163,13 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 	incidentIntent := containsAny(low, "incident", "incidents") || strings.Contains(userText, "告警")
 	networkInventoryIntent := containsAny(low,
 		"network device", "network devices", "snmp", "switch", "router", "firewall",
-		"network neighbor", "network neighbours", "connected host", "connection history") ||
+		"network neighbor", "network neighbours", "connected host", "connection history",
+		"network interface", "interface status", "switch port", "port status") ||
 		strings.Contains(userText, "网络设备") || strings.Contains(userText, "网络邻居") ||
 		strings.Contains(userText, "交换机") || strings.Contains(userText, "路由器") ||
 		strings.Contains(userText, "防火墙") || strings.Contains(userText, "连接关系") ||
-		strings.Contains(userText, "SNMP")
+		strings.Contains(userText, "SNMP") || strings.Contains(userText, "接口状态") ||
+		strings.Contains(userText, "端口状态")
 	complexHint := complexCoordinatorHint(low, userText)
 	topologyIntent := strings.Contains(low, "topology") || strings.Contains(low, "fleet") || strings.Contains(low, "deployment") ||
 		strings.Contains(userText, "拓扑") || strings.Contains(userText, "规模") || strings.Contains(userText, "版本") || strings.Contains(userText, "部署")
@@ -1191,6 +1193,7 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 		return filterCoordinatorToolNames(bag,
 			"ToolSearch",
 			"query_network_devices",
+			"query_network_interfaces",
 			"get_network_neighbors",
 		)
 	}
