@@ -187,7 +187,7 @@ export default function KubernetesPage() {
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('节点接入', 'Node access')}</th>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('Controller', 'Controller')}</th>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('最近同步', 'Last sync')}</th>
-                  <th className="sticky right-0 z-20 min-w-36 border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-right">{tr('操作', 'Actions')}</th>
+                  <th className="sticky right-0 z-20 min-w-[340px] border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-left">{tr('操作', 'Actions')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/40">
@@ -250,15 +250,16 @@ export default function KubernetesPage() {
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
                         {relativeTime(clusterSyncTime(cluster))}
                       </td>
-                      <td className="sticky right-0 z-10 min-w-36 border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-right" onClick={(ev) => ev.stopPropagation()}>
-                        <div className="inline-flex items-center justify-end gap-1">
+                      <td className="sticky right-0 z-10 min-w-[340px] border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-left" onClick={(ev) => ev.stopPropagation()}>
+                        <div className="flex items-center gap-1">
                           <Link
                             to={`/kubernetes/${cluster.id}`}
                             aria-label={tr(`查看集群 ${cluster.name} 详情`, `View cluster ${cluster.name} details`)}
                             title={tr('详情', 'Details')}
-                            className="inline-flex rounded-md p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
                           >
                             <ExternalLink size={13} />
+                            {tr('详情', 'Details')}
                           </Link>
                           {isAdmin && (
                             <button
@@ -266,9 +267,10 @@ export default function KubernetesPage() {
                               aria-label={tr(`查看集群 ${cluster.name} 的升级命令`, `View upgrade command for cluster ${cluster.name}`)}
                               title={tr('升级命令', 'Upgrade command')}
                               onClick={() => setUpgradeCluster(cluster)}
-                              className="inline-flex rounded-md p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
                             >
                               <RefreshCw size={13} />
+                              {tr('升级命令', 'Upgrade')}
                             </button>
                           )}
                           {isAdmin && (
@@ -277,9 +279,10 @@ export default function KubernetesPage() {
                               aria-label={tr(`查看集群 ${cluster.name} 的卸载命令`, `View uninstall command for cluster ${cluster.name}`)}
                               title={tr('卸载命令', 'Uninstall command')}
                               onClick={() => setUninstallCluster(cluster)}
-                              className="inline-flex rounded-md p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
                             >
                               <Clipboard size={13} />
+                              {tr('卸载命令', 'Uninstall')}
                             </button>
                           )}
                           {isAdmin && (
@@ -289,9 +292,10 @@ export default function KubernetesPage() {
                               title={tr('删除', 'Delete')}
                               disabled={deletingClusterID === cluster.id}
                               onClick={() => setDeleteClusterTarget(cluster)}
-                              className="inline-flex rounded-md p-1.5 text-red-300 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-50"
+                              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-red-300 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-50"
                             >
                               <Trash2 size={13} />
+                              {deletingClusterID === cluster.id ? tr('删除中…', 'Deleting…') : tr('删除', 'Delete')}
                             </button>
                           )}
                         </div>
