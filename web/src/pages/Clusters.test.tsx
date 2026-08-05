@@ -110,7 +110,9 @@ describe("device cluster pages", () => {
     });
     expect(clusterLink).toHaveAttribute("href", "/clusters/501");
     expect(screen.queryByText("k8s-prod")).not.toBeInTheDocument();
-    expect(screen.getByText("1 个有效")).toBeInTheDocument();
+    expect(screen.getByText("1 / 1 个有效")).toBeInTheDocument();
+    expect(screen.getByText("最近活动")).toBeInTheDocument();
+    expect(screen.getByText("拓扑连接")).toBeInTheDocument();
     expect(
       screen.getByText("1 个集群 · 1 台设备 · 1 台在线"),
     ).toBeInTheDocument();

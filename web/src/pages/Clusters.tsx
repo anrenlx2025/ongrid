@@ -251,6 +251,12 @@ export default function ClustersPage() {
                         {tr("安装批次", "Install batches")}
                       </th>
                       <th className="px-4 py-2.5 font-medium">
+                        {tr("拓扑连接", "Topology links")}
+                      </th>
+                      <th className="px-4 py-2.5 font-medium">
+                        {tr("最近活动", "Last activity")}
+                      </th>
+                      <th className="px-4 py-2.5 font-medium">
                         {tr("更新时间", "Updated")}
                       </th>
                       <th className="px-4 py-2.5 text-right font-medium">
@@ -361,15 +367,34 @@ function ClusterRow({
       </td>
       <td className="px-4 py-3">
         {summary.activeProfiles > 0 ? (
-          <Chip tone="accent">
+          <Chip tone="accent" title={tr("有效 / 总安装批次", "Active / total install batches")}>
             {tr(
-              `${summary.activeProfiles} 个有效`,
-              `${summary.activeProfiles} active`,
+              `${summary.activeProfiles} / ${summary.profiles.length} 个有效`,
+              `${summary.activeProfiles} / ${summary.profiles.length} active`,
             )}
           </Chip>
         ) : (
+          <span className="text-zinc-600">
+            {summary.profiles.length > 0
+              ? tr(`0 / ${summary.profiles.length} 个有效`, `0 / ${summary.profiles.length} active`)
+              : "—"}
+          </span>
+        )}
+      </td>
+      <td className="px-4 py-3 text-zinc-300">
+        {summary.externalRelations.length > 0 ? (
+          <span>
+            {tr(
+              `${summary.externalRelations.length} 条连接`,
+              `${summary.externalRelations.length} links`,
+            )}
+          </span>
+        ) : (
           <span className="text-zinc-600">—</span>
         )}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 text-zinc-500">
+        {relativeTime(summary.lastMemberSeenAt)}
       </td>
       <td className="whitespace-nowrap px-4 py-3 text-zinc-500">
         {relativeTime(summary.cluster.updated_at)}
