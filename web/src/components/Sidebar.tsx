@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { NavLink, Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Bell,
@@ -31,7 +32,7 @@ import {
   ShipWheel,
   Boxes,
   Network,
-  EyeOff,
+  PinOff,
   Settings2,
 } from 'lucide-react';
 import { Avatar } from './Avatar';
@@ -407,19 +408,27 @@ export function Sidebar() {
 
         {/* AIOps 是主舞台 — Agent (运行) 与 知识库 / 代码仓库 (素材) 顶级并列，
             观测数据放在下方做数据源。 */}
-        <SectionLabel>Agent</SectionLabel>
-        <NavSection>
-          <SidebarNavItem to="/agents" icon={Bot} label={tr('助理', 'Assistants')} />
-          <SidebarNavItem to="/workflows" icon={Route} label={tr('工作流', 'Workflows')} />
-          <SidebarNavItem to="/skills" icon={Wrench} label={tr('技能', 'Skills')} />
-          <SidebarNavItem to="/mcp" icon={Plug} label="MCP" />
-        </NavSection>
+        <CollapsibleSection
+          storageKey="agent"
+          title="Agent"
+          defaultOpen
+          items={[
+            { key: 'assistants', to: '/agents', icon: Bot, label: tr('助理', 'Assistants') },
+            { key: 'workflows', to: '/workflows', icon: Route, label: tr('工作流', 'Workflows') },
+            { key: 'skills', to: '/skills', icon: Wrench, label: tr('技能', 'Skills') },
+            { key: 'mcp', to: '/mcp', icon: Plug, label: 'MCP' },
+          ]}
+        />
 
-        <SectionLabel>{tr('知识库', 'Knowledge')}</SectionLabel>
-        <NavSection>
-          <SidebarNavItem to="/knowledge" icon={BookOpen} label={tr('知识库', 'Knowledge')} />
-          <SidebarNavItem to="/knowledge/repos" icon={GitBranch} label={tr('代码仓库', 'Repos')} />
-        </NavSection>
+        <CollapsibleSection
+          storageKey="knowledge"
+          title={tr('知识库', 'Knowledge')}
+          defaultOpen
+          items={[
+            { key: 'knowledge', to: '/knowledge', icon: BookOpen, label: tr('知识库', 'Knowledge') },
+            { key: 'repos', to: '/knowledge/repos', icon: GitBranch, label: tr('代码仓库', 'Repos') },
+          ]}
+        />
 
         <CollapsibleSection
           storageKey="resources"
@@ -446,10 +455,15 @@ export function Sidebar() {
           ]}
         />
 
-        <CollapsibleSection storageKey="operations" title={tr('日常', 'Daily')} defaultOpen={false}>
-          <SidebarNavItem to="/tasks" icon={CalendarClock} label={tr('任务', 'Tasks')} />
-          <SidebarNavItem to="/pages" icon={AppWindow} label={tr('产物', 'Artifacts')} />
-        </CollapsibleSection>
+        <CollapsibleSection
+          storageKey="operations"
+          title={tr('日常', 'Daily')}
+          defaultOpen={false}
+          items={[
+            { key: 'tasks', to: '/tasks', icon: CalendarClock, label: tr('任务', 'Tasks') },
+            { key: 'artifacts', to: '/pages', icon: AppWindow, label: tr('产物', 'Artifacts') },
+          ]}
+        />
 
         <SectionLabel>{tr('会话', 'Sessions')}</SectionLabel>
         <div className="ml-2 space-y-0.5">
@@ -690,10 +704,6 @@ function DeleteSessionModal({
   );
 }
 
-function NavSection({ children }: { children: React.ReactNode }) {
-  return <div className="mt-1 space-y-0.5">{children}</div>;
-}
-
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div className="mt-5 px-2 pb-1.5 text-[13px] font-semibold text-zinc-300">
@@ -702,10 +712,9 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-// CollapsibleSection is the same SectionLabel + NavSection pair, but the
-// header is a button that toggles its children's visibility. State
-// persists in localStorage so users don't have to re-fold their AIOps-
-// supplemental sections on every page load.
+// CollapsibleSection renders a section header that toggles its items. State
+// persists in localStorage so each operator can keep the sidebar arranged
+// around the areas they use most.
 //
 // Why we have this: ongrid is AIOps-first. The agent + context + chat
 // flows are the primary surface; observability + device management are
@@ -716,17 +725,18 @@ function CollapsibleSection({
   title,
   defaultOpen = false,
   items,
-  children,
 }: {
   storageKey: string;
   title: string;
   defaultOpen?: boolean;
-  items?: SidebarSectionItem[];
-  children?: React.ReactNode;
+  items: SidebarSectionItem[];
 }) {
   const { tr } = useI18n();
   const manageRef = useRef<HTMLDivElement | null>(null);
+  const manageMenuRef = useRef<HTMLDivElement | null>(null);
+  const manageButtonRef = useRef<HTMLButtonElement | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
+  const [managePosition, setManagePosition] = useState({ top: 0, left: 0 });
   const [open, setOpen] = useState(() => {
     try {
       const raw = localStorage.getItem(`sidebar.section.${storageKey}`);
@@ -749,21 +759,42 @@ function CollapsibleSection({
     }
   });
 
+  const updateManagePosition = () => {
+    const rect = manageButtonRef.current?.getBoundingClientRect();
+    if (rect) setManagePosition({ top: rect.top, left: rect.right + 8 });
+  };
+
   useEffect(() => {
     if (!manageOpen) return;
     const closeOnOutside = (event: MouseEvent) => {
-      if (!manageRef.current?.contains(event.target as Node)) setManageOpen(false);
+      const target = event.target as Node;
+      if (!manageRef.current?.contains(target) && !manageMenuRef.current?.contains(target)) {
+        setManageOpen(false);
+      }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setManageOpen(false);
     };
     document.addEventListener('mousedown', closeOnOutside);
     document.addEventListener('keydown', closeOnEscape);
+    window.addEventListener('resize', updateManagePosition);
+    window.addEventListener('scroll', updateManagePosition, true);
     return () => {
       document.removeEventListener('mousedown', closeOnOutside);
       document.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('resize', updateManagePosition);
+      window.removeEventListener('scroll', updateManagePosition, true);
     };
   }, [manageOpen]);
+
+  const toggleManage = () => {
+    if (manageOpen) {
+      setManageOpen(false);
+      return;
+    }
+    updateManagePosition();
+    setManageOpen(true);
+  };
 
   const toggle = () => {
     setOpen((prev) => {
@@ -791,7 +822,7 @@ function CollapsibleSection({
       return next;
     });
   };
-  const visibleItems = items?.filter((item) => !hiddenKeys.includes(item.key));
+  const visibleItems = items.filter((item) => !hiddenKeys.includes(item.key));
 
   return (
     <div>
@@ -808,21 +839,20 @@ function CollapsibleSection({
           {title}
         </button>
         <div className="pointer-events-none flex items-center gap-0.5 opacity-0 transition-opacity group-hover/section:pointer-events-auto group-hover/section:opacity-100 group-focus-within/section:pointer-events-auto group-focus-within/section:opacity-100">
-          {items ? (
-            <button
-              type="button"
-              onClick={() => setManageOpen((current) => !current)}
-              aria-label={tr(`管理${title}菜单`, `Manage ${title} menu`)}
-              aria-expanded={manageOpen}
-              title={tr('管理菜单', 'Manage menu')}
-              className={cn(
-                'rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300',
-                hiddenKeys.length > 0 && 'text-zinc-400',
-              )}
-            >
-              <Settings2 size={12} />
-            </button>
-          ) : null}
+          <button
+            ref={manageButtonRef}
+            type="button"
+            onClick={toggleManage}
+            aria-label={tr(`管理${title}菜单`, `Manage ${title} menu`)}
+            aria-expanded={manageOpen}
+            title={tr('管理菜单', 'Manage menu')}
+            className={cn(
+              'rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300',
+              hiddenKeys.length > 0 && 'text-zinc-400',
+            )}
+          >
+            <Settings2 size={12} />
+          </button>
           <button
             type="button"
             onClick={toggle}
@@ -837,60 +867,63 @@ function CollapsibleSection({
           </button>
         </div>
 
-        {manageOpen && items ? (
-          <div
-            role="menu"
-            aria-label={tr(`${title}菜单项`, `${title} menu items`)}
-            className="anim-scale absolute right-1 top-full z-50 mt-1 w-52 rounded-lg bg-zinc-900 p-1.5 shadow-lg ring-1 ring-zinc-800"
-          >
-            <div className="px-2 py-1 text-[11px] font-medium text-zinc-500">
-              {tr('显示的菜单', 'Visible items')}
-            </div>
-            {items.map((item) => (
-              <label
-                key={item.key}
-                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-zinc-300 hover:bg-zinc-800"
+        {manageOpen
+          ? createPortal(
+              <div
+                ref={manageMenuRef}
+                role="menu"
+                aria-label={tr(`${title}菜单项`, `${title} menu items`)}
+                style={{ top: managePosition.top, left: managePosition.left }}
+                className="anim-scale fixed z-50 w-52 rounded-lg bg-zinc-900 p-1.5 shadow-lg ring-1 ring-zinc-800"
               >
-                <input
-                  type="checkbox"
-                  checked={!hiddenKeys.includes(item.key)}
-                  onChange={(event) => setItemVisible(item.key, event.target.checked)}
-                  className="h-3.5 w-3.5 accent-indigo-600"
-                />
-                <item.icon size={13} className="shrink-0 text-zinc-500" />
-                <span className="truncate">{item.label}</span>
-              </label>
-            ))}
-          </div>
-        ) : null}
+                <div className="px-2 py-1 text-[11px] font-medium text-zinc-500">
+                  {tr('显示的菜单', 'Visible items')}
+                </div>
+                {items.map((item) => (
+                  <label
+                    key={item.key}
+                    className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-zinc-300 hover:bg-zinc-800"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!hiddenKeys.includes(item.key)}
+                      onChange={(event) => setItemVisible(item.key, event.target.checked)}
+                      className="h-3.5 w-3.5 accent-indigo-600"
+                    />
+                    <item.icon size={13} className="shrink-0 text-zinc-500" />
+                    <span className="truncate">{item.label}</span>
+                  </label>
+                ))}
+              </div>,
+              document.body,
+            )
+          : null}
       </div>
       {open ? (
         <div className="space-y-0.5">
-          {items
-            ? visibleItems?.map((item) => (
-                <div key={item.key} className="group/item relative">
-                  <SidebarNavItem
-                    to={item.to}
-                    icon={item.icon}
-                    iconSize={item.iconSize}
-                    label={item.label}
-                    exact={item.exact}
-                    exactQuery={item.exactQuery}
-                    badge={item.badge}
-                    reserveTrailingAction
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setItemVisible(item.key, false)}
-                    aria-label={tr(`隐藏${item.label}`, `Hide ${item.label}`)}
-                    title={tr('隐藏菜单', 'Hide menu item')}
-                    className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-zinc-600 opacity-0 transition-opacity hover:bg-zinc-700 hover:text-zinc-200 group-hover/item:pointer-events-auto group-hover/item:opacity-100 group-focus-within/item:pointer-events-auto group-focus-within/item:opacity-100"
-                  >
-                    <EyeOff size={12} />
-                  </button>
-                </div>
-              ))
-            : children}
+          {visibleItems.map((item) => (
+            <div key={item.key} className="group/item relative">
+              <SidebarNavItem
+                to={item.to}
+                icon={item.icon}
+                iconSize={item.iconSize}
+                label={item.label}
+                exact={item.exact}
+                exactQuery={item.exactQuery}
+                badge={item.badge}
+                reserveTrailingAction
+              />
+              <button
+                type="button"
+                onClick={() => setItemVisible(item.key, false)}
+                aria-label={tr(`从侧栏取消固定${item.label}`, `Unpin ${item.label} from sidebar`)}
+                title={tr('从侧栏取消固定', 'Unpin from sidebar')}
+                className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-zinc-600 opacity-0 transition-opacity hover:bg-zinc-700 hover:text-zinc-200 group-hover/item:pointer-events-auto group-hover/item:opacity-100 group-focus-within/item:pointer-events-auto group-focus-within/item:opacity-100"
+              >
+                <PinOff size={12} />
+              </button>
+            </div>
+          ))}
         </div>
       ) : null}
     </div>

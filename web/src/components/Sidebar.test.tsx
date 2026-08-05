@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { http, HttpResponse } from 'msw';
@@ -34,19 +34,39 @@ describe('Sidebar configurable sections', () => {
     );
 
     expect(await screen.findByRole('link', { name: '网络设备' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '隐藏网络设备' }));
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: '从侧栏取消固定网络设备' }));
+    });
 
     expect(screen.queryByRole('link', { name: '网络设备' })).not.toBeInTheDocument();
     expect(localStorage.getItem('sidebar.section.resources.hidden')).toContain('network-devices');
 
-    await user.click(screen.getByRole('button', { name: '管理基础设施菜单' }));
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: '管理基础设施菜单' }));
+    });
     const checkbox = screen.getByRole('checkbox', { name: '网络设备' });
     expect(checkbox).not.toBeChecked();
-    await user.click(checkbox);
+    await act(async () => {
+      await user.click(checkbox);
+    });
 
     await waitFor(() => {
       expect(screen.getByRole('link', { name: '网络设备' })).toBeInTheDocument();
     });
     expect(localStorage.getItem('sidebar.section.resources.hidden')).toBe('[]');
+  });
+
+  it('所有可折叠分组都提供菜单管理入口', () => {
+    render(
+      <MemoryRouter>
+        <Sidebar />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole('button', { name: '管理Agent菜单' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '管理知识库菜单' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '管理基础设施菜单' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '管理监控告警菜单' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '管理日常菜单' })).toBeInTheDocument();
   });
 });
