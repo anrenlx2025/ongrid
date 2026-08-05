@@ -101,7 +101,12 @@ type deviceItem struct {
 	Roles          []string   `json:"roles"`
 	Online         bool       `json:"online"`
 	LastSeenAt     *time.Time `json:"last_seen_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	// ReachabilityStatus is populated only for SNMP-managed network devices.
+	// Online remains reserved for the Host Edge heartbeat, so consumers must
+	// not interpret a network device without an Edge as offline.
+	ReachabilityStatus string     `json:"reachability_status,omitempty"`
+	LastReachableAt    *time.Time `json:"last_reachable_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
 	// NodeID is the link to the topology `nodes` table. Lets
 	// the SPA's device-detail Topology tab resolve neighbours without
 	// a separate /v1/topology lookup. Nullable until topology.Migrate
@@ -241,7 +246,12 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]deviceItem, 0, len(rows))
 	for _, d := range rows {
-		out = append(out, devToItem(d))
+		item, err := h.itemForDevice(r.Context(), d)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		out = append(out, item)
 	}
 	writeJSON(w, http.StatusOK, listResp{Items: out, Total: len(out)})
 }
@@ -261,7 +271,12 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, devToItem(d))
+	item, err := h.itemForDevice(r.Context(), d)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
@@ -512,6 +527,28 @@ func devToItem(d *devicemodel.Device) deviceItem {
 		CreatedAt:      d.CreatedAt,
 		NodeID:         d.NodeID,
 	}
+}
+
+// itemForDevice preserves Device.Online as the Host Edge presence signal and
+// enriches SNMP-managed network devices with their separate probe state.
+func (h *Handler) itemForDevice(ctx context.Context, d *devicemodel.Device) (deviceItem, error) {
+	item := devToItem(d)
+	if d.OS != "network" || h.uc.NetworkDiscovery() == nil {
+		return item, nil
+	}
+	detail, err := h.uc.NetworkDiscovery().GetNetworkDeviceDetail(ctx, d.ID)
+	if err != nil {
+		if errors.Is(err, errs.ErrNotFound) {
+			return item, nil
+		}
+		return deviceItem{}, err
+	}
+	if detail == nil || detail.Profile == nil {
+		return item, nil
+	}
+	item.ReachabilityStatus = detail.Profile.ReachabilityStatus
+	item.LastReachableAt = detail.Profile.LastReachableAt
+	return item, nil
 }
 
 func networkCandidateToItem(c *devicemodel.NetworkDiscoveryCandidate) networkCandidateItem {

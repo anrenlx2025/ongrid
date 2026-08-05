@@ -222,6 +222,13 @@ function isManagedNetworkDevice(device: Device): boolean {
   return device.os?.trim().toLowerCase() === "network";
 }
 
+function networkReachability(device: Device): "reachable" | "unreachable" | "unknown" {
+  const value = device.reachability_status?.trim().toLowerCase();
+  if (["reachable", "online", "up"].includes(value ?? "")) return "reachable";
+  if (["unreachable", "offline", "down"].includes(value ?? "")) return "unreachable";
+  return "unknown";
+}
+
 function DeviceTypeIcon({
   device,
   attachments,
@@ -958,6 +965,7 @@ export default function EdgesPage() {
                   devices.map((d) => {
                     const edge = d.hostEdge;
                     const networkDevice = isManagedNetworkDevice(d);
+                    const reachability = networkReachability(d);
                     const attachments = edge
                       ? (k8sAttachments?.[edge.id] ?? [])
                       : [];
@@ -1202,8 +1210,21 @@ export default function EdgesPage() {
                             <td className="whitespace-nowrap px-2.5 py-2.5">
                               {networkDevice ? (
                                 <span className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400">
-                                  <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
-                                  {tr("已验证", "Verified")}
+                                  <span
+                                    className={cn(
+                                      "h-1.5 w-1.5 rounded-full",
+                                      reachability === "reachable"
+                                        ? "bg-emerald-500"
+                                        : reachability === "unreachable"
+                                          ? "bg-red-500"
+                                          : "bg-zinc-500",
+                                    )}
+                                  />
+                                  {reachability === "reachable"
+                                    ? tr("可达", "Reachable")
+                                    : reachability === "unreachable"
+                                      ? tr("不可达", "Unreachable")
+                                      : tr("状态未知", "Unknown")}
                                 </span>
                               ) : (
                                 <StatusPill
@@ -1212,8 +1233,14 @@ export default function EdgesPage() {
                               )}
                             </td>
                             <td className="truncate whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
-                              {!networkDevice && d.last_seen_at
-                                ? relativeTime(d.last_seen_at)
+                              {(networkDevice
+                                ? d.last_reachable_at
+                                : d.last_seen_at)
+                                ? relativeTime(
+                                    networkDevice
+                                      ? d.last_reachable_at!
+                                      : d.last_seen_at!,
+                                  )
                                 : "—"}
                             </td>
                             <td className="truncate whitespace-nowrap px-2.5 py-2.5 font-mono text-xs text-zinc-400">

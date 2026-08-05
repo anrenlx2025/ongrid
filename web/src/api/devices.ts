@@ -22,6 +22,10 @@ export type Device = {
   scope?: DeviceRole;
   online?: boolean;
   last_seen_at?: string | null;
+  // Host devices use online/last_seen_at (Edge heartbeat). SNMP-managed
+  // network devices expose their separate probe state here.
+  reachability_status?: string;
+  last_reachable_at?: string | null;
   created_at?: string;
   updated_at?: string;
   // — points at the row in topology.nodes that fronts this

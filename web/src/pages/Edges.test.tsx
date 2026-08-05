@@ -603,7 +603,7 @@ describe("EdgesPage", () => {
             { id: 17, name: "k8s-host", hostname: "k8s-host", roles: [], online: true },
             { id: 19, name: "app-host", hostname: "app-host", roles: ["server"], online: true },
             { id: 141, name: "storage-host", hostname: "storage-host", roles: ["storage"], online: true },
-            { id: 140, name: "core-switch", hostname: "core-switch", os: "network", roles: ["network"], online: false },
+            { id: 140, name: "core-switch", hostname: "core-switch", os: "network", roles: ["network"], online: false, reachability_status: "reachable" },
           ],
           total: 4,
         }),
@@ -649,6 +649,8 @@ describe("EdgesPage", () => {
       "tr",
     ) as HTMLTableRowElement;
     expect(within(networkRow).getByText("SNMP")).toBeInTheDocument();
+    expect(within(networkRow).getByText("可达")).toBeInTheDocument();
+    expect(within(networkRow).queryByText("离线")).not.toBeInTheDocument();
     expect(within(networkRow).getByText("查看拓扑")).toBeInTheDocument();
     expect(within(networkRow).queryByText("查看图表")).not.toBeInTheDocument();
     expect(within(networkRow).queryByText("终端")).not.toBeInTheDocument();
