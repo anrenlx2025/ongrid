@@ -214,6 +214,10 @@ prepare_edge_assets() {
     [[ -d "$source_dir" ]] || return 0
 
     EDGE_STAGE_DIR=$(mktemp -d "$INSTALL_DIR/.edge-stage.XXXXXX")
+    if ! chmod 0755 "$EDGE_STAGE_DIR"; then
+        log_error "could not make the prepared Edge directory readable by Manager and nginx containers"
+        return 1
+    fi
     cp -rf "$source_dir/." "$EDGE_STAGE_DIR/"
     find "$EDGE_STAGE_DIR" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
     [[ -r "$EDGE_STAGE_DIR/edge-assets-lib.sh" ]] || {
@@ -224,8 +228,8 @@ prepare_edge_assets() {
     source "$EDGE_STAGE_DIR/edge-assets-lib.sh"
     if ! resolved_targets=$(ongrid_resolve_edge_targets \
         "${ONGRID_EDGE_TARGETS:-}" \
-        "$INSTALL_DIR/edge/edge-artifacts.env" \
         "$EDGE_STAGE_DIR/edge-artifacts.env" \
+        "$INSTALL_DIR/edge/edge-artifacts.env" \
         "$INSTALL_DIR/edge"); then
         log_error "cannot resolve Edge target; supported hosts are x86_64/amd64 and aarch64/arm64, and ONGRID_EDGE_TARGETS accepts linux-amd64 linux-arm64"
         return 1

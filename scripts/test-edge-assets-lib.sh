@@ -14,21 +14,26 @@ fail() {
 }
 
 mkdir -p "$tmp_dir/installed" "$tmp_dir/package" "$tmp_dir/existing"
-printf 'ONGRID_EDGE_TARGETS=linux-amd64 linux-arm64\n' \
-    > "$tmp_dir/installed/edge-artifacts.env"
 printf 'ONGRID_EDGE_TARGETS=linux-amd64\n' \
+    > "$tmp_dir/installed/edge-artifacts.env"
+printf 'ONGRID_EDGE_TARGETS=linux-amd64 linux-arm64\n' \
     > "$tmp_dir/package/edge-artifacts.env"
 
 resolved=$(ongrid_resolve_edge_targets "" \
-    "$tmp_dir/installed/edge-artifacts.env" \
-    "$tmp_dir/package/edge-artifacts.env" "$tmp_dir/existing")
+    "$tmp_dir/package/edge-artifacts.env" \
+    "$tmp_dir/installed/edge-artifacts.env" "$tmp_dir/existing")
 [[ "$resolved" == 'linux-amd64 linux-arm64' ]] \
-    || fail "an upgrade did not preserve the installed dual-architecture selection"
+    || fail "a dual-architecture package did not supersede the old single-architecture selection"
 
 resolved=$(ongrid_resolve_edge_targets linux-arm64 \
-    "$tmp_dir/installed/edge-artifacts.env" \
-    "$tmp_dir/package/edge-artifacts.env" "$tmp_dir/existing")
+    "$tmp_dir/package/edge-artifacts.env" \
+    "$tmp_dir/installed/edge-artifacts.env" "$tmp_dir/existing")
 [[ "$resolved" == linux-arm64 ]] || fail "an explicit target did not override persisted state"
+
+resolved=$(ongrid_resolve_edge_targets "" /does/not/exist \
+    "$tmp_dir/installed/edge-artifacts.env" "$tmp_dir/existing")
+[[ "$resolved" == linux-amd64 ]] \
+    || fail "an installed selection was not preserved when the package had no target metadata"
 
 : > "$tmp_dir/existing/ongrid-edge-linux-arm64"
 : > "$tmp_dir/existing/ongrid-edge-linux-amd64"

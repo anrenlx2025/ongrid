@@ -810,10 +810,10 @@ func main() {
 
 	edgeHandler := managerserveredge.NewHandler(edgeSvc, deviceRepo, pluginConfigUC)
 	edgeHandler.SetAuthz(authzMW)
-	// edge upgrade bundles: dir is baked by docker build,
-	// publicURL from runtime config so edges across the internet can
-	// pull. Resolver is optional in degraded boots (image w/o bundle);
-	// the upgrade-package handler returns 503 when nil.
+	// Edge upgrade bundles are installed on the host and mounted read-only
+	// into the manager container. publicURL comes from runtime config so
+	// edges across the internet can pull them. The resolver is optional in
+	// degraded boots without the mount; package-upgrade handlers return 503.
 	edgeBundleDir := os.Getenv("ONGRID_EDGE_BUNDLE_DIR")
 	if edgeBundleDir == "" {
 		edgeBundleDir = "/usr/share/ongrid/edge-bundles"
@@ -823,7 +823,7 @@ func main() {
 		edgeBundleResolver = managerserveredge.NewFileBundleResolver(edgeBundleDir, version, cfg.PublicURL)
 		edgeHandler.SetPackageResolver(edgeBundleResolver)
 	} else {
-		log.Warn("edge bundle dir missing; package upgrade endpoint will 503",
+		log.Warn("edge bundle dir unavailable; package upgrade endpoint will 503",
 			slog.String("dir", edgeBundleDir), slog.Any("err", err))
 	}
 	deviceHandler := managerserverdevice.NewHandler(deviceUC)

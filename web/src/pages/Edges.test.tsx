@@ -345,6 +345,61 @@ describe("EdgesPage", () => {
     }
   });
 
+  it("整包升级创建可按设备架构执行和验证的持久任务", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let submitted: Record<string, unknown> | null = null;
+    server.use(
+      http.get("/api/v1/version", () =>
+        HttpResponse.json({ manager_version: "v0.11.1" }),
+      ),
+      http.post("/api/v1/edge-upgrade-jobs", async ({ request }) => {
+        submitted = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(
+          {
+            id: 77,
+            target_version: "v0.11.1",
+            status: "queued",
+            total: 1,
+            pending: 1,
+          },
+          { status: 202 },
+        );
+      }),
+    );
+
+    try {
+      render(
+        <MemoryRouter>
+          <EdgesPage />
+        </MemoryRouter>,
+      );
+      await screen.findByText("bare-metal-1");
+      await act(async () => {
+        await user.click(screen.getByRole("button", { name: "更多操作" }));
+      });
+      await act(async () => {
+        await user.click(
+          await screen.findByRole("button", {
+            name: "升级整包（Edge + 插件）",
+          }),
+        );
+      });
+
+      await waitFor(() =>
+        expect(submitted).toEqual({
+          edge_ids: [9],
+          target_version: "v0.11.1",
+        }),
+      );
+      expect(
+        await screen.findByText(/升级任务 #77 已创建/),
+      ).toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
   it("生成可绑定集群的批量安装命令", async () => {
     const user = userEvent.setup();
     let submitted: Record<string, unknown> | null = null;

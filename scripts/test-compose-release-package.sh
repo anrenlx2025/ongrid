@@ -5,6 +5,13 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
 
+for installer in install.sh upgrade.sh; do
+  grep -Fq 'chmod 0755 "$EDGE_STAGE_DIR"' "$repo_root/deploy/install/$installer" || {
+    echo "$installer does not make the staged Edge directory container-readable" >&2
+    exit 1
+  }
+done
+
 install_help=$(bash "$repo_root/deploy/install/install.sh" --help)
 uninstall_help=$(bash "$repo_root/deploy/install/uninstall.sh" --help)
 
@@ -30,8 +37,6 @@ if [[ -d "$repo_root/deploy/install/systemd" ]] \
   exit 1
 fi
 
-stage="$tmp_dir/stage/ongrid-vtest-linux"
-out="$tmp_dir/out"
 edge_bin_root="$tmp_dir/edge-bin"
 mkdir -p "$edge_bin_root/linux-amd64"
 for binary in \
@@ -39,64 +44,58 @@ for binary in \
   mysqld_exporter postgres_exporter redis_exporter mongodb_exporter; do
   printf '%s test payload\n' "$binary" >"$edge_bin_root/linux-amd64/$binary"
 done
-PACKAGE_TARGET=linux \
-EDGE_TARGETS=linux-amd64 \
-EDGE_BIN_ROOT="$edge_bin_root" \
-ONGRID_EDGE_DEPS_TAG=edge-deps-test \
-ONGRID_BUNDLE_EMBEDDING_MODEL=0 \
-  bash "$repo_root/dist/package.sh" vtest "$stage" "$out" \
-    >"$tmp_dir/package.log" 2>&1 || {
-      cat "$tmp_dir/package.log" >&2
-      exit 1
-    }
 
-archive="$out/ongrid-vtest-linux.tar.xz"
-test -s "$archive"
-tar -tf "$archive" >"$tmp_dir/archive.list"
+for arch in amd64 arm64; do
+  package_target="linux-$arch"
+  package_root="ongrid-vtest-$package_target"
+  stage="$tmp_dir/stage/$package_root"
+  out="$tmp_dir/out-$arch"
+  package_log="$tmp_dir/package-$arch.log"
 
-for required in \
-  ongrid-vtest-linux/install.sh \
-  ongrid-vtest-linux/uninstall.sh \
-  ongrid-vtest-linux/upgrade.sh \
-  ongrid-vtest-linux/public-url.sh \
-  ongrid-vtest-linux/data-permissions.sh \
-  ongrid-vtest-linux/docker-compose.yml \
-  ongrid-vtest-linux/prometheus.yml \
-  ongrid-vtest-linux/edge/fetch-edge-assets.sh \
-  ongrid-vtest-linux/edge/verify-edge-deps-archive.sh \
-  ongrid-vtest-linux/edge/edge-assets-lib.sh \
-  ongrid-vtest-linux/edge/build-edge-bundle.sh \
-  ongrid-vtest-linux/edge/edge-artifacts.env; do
-  grep -Fxq "$required" "$tmp_dir/archive.list"
-done
+  PACKAGE_TARGET="$package_target" \
+  EDGE_TARGETS='linux-amd64 linux-arm64' \
+  EDGE_BIN_ROOT="$edge_bin_root" \
+  ONGRID_EDGE_DEPS_TAG=edge-deps-test \
+  ONGRID_BUNDLE_EMBEDDING_MODEL=0 \
+    bash "$repo_root/dist/package.sh" vtest "$stage" "$out" \
+      >"$package_log" 2>&1 || {
+        cat "$package_log" >&2
+        exit 1
+      }
 
-mkdir -p "$tmp_dir/extracted"
-tar -xf "$archive" -C "$tmp_dir/extracted"
-grep -Fxq 'ONGRID_EDGE_DEPS_TAG=edge-deps-test' \
-  "$tmp_dir/extracted/ongrid-vtest-linux/edge/edge-artifacts.env"
-if grep -q '^ONGRID_EDGE_TARGETS=' \
-  "$tmp_dir/extracted/ongrid-vtest-linux/edge/edge-artifacts.env"; then
-  echo "thin universal package pins an Edge architecture" >&2
-  exit 1
-fi
-bash "$tmp_dir/extracted/ongrid-vtest-linux/install.sh" --help >/dev/null
-bash "$tmp_dir/extracted/ongrid-vtest-linux/upgrade.sh" --help >/dev/null
+  archive="$out/$package_root.tar.xz"
+  test -s "$archive"
+  tar -tf "$archive" >"$tmp_dir/archive-$arch.list"
 
-for forbidden in \
-  ongrid-vtest-linux/bin/ \
-  ongrid-vtest-linux/systemd/ \
-  ongrid-vtest-linux/prometheus/prometheus.yml \
-  ongrid-vtest-linux/edge/ongrid-edge-linux-amd64 \
-  ongrid-vtest-linux/edge/promtail-linux-amd64 \
-  ongrid-vtest-linux/edge/otelcol-contrib-linux-amd64 \
-  ongrid-vtest-linux/edge/node_exporter-linux-amd64 \
-  ongrid-vtest-linux/edge/process_exporter-linux-amd64 \
-  ongrid-vtest-linux/edge/mysqld_exporter-linux-amd64 \
-  ongrid-vtest-linux/edge/postgres_exporter-linux-amd64 \
-  ongrid-vtest-linux/edge/redis_exporter-linux-amd64 \
-  ongrid-vtest-linux/edge/mongodb_exporter-linux-amd64; do
-  if grep -Fq "$forbidden" "$tmp_dir/archive.list"; then
-    echo "release package contains removed path: $forbidden" >&2
+  for required in \
+    "$package_root/install.sh" \
+    "$package_root/uninstall.sh" \
+    "$package_root/upgrade.sh" \
+    "$package_root/public-url.sh" \
+    "$package_root/data-permissions.sh" \
+    "$package_root/docker-compose.yml" \
+    "$package_root/prometheus.yml" \
+    "$package_root/edge/fetch-edge-assets.sh" \
+    "$package_root/edge/verify-edge-deps-archive.sh" \
+    "$package_root/edge/edge-assets-lib.sh" \
+    "$package_root/edge/build-edge-bundle.sh" \
+    "$package_root/edge/edge-artifacts.env"; do
+    grep -Fxq "$required" "$tmp_dir/archive-$arch.list"
+  done
+
+  extract_dir="$tmp_dir/extracted-$arch"
+  mkdir -p "$extract_dir"
+  tar -xf "$archive" -C "$extract_dir"
+  grep -Fxq 'ONGRID_EDGE_DEPS_TAG=edge-deps-test' \
+    "$extract_dir/$package_root/edge/edge-artifacts.env"
+  grep -Fxq 'ONGRID_EDGE_TARGETS=linux-amd64 linux-arm64' \
+    "$extract_dir/$package_root/edge/edge-artifacts.env"
+  bash "$extract_dir/$package_root/install.sh" --help >/dev/null
+  bash "$extract_dir/$package_root/upgrade.sh" --help >/dev/null
+
+  if find "$extract_dir/$package_root/edge" -maxdepth 1 -type f \
+      -name '*-linux-*' -print -quit | grep -q .; then
+    echo "$package_target thin package unexpectedly embeds Edge binaries" >&2
     exit 1
   fi
 done
@@ -105,21 +104,21 @@ done
 # must fail the package build instead of producing an archive that cannot be
 # installed.
 mkdir -p "$tmp_dir/empty-edge-bin/linux-amd64"
-if PACKAGE_TARGET=linux \
+if PACKAGE_TARGET=linux-amd64 \
   EDGE_TARGETS=linux-amd64 \
   EDGE_BIN_ROOT="$tmp_dir/empty-edge-bin" \
   ONGRID_BUNDLE_EDGE_ASSETS=1 \
   ONGRID_BUNDLE_EMBEDDING_MODEL=0 \
     bash "$repo_root/dist/package.sh" vtest \
-      "$tmp_dir/offline-stage/ongrid-vtest-linux" "$tmp_dir/offline-out" \
+      "$tmp_dir/offline-stage/ongrid-vtest-linux-amd64" "$tmp_dir/offline-out" \
       >"$tmp_dir/offline-package.log" 2>&1; then
   echo "offline package unexpectedly accepted an empty Edge binary root" >&2
   exit 1
 fi
 
-offline_stage="$tmp_dir/offline-complete-stage/ongrid-vtest-linux"
+offline_stage="$tmp_dir/offline-complete-stage/ongrid-vtest-linux-amd64"
 offline_out="$tmp_dir/offline-complete-out"
-PACKAGE_TARGET=linux \
+PACKAGE_TARGET=linux-amd64 \
 EDGE_TARGETS=linux-amd64 \
 EDGE_BIN_ROOT="$edge_bin_root" \
 ONGRID_BUNDLE_EDGE_ASSETS=1 \
@@ -129,16 +128,16 @@ ONGRID_BUNDLE_EMBEDDING_MODEL=0 \
       cat "$tmp_dir/offline-complete.log" >&2
       exit 1
     }
-offline_archive="$offline_out/ongrid-vtest-linux.tar.xz"
+offline_archive="$offline_out/ongrid-vtest-linux-amd64.tar.xz"
 tar -tf "$offline_archive" > "$tmp_dir/offline-archive.list"
 mkdir -p "$tmp_dir/offline-extracted"
 tar -xf "$offline_archive" -C "$tmp_dir/offline-extracted"
 grep -Fxq 'ONGRID_EDGE_TARGETS=linux-amd64' \
-  "$tmp_dir/offline-extracted/ongrid-vtest-linux/edge/edge-artifacts.env"
+  "$tmp_dir/offline-extracted/ongrid-vtest-linux-amd64/edge/edge-artifacts.env"
 for binary in \
   ongrid-edge promtail otelcol-contrib node_exporter process_exporter \
   mysqld_exporter postgres_exporter redis_exporter mongodb_exporter; do
-  grep -Fxq "ongrid-vtest-linux/edge/${binary}-linux-amd64" \
+  grep -Fxq "ongrid-vtest-linux-amd64/edge/${binary}-linux-amd64" \
     "$tmp_dir/offline-archive.list" \
     || { echo "complete offline package omitted $binary" >&2; exit 1; }
 done

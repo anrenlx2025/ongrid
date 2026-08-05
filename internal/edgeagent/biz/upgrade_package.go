@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -147,7 +148,10 @@ func (a *Agent) handleApplyPackage(_ context.Context, _ tunnel.ApplyPackageReque
 	}
 	manifest := filepath.Join(dir, bundleDirName, "MANIFEST.txt")
 	if _, err := os.Stat(manifest); err != nil {
-		return tunnel.ApplyPackageResponse{}, fmt.Errorf("apply_package: no staged bundle (run fetch_package first)")
+		if errors.Is(err, os.ErrNotExist) {
+			return tunnel.ApplyPackageResponse{}, fmt.Errorf("apply_package: no staged bundle (run fetch_package first)")
+		}
+		return tunnel.ApplyPackageResponse{}, fmt.Errorf("apply_package: inspect staged bundle: %w", err)
 	}
 	a.log.Info("apply_package: signal exit", slog.String("manifest", manifest))
 	// Same channel agent_upgrade uses — buffered(1), extra sends drop.
@@ -295,7 +299,9 @@ func extractTarGz(src, dst string) error {
 // or start with '#' are skipped.
 //
 // Manifest line shape:
-//   <sha256> <mode> <src> <dest>
+//
+//	<sha256> <mode> <src> <dest>
+//
 // fields are whitespace-separated; spaces in paths aren't supported
 // (the bundle's our own and the artifact names are operator-friendly).
 func verifyManifest(path, stage string) (int, error) {

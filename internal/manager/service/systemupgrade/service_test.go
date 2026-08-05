@@ -43,19 +43,22 @@ func TestCheckDetectsNewerRelease(t *testing.T) {
 	if info.LatestVersion != "v0.8.10" {
 		t.Fatalf("LatestVersion = %q", info.LatestVersion)
 	}
-	if len(info.Commands) != 1 {
-		t.Fatalf("commands = %d, want 1", len(info.Commands))
+	if len(info.Commands) != 3 {
+		t.Fatalf("commands = %d, want 3", len(info.Commands))
 	}
-	if info.Commands[0].ID != "linux-universal" || info.Commands[0].Arch != "linux" {
-		t.Fatalf("command = %+v, want one universal Linux command", info.Commands[0])
+	if info.Commands[0].ID != "linux-amd64" || info.Commands[1].ID != "linux-arm64" || info.Commands[2].ID != "auto" {
+		t.Fatalf("commands = %+v, want amd64, arm64, auto-detect", info.Commands)
 	}
-	wantCommand := strings.Join([]string{
-		"curl -fL -O https://ongrid.cloud/dl/ongrid-v0.8.10-linux.tar.xz || wget https://ongrid.cloud/dl/ongrid-v0.8.10-linux.tar.xz",
-		"tar xf ongrid-v0.8.10-linux.tar.xz && cd ongrid-v0.8.10-linux",
+	wantAMD64Command := strings.Join([]string{
+		"curl -fL -O https://ongrid.cloud/dl/ongrid-v0.8.10-linux-amd64.tar.xz || wget https://ongrid.cloud/dl/ongrid-v0.8.10-linux-amd64.tar.xz",
+		"tar xf ongrid-v0.8.10-linux-amd64.tar.xz && cd ongrid-v0.8.10-linux-amd64",
 		"sudo ./upgrade.sh",
 	}, "\n")
-	if info.Commands[0].Command != wantCommand {
-		t.Fatalf("command = %q, want %q", info.Commands[0].Command, wantCommand)
+	if info.Commands[0].Command != wantAMD64Command {
+		t.Fatalf("amd64 command = %q, want %q", info.Commands[0].Command, wantAMD64Command)
+	}
+	if !strings.Contains(info.Commands[2].Command, `PKG="ongrid-v0.8.10-linux-${ARCH}"`) {
+		t.Fatalf("auto command does not select an architecture-specific package: %s", info.Commands[2].Command)
 	}
 }
 
