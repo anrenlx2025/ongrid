@@ -2,6 +2,7 @@ package biz
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -25,12 +26,13 @@ const (
 	oidIfOperStatus   = "1.3.6.1.2.1.2.2.1.8"
 	oidIfName         = "1.3.6.1.2.1.31.1.1.1.1"
 	oidIfAlias        = "1.3.6.1.2.1.31.1.1.1.18"
+	oidIPAdEntIfIndex = "1.3.6.1.2.1.4.20.1.2"
 	maxSNMPInterfaces = 512
+	maxSNMPAddresses  = 2048
 )
 
-// ProbeNetworkSNMP performs a bounded read-only identity probe. It deliberately
-// starts with system OIDs; interface and LLDP enrichment can be added after
-// the device has passed this admission gate.
+// ProbeNetworkSNMP performs a bounded read-only identity probe and enriches a
+// successful response with interface state and IPv4 management addresses.
 func ProbeNetworkSNMP(ctx context.Context, req tunnel.ProbeNetworkSNMPRequest) tunnel.ProbeNetworkSNMPResponse {
 	address := strings.TrimSpace(req.Address)
 	if address == "" {
@@ -49,6 +51,9 @@ func ProbeNetworkSNMP(ctx context.Context, req tunnel.ProbeNetworkSNMPRequest) t
 	}
 
 	version := strings.ToLower(strings.TrimSpace(req.Version))
+	if version == "" {
+		version = "v2c"
+	}
 	params := &gosnmp.GoSNMP{
 		Target:         address,
 		Port:           req.Port,
@@ -68,7 +73,7 @@ func ProbeNetworkSNMP(ctx context.Context, req tunnel.ProbeNetworkSNMPRequest) t
 		params.Version = gosnmp.Version3
 		params.SecurityParameters = security
 		params.MsgFlags = flags
-	} else if version != "v2c" && version != "" {
+	} else if version != "v2c" {
 		return tunnel.ProbeNetworkSNMPResponse{Error: "SNMP version must be v2c or v3"}
 	}
 	if version == "v2c" && strings.TrimSpace(req.Community) == "" {
@@ -87,6 +92,7 @@ func ProbeNetworkSNMP(ctx context.Context, req tunnel.ProbeNetworkSNMPRequest) t
 		return tunnel.ProbeNetworkSNMPResponse{Error: fmt.Sprintf("SNMP get: %v", err)}
 	}
 	response := tunnel.ProbeNetworkSNMPResponse{OK: true, IPAddress: address}
+	response.SNMPEngineID = snmpEngineID(params)
 	for _, pdu := range result.Variables {
 		value := snmpValue(pdu.Value)
 		switch pdu.Name {
@@ -100,6 +106,17 @@ func ProbeNetworkSNMP(ctx context.Context, req tunnel.ProbeNetworkSNMPRequest) t
 	}
 	response.Interfaces = collectSNMPInterfaces(params)
 	return response
+}
+
+func snmpEngineID(params *gosnmp.GoSNMP) string {
+	if params == nil {
+		return ""
+	}
+	security, ok := params.SecurityParameters.(*gosnmp.UsmSecurityParameters)
+	if !ok || security.AuthoritativeEngineID == "" {
+		return ""
+	}
+	return hex.EncodeToString([]byte(security.AuthoritativeEngineID))
 }
 
 var errInterfaceLimit = errors.New("SNMP interface limit reached")
@@ -152,6 +169,7 @@ func collectSNMPInterfaces(params *gosnmp.GoSNMP) []tunnel.NetworkInterfaceRepor
 	walk(oidIfOperStatus, func(row *tunnel.NetworkInterfaceReport, pdu gosnmp.SnmpPDU) {
 		row.OperStatus = snmpInterfaceStatus(snmpInt(pdu.Value))
 	})
+	collectSNMPIPv4Addresses(params, rows, get)
 
 	indexes := make([]int, 0, len(rows))
 	for index := range rows {
@@ -163,6 +181,39 @@ func collectSNMPInterfaces(params *gosnmp.GoSNMP) []tunnel.NetworkInterfaceRepor
 		interfaces = append(interfaces, *rows[index])
 	}
 	return interfaces
+}
+
+func collectSNMPIPv4Addresses(
+	params *gosnmp.GoSNMP,
+	rows map[int]*tunnel.NetworkInterfaceReport,
+	get func(int) *tunnel.NetworkInterfaceReport,
+) {
+	addressCount := 0
+	err := params.BulkWalk(oidIPAdEntIfIndex, func(pdu gosnmp.SnmpPDU) error {
+		if addressCount >= maxSNMPAddresses {
+			return errInterfaceLimit
+		}
+		address, ok := oidIPv4Address(pdu.Name, oidIPAdEntIfIndex)
+		ifIndex := snmpInt(pdu.Value)
+		if !ok || ifIndex <= 0 {
+			return nil
+		}
+		if _, exists := rows[ifIndex]; !exists && len(rows) >= maxSNMPInterfaces {
+			return errInterfaceLimit
+		}
+		row := get(ifIndex)
+		for _, existing := range row.Addresses {
+			if existing == address {
+				return nil
+			}
+		}
+		row.Addresses = append(row.Addresses, address)
+		addressCount++
+		return nil
+	})
+	if err != nil && !errors.Is(err, errInterfaceLimit) {
+		return
+	}
 }
 
 func oidIndex(name, root string) (int, bool) {
@@ -178,6 +229,28 @@ func oidIndex(name, root string) (int, bool) {
 	}
 	index, err := strconv.Atoi(suffix)
 	return index, err == nil && index > 0
+}
+
+func oidIPv4Address(name, root string) (string, bool) {
+	normalizedName := strings.TrimPrefix(name, ".")
+	normalizedRoot := strings.TrimPrefix(root, ".")
+	prefix := normalizedRoot + "."
+	if !strings.HasPrefix(normalizedName, prefix) {
+		return "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(normalizedName, prefix), ".")
+	if len(parts) != net.IPv4len {
+		return "", false
+	}
+	octets := make(net.IP, net.IPv4len)
+	for index, part := range parts {
+		value, err := strconv.Atoi(part)
+		if err != nil || value < 0 || value > 255 {
+			return "", false
+		}
+		octets[index] = byte(value)
+	}
+	return octets.String(), true
 }
 
 func snmpInt(value any) int {
@@ -227,35 +300,69 @@ func usmSecurity(req tunnel.ProbeNetworkSNMPRequest) (*gosnmp.UsmSecurityParamet
 	}
 	security := &gosnmp.UsmSecurityParameters{UserName: req.Username}
 	flags := gosnmp.NoAuthNoPriv
-	switch strings.ToLower(req.AuthProtocol) {
+	authProtocol := normalizeSNMPProtocol(req.AuthProtocol)
+	switch authProtocol {
 	case "", "none", "noauth":
 		security.AuthenticationProtocol = gosnmp.NoAuth
 	case "md5":
 		security.AuthenticationProtocol = gosnmp.MD5
-		security.AuthenticationPassphrase = req.AuthSecret
-		flags = gosnmp.AuthNoPriv
 	case "sha", "sha1":
 		security.AuthenticationProtocol = gosnmp.SHA
-		security.AuthenticationPassphrase = req.AuthSecret
-		flags = gosnmp.AuthNoPriv
+	case "sha224":
+		security.AuthenticationProtocol = gosnmp.SHA224
+	case "sha256":
+		security.AuthenticationProtocol = gosnmp.SHA256
+	case "sha384":
+		security.AuthenticationProtocol = gosnmp.SHA384
+	case "sha512":
+		security.AuthenticationProtocol = gosnmp.SHA512
 	default:
 		return nil, gosnmp.NoAuthNoPriv, fmt.Errorf("unsupported SNMP auth protocol %q", req.AuthProtocol)
 	}
-	switch strings.ToLower(req.PrivacyProtocol) {
+	if security.AuthenticationProtocol != gosnmp.NoAuth {
+		if strings.TrimSpace(req.AuthSecret) == "" {
+			return nil, gosnmp.NoAuthNoPriv, fmt.Errorf("SNMP auth secret is required for %s", req.AuthProtocol)
+		}
+		security.AuthenticationPassphrase = req.AuthSecret
+		flags = gosnmp.AuthNoPriv
+	}
+
+	privacyProtocol := normalizeSNMPProtocol(req.PrivacyProtocol)
+	switch privacyProtocol {
 	case "", "none", "nopriv":
 		security.PrivacyProtocol = gosnmp.NoPriv
 	case "des":
 		security.PrivacyProtocol = gosnmp.DES
-		security.PrivacyPassphrase = req.PrivacySecret
-		flags = gosnmp.AuthPriv
 	case "aes", "aes128":
 		security.PrivacyProtocol = gosnmp.AES
-		security.PrivacyPassphrase = req.PrivacySecret
-		flags = gosnmp.AuthPriv
+	case "aes192":
+		security.PrivacyProtocol = gosnmp.AES192
+	case "aes256":
+		security.PrivacyProtocol = gosnmp.AES256
+	case "aes192c":
+		security.PrivacyProtocol = gosnmp.AES192C
+	case "aes256c":
+		security.PrivacyProtocol = gosnmp.AES256C
 	default:
 		return nil, gosnmp.NoAuthNoPriv, fmt.Errorf("unsupported SNMP privacy protocol %q", req.PrivacyProtocol)
 	}
+	if security.PrivacyProtocol != gosnmp.NoPriv {
+		if security.AuthenticationProtocol == gosnmp.NoAuth {
+			return nil, gosnmp.NoAuthNoPriv, fmt.Errorf("SNMP privacy requires authentication")
+		}
+		if strings.TrimSpace(req.PrivacySecret) == "" {
+			return nil, gosnmp.NoAuthNoPriv, fmt.Errorf("SNMP privacy secret is required for %s", req.PrivacyProtocol)
+		}
+		security.PrivacyPassphrase = req.PrivacySecret
+		flags = gosnmp.AuthPriv
+	}
 	return security, flags, nil
+}
+
+func normalizeSNMPProtocol(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	replacer := strings.NewReplacer("-", "", "_", "", " ", "")
+	return replacer.Replace(value)
 }
 
 func snmpValue(value any) string {
