@@ -823,7 +823,7 @@ export default function EdgesPage() {
               className={cn(
                 "min-w-full text-xs",
                 compactNetworkTable
-                  ? "w-full min-w-[1140px] table-fixed"
+                  ? "w-full min-w-[1120px] table-fixed"
                   : "w-[1637px] table-fixed",
               )}
             >
@@ -831,14 +831,13 @@ export default function EdgesPage() {
                 <colgroup>
                   <col style={{ width: 35 }} />
                   <col style={{ width: 45 }} />
-                  <col style={{ width: 150 }} />
-                  <col style={{ width: 90 }} />
+                  <col style={{ width: 170 }} />
+                  <col style={{ width: 160 }} />
                   <col style={{ width: 130 }} />
-                  <col style={{ width: 120 }} />
-                  <col style={{ width: 110 }} />
-                  <col style={{ width: 105 }} />
-                  <col style={{ width: 105 }} />
                   <col style={{ width: 90 }} />
+                  <col style={{ width: 105 }} />
+                  <col style={{ width: 130 }} />
+                  <col style={{ width: 95 }} />
                   <col style={{ width: 160 }} />
                 </colgroup>
               ) : (
@@ -880,15 +879,14 @@ export default function EdgesPage() {
                         {tr("名称", "Name")}
                       </th>
                       <th className="px-2.5 py-2.5 text-left">
-                        {tr("设备类型", "Device type")}
-                      </th>
-                      <th className="px-2.5 py-2.5 text-left">
                         {tr("厂商 / 型号", "Vendor / model")}
                       </th>
                       <th className="px-2.5 py-2.5 text-left">
                         {tr("管理地址", "Management address")}
                       </th>
-                      <th className="px-2.5 py-2.5 text-left">MAC</th>
+                      <th className="px-2.5 py-2.5 text-left">
+                        {tr("接口", "Interfaces")}
+                      </th>
                       <th className="px-2.5 py-2.5 text-left">
                         {tr("可达状态", "Reachability")}
                       </th>
@@ -933,7 +931,7 @@ export default function EdgesPage() {
                 {loading && devices.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={compactNetworkTable ? 11 : 12}
+                      colSpan={compactNetworkTable ? 10 : 12}
                       className="px-4 py-10 text-center text-zinc-500"
                     >
                       {tr("加载中…", "Loading…")}
@@ -942,7 +940,7 @@ export default function EdgesPage() {
                 ) : devices.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={compactNetworkTable ? 11 : 12}
+                      colSpan={compactNetworkTable ? 10 : 12}
                       className="px-4 py-10 text-center text-zinc-500"
                     >
                       {rolesFilter
@@ -1024,16 +1022,13 @@ export default function EdgesPage() {
                             </div>
                           </td>
                           <td className="truncate whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
-                            {detail?.device_kind || "—"}
-                          </td>
-                          <td className="truncate whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
                             {vendorModel || "—"}
                           </td>
                           <td className="truncate whitespace-nowrap px-2.5 py-2.5 font-mono text-zinc-400">
                             {detail?.management_address || d.ip_address || "—"}
                           </td>
-                          <td className="truncate whitespace-nowrap px-2.5 py-2.5 font-mono text-zinc-400">
-                            {detail?.bridge_base_mac || "—"}
+                          <td className="whitespace-nowrap px-2.5 py-2.5 text-zinc-400">
+                            {detail?.interfaces?.length ?? "—"}
                           </td>
                           <td className="whitespace-nowrap px-2.5 py-2.5">
                             <span className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400">

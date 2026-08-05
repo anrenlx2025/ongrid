@@ -682,6 +682,11 @@ describe("EdgesPage", () => {
           model: "VirtualSwitch 24",
           management_address: "10.20.0.3",
           bridge_base_mac: "b2:94:4a:34:5b:fb",
+          interfaces: [
+            { if_index: 1, name: "lo" },
+            { if_index: 2, name: "eth0" },
+            { if_index: 3, name: "eth1" },
+          ],
           reachability_status: "reachable",
           scanner_host_name: "scanner-host",
           last_observed_at: "2026-06-29T10:00:00Z",
@@ -697,14 +702,17 @@ describe("EdgesPage", () => {
 
     await screen.findAllByText("core-switch");
     const table = screen.getByRole("table");
-    expect(table).toHaveClass("w-full", "min-w-[1140px]", "table-fixed");
-    expect(table.querySelectorAll("col")).toHaveLength(11);
+    expect(table).toHaveClass("w-full", "min-w-[1120px]", "table-fixed");
+    expect(table.querySelectorAll("col")).toHaveLength(10);
     expect(screen.queryByRole("button", { name: "网络发现" })).not.toBeInTheDocument();
     expect(screen.queryByText("WebSSH 会话")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "批量安装设备" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "新建设备" })).not.toBeInTheDocument();
     expect(await screen.findByText("Ongrid Labs · VirtualSwitch 24")).toBeInTheDocument();
-    expect(screen.getByText("b2:94:4a:34:5b:fb")).toBeInTheDocument();
+    expect(screen.queryByText("b2:94:4a:34:5b:fb")).not.toBeInTheDocument();
+    expect(screen.queryByText("设备类型")).not.toBeInTheDocument();
+    expect(screen.getByText("接口")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
     expect(screen.getByText("可达")).toBeInTheDocument();
     expect(screen.getByText("scanner-host")).toBeInTheDocument();
   });
