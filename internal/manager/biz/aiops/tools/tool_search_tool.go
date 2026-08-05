@@ -147,15 +147,12 @@ func (t *ToolSearchTool) InvokableRun(ctx context.Context, argsJSON string, _ ..
 		maxResults = 20
 	}
 
-	// Use the persona-filtered view from ctx when available (set by
-	// chatruntime before graph.Invoke), so ToolSearch only returns tools
-	// the current persona (coordinator or worker) is allowed to see.
-	// Falls back to AllTools() when no filtering has been applied (e.g.
-	// legacy agent path, or a persona with no whitelist).
-	searchSet := basetool.FilteredToolsFromContext(ctx)
-	if searchSet == nil {
-		searchSet = t.bag.AllTools()
-	}
+	// Use the persona-filtered view from ctx only as an allow-list. The
+	// graph-facing entries can be redactedTool wrappers, whose empty schema
+	// would defeat ToolSearch's purpose. Match each visible name back to the
+	// unredacted registry tool before returning it. Entries that are dynamic
+	// and not present in the original bag stay visible as-is.
+	searchSet := t.fullToolsAllowedByContext(ctx)
 	matches := matchTools(ctx, searchSet, args.Query, maxResults)
 
 	resp := toolSearchResponse{Query: args.Query, Tools: matches}
@@ -171,6 +168,39 @@ func (t *ToolSearchTool) InvokableRun(ctx context.Context, argsJSON string, _ ..
 		)
 	}
 	return string(out), nil
+}
+
+func (t *ToolSearchTool) fullToolsAllowedByContext(ctx context.Context) []basetool.BaseTool {
+	all := t.bag.AllTools()
+	visible := basetool.FilteredToolsFromContext(ctx)
+	if visible == nil {
+		return all
+	}
+	byName := make(map[string]basetool.BaseTool, len(all))
+	for _, tool := range all {
+		info, err := tool.Info(ctx)
+		if err == nil && info != nil && info.Name != "" {
+			byName[info.Name] = tool
+		}
+	}
+	out := make([]basetool.BaseTool, 0, len(visible))
+	seen := make(map[string]struct{}, len(visible))
+	for _, tool := range visible {
+		info, err := tool.Info(ctx)
+		if err != nil || info == nil || info.Name == "" {
+			continue
+		}
+		if _, ok := seen[info.Name]; ok {
+			continue
+		}
+		seen[info.Name] = struct{}{}
+		if full, ok := byName[info.Name]; ok {
+			out = append(out, full)
+			continue
+		}
+		out = append(out, tool)
+	}
+	return out
 }
 
 // matchTools applies the query against the tool universe. select:

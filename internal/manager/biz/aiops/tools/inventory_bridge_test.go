@@ -16,3 +16,11 @@ func TestClassifyToolCategoryGroupsKubernetesToolsIntoExistingCategories(t *test
 		}
 	}
 }
+
+func TestClassifyToolCategoryGroupsNetworkInventoryToolsIntoNetwork(t *testing.T) {
+	for _, name := range []string{"query_network_devices", "get_network_neighbors"} {
+		if got := classifyToolCategory(name); got != "network" {
+			t.Fatalf("classifyToolCategory(%q) = %q, want network", name, got)
+		}
+	}
+}

@@ -3424,6 +3424,11 @@ var coordinatorExtraToolNames = []string{
 	"install_skill",
 	"serve_page",
 	"send_im_message",
+	// Network inventory remains specialty/schema-redacted. These entries only
+	// let explicit network-asset requests discover it through ToolSearch.
+	aiopstools.ToolSearchToolName,
+	aiopstools.ToolNameQueryNetworkDevices,
+	aiopstools.ToolNameGetNetworkNeighbors,
 }
 
 const defaultCoordinatorMaxTurns = 30

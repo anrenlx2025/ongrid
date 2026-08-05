@@ -59,3 +59,32 @@ func TestFilterToolsForAgentRole_DynamicReadTools(t *testing.T) {
 		t.Errorf("viewer must drop a DESTRUCTIVE dynamic tool")
 	}
 }
+
+func TestFilterToolsForAgentRole_NetworkInventoryStaysWithNetworkSpecialist(t *testing.T) {
+	bag := []basetool.BaseTool{
+		&originTool{name: "query_devices", class: "read", origin: basetool.OriginBuiltin},
+		&originTool{name: "query_network_devices", class: "read", origin: basetool.OriginBuiltin},
+		&originTool{name: "get_network_neighbors", class: "read", origin: basetool.OriginBuiltin},
+		&originTool{name: "ToolSearch", class: "read", origin: basetool.OriginBuiltin},
+	}
+
+	coordinator := &Agent{Tools: []string{"query_devices"}}
+	coordinatorTools := filterToolsForAgentRole(bag, coordinator, true, false)
+	for _, name := range []string{"query_network_devices", "get_network_neighbors"} {
+		if toolbagHas(coordinatorTools, name) {
+			t.Errorf("coordinator must not receive network inventory tool %q", name)
+		}
+	}
+
+	networkSpecialist := &Agent{Tools: []string{
+		"query_network_devices",
+		"get_network_neighbors",
+		"ToolSearch",
+	}}
+	networkTools := filterToolsForAgentRole(bag, networkSpecialist, false, false)
+	for _, name := range networkSpecialist.Tools {
+		if !toolbagHas(networkTools, name) {
+			t.Errorf("network specialist missing tool %q", name)
+		}
+	}
+}

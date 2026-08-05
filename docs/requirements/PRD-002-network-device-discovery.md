@@ -79,3 +79,4 @@
 - [x] Task 5：增加一次性 SNMP 只读探测与准入校验；凭据持久化仍待接入 Secret vault。
 - [ ] Task 6：设备详情和拓扑消费网络接口/链路。
 - [x] Task 7：补齐接口 IPv4 地址归属及 SNMPv3 SHA-2/AES-192/256 配置。
+- [x] Task 8：为 Agent、Skills 和 Workflow 增加网络设备资产与主机邻接关系的只读查询能力。
