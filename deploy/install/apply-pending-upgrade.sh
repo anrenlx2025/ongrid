@@ -317,8 +317,11 @@ apply_legacy() {
 # with a stale pending binary while leaving the new plugins in place.
 if maybe_rollback; then
   if [[ -f $MANIFEST ]]; then
-    apply_bundle
+    # Clear superseded legacy staging before committing the bundle. If power
+    # is lost after the bundle swap, a later boot must never apply an older
+    # single-file payload over the new Agent while retaining new plugins.
     rm -f "$LEGACY_PENDING" "$LEGACY_PENDING_SHA"
+    apply_bundle
   else
     apply_legacy
   fi

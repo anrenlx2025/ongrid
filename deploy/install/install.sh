@@ -161,8 +161,22 @@ ensure_host_gateway_env() {
 
 on_error() {
     local exit_code=$?
+    local restore_failed=0
     if [[ -n "${EDGE_STAGE_DIR:-}" && -d "${EDGE_STAGE_DIR:-}" ]]; then
         rm -rf "$EDGE_STAGE_DIR"
+    fi
+    if [[ "${EDGE_SWAP_COMPLETE:-0}" == 1 && -n "${INSTALL_DIR:-}" ]]; then
+        rm -rf -- "$INSTALL_DIR/edge" || restore_failed=1
+        if [[ -n "${EDGE_BACKUP_DIR:-}" && -d "${EDGE_BACKUP_DIR:-}/edge" ]]; then
+            mv "$EDGE_BACKUP_DIR/edge" "$INSTALL_DIR/edge" || restore_failed=1
+        fi
+        if [[ $restore_failed -eq 0 ]]; then
+            [[ -z "${EDGE_BACKUP_DIR:-}" ]] || rm -rf "$EDGE_BACKUP_DIR"
+            EDGE_SWAP_COMPLETE=0
+            log_warn "restored the previous Edge directory after install failure"
+        else
+            log_error "could not fully restore the previous Edge directory; preserved backup at ${EDGE_BACKUP_DIR:-<none>}"
+        fi
     fi
     log_error "install failed at line $1 (exit $exit_code)"
     log_error "check output above; fix and re-run sudo ./install.sh"
@@ -358,6 +372,8 @@ fi
 # served directory. Legacy/offline packages that embed binaries still work;
 # thin packages download direct CNB Release files and verify their checksums.
 EDGE_STAGE_DIR=""
+EDGE_BACKUP_DIR=""
+EDGE_SWAP_COMPLETE=0
 prepare_edge_assets() {
     local source_dir="$SCRIPT_DIR/edge" target deps_tag resolved_targets
     local edge_targets=()
@@ -459,7 +475,6 @@ if [[ -d "$SCRIPT_DIR/searxng" ]]; then
     cp -rf "$SCRIPT_DIR/searxng/." "$INSTALL_DIR/searxng/"
 fi
 if [[ -n "$EDGE_STAGE_DIR" ]]; then
-    EDGE_BACKUP_DIR=""
     if [[ -d "$INSTALL_DIR/edge" ]]; then
         EDGE_BACKUP_DIR=$(mktemp -d "$INSTALL_DIR/.edge-backup.XXXXXX")
         mv "$INSTALL_DIR/edge" "$EDGE_BACKUP_DIR/edge"
@@ -472,7 +487,7 @@ if [[ -n "$EDGE_STAGE_DIR" ]]; then
         exit 1
     fi
     EDGE_STAGE_DIR=""
-    [[ -z "$EDGE_BACKUP_DIR" ]] || rm -rf "$EDGE_BACKUP_DIR"
+    EDGE_SWAP_COMPLETE=1
 fi
 
 # ---------- host data dirs (bind-mount targets) ----------
@@ -831,6 +846,12 @@ if [[ $HEALTH_OK -eq 0 ]]; then
     log_warn "check logs: docker compose -f $INSTALL_DIR/docker-compose.yml logs ongrid"
     log_warn "             docker compose -f $INSTALL_DIR/docker-compose.yml logs nginx"
 fi
+
+# Re-installation keeps the previous Edge directory until every hard-failing
+# installation step has completed. A health timeout remains the installer's
+# existing warning-only outcome, so commit the prepared directory here.
+EDGE_SWAP_COMPLETE=0
+[[ -z "$EDGE_BACKUP_DIR" ]] || rm -rf "$EDGE_BACKUP_DIR"
 
 # ---------- detect host address for banner ----------
 # Source of truth is $ENV_FILE: that's the value the manager and the edges
