@@ -52,13 +52,13 @@ type EdgeService interface {
 	PluginHealth(edgeID uint64) []biz.PluginHealth
 }
 
-// PackageResolver locates the baked edge bundle for an arch+version
+// PackageResolver locates the installed edge bundle for an arch+version
 // triple. The HTTP handler's upgrade-package endpoint queries this to
 // auto-fill (url, sha256) before dispatching the RPC.
 //
-// Implementation lives at the wiring site (cmd/ongrid/main.go) and
-// reads from /usr/share/ongrid/edge-bundles/ inside the manager image;
-// nginx is configured to serve the same path via /edge-bundle/.
+// Implementation lives at the wiring site (cmd/ongrid/main.go) and reads
+// from the host-mounted /usr/share/ongrid/edge-bundles/ directory; nginx
+// serves the corresponding host files through /edge/.
 type PackageResolver interface {
 	ResolveBundle(arch, version string) (url, sha256, resolvedVersion string, err error)
 }
@@ -114,9 +114,8 @@ func NewHandler(s EdgeService, devices devicebiz.Repo, pluginCfg PluginConfigSer
 	return &Handler{svc: s, devices: devices, pluginCfg: pluginCfg}
 }
 
-// SetPackageResolver wires the bundle locator. Optional —
-// without it /v1/edges/{id}/upgrade-package returns 503 and the SPA
-// degrades to the legacy "URL+sha modal" upgrade.
+// SetPackageResolver wires the bundle locator. Optional — without it the
+// package-upgrade endpoints return 503.
 func (h *Handler) SetPackageResolver(r PackageResolver) { h.pkgRes = r }
 
 // SetUpgradeJobService enables persistent background package rollouts and
@@ -172,7 +171,7 @@ func (h *Handler) Register(r chi.Router) {
 	// shape + sha256 before downloading anything.
 	r.With(h.writeMW("edge:*")).Post("/v1/edges/{id}/upgrade", h.upgradeAgent)
 	// integer-bundle upgrade. One button → manager picks the
-	// baked bundle for the edge's arch, sends fetch_package + (after
+	// installed bundle for the edge's arch, sends fetch_package + (after
 	// the stage ack) apply_package. URL+sha auto-resolved here so
 	// admin never types a hash.
 	r.With(h.writeMW("edge:*")).Post("/v1/edges/{id}/upgrade-package", h.upgradePackage)
@@ -635,17 +634,20 @@ func (h *Handler) upgradePackage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.pkgRes == nil {
-		writeErr(w, fmt.Errorf("%w: edge bundle not baked into this manager image", errs.ErrNotWiredYet))
+		writeErr(w, fmt.Errorf("%w: Edge bundle assets are not installed or mounted", errs.ErrNotWiredYet))
 		return
 	}
 	var req upgradePkgReq
 	_ = json.NewDecoder(r.Body).Decode(&req) // body is optional; defaults applied below
 
-	// Resolve arch from the request. Default to linux-amd64 when missing so
-	// legacy edges without arch fields still upgrade.
-	arch := strings.TrimSpace(req.Arch)
-	if arch == "" {
-		arch = "linux-amd64"
+	arch, err := h.packageArchForEdge(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if requested := strings.TrimSpace(req.Arch); requested != "" && requested != arch {
+		writeErr(w, fmt.Errorf("%w: requested bundle architecture %q does not match device architecture %q", errs.ErrInvalid, requested, arch))
+		return
 	}
 	url, sha, ver, err := h.pkgRes.ResolveBundle(arch, strings.TrimSpace(req.Version))
 	if err != nil {
@@ -684,7 +686,7 @@ func (h *Handler) upgradePackage(w http.ResponseWriter, r *http.Request) {
 }
 
 type upgradePkgReq struct {
-	Arch    string `json:"arch,omitempty"`    // linux-amd64 default; linux-arm64 supported
+	Arch    string `json:"arch,omitempty"`    // optional assertion; actual architecture comes from the linked device
 	Version string `json:"version,omitempty"` // empty = manager's own version
 }
 
@@ -695,6 +697,41 @@ type upgradePkgResp struct {
 	ManifestFiles int    `json:"manifest_files"`
 	Applied       bool   `json:"applied"`
 	ApplyError    string `json:"apply_error,omitempty"`
+}
+
+// packageArchForEdge resolves architecture from persisted host facts instead
+// of trusting an optional client hint. Installing an amd64 bundle on arm64 (or
+// vice versa) replaces every Edge executable with an unusable binary, so
+// missing/unsupported metadata must fail closed.
+func (h *Handler) packageArchForEdge(ctx context.Context, edgeID uint64) (string, error) {
+	if h == nil || h.svc == nil || h.devices == nil {
+		return "", errs.ErrNotWiredYet
+	}
+	edge, err := h.svc.Get(ctx, edgeID)
+	if err != nil {
+		return "", fmt.Errorf("resolve upgrade edge %d: %w", edgeID, err)
+	}
+	if edge == nil || edge.DeviceID == nil || *edge.DeviceID == 0 {
+		return "", fmt.Errorf("%w: edge %d is not linked to a host device", errs.ErrInvalid, edgeID)
+	}
+	device, err := h.devices.Get(ctx, *edge.DeviceID)
+	if err != nil {
+		return "", fmt.Errorf("resolve upgrade device %d: %w", *edge.DeviceID, err)
+	}
+	if device == nil {
+		return "", fmt.Errorf("%w: host device %d is unavailable", errs.ErrInvalid, *edge.DeviceID)
+	}
+	if osName := strings.ToLower(strings.TrimSpace(device.OS)); osName != "" && osName != "linux" {
+		return "", fmt.Errorf("%w: unsupported device OS %q", errs.ErrInvalid, device.OS)
+	}
+	switch strings.ToLower(strings.TrimSpace(device.Arch)) {
+	case "amd64", "x86_64", "x64", "linux-amd64", "linux/amd64":
+		return "linux-amd64", nil
+	case "arm64", "aarch64", "linux-arm64", "linux/arm64":
+		return "linux-arm64", nil
+	default:
+		return "", fmt.Errorf("%w: unsupported device architecture %q", errs.ErrInvalid, device.Arch)
+	}
 }
 
 // --------- batch fleet operations ---------
@@ -848,13 +885,13 @@ func (h *Handler) batchUpgradeAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 // batchUpgradePackage runs the one-button bundle upgrade across the
-// fleet. The bundle (url+sha) is resolved once from the shared arch +
-// version, then each edge does fetch_package + apply_package. A staged-
+// fleet. The bundle (url+sha) is resolved for each edge's persisted
+// architecture, then each edge does fetch_package + apply_package. A staged-
 // but-not-applied edge is reported OK=false with Applied=false so the
 // operator can see exactly which ones need a re-trigger.
 func (h *Handler) batchUpgradePackage(w http.ResponseWriter, r *http.Request) {
 	if h.pkgRes == nil {
-		writeErr(w, fmt.Errorf("%w: edge bundle not baked into this manager image", errs.ErrNotWiredYet))
+		writeErr(w, fmt.Errorf("%w: Edge bundle assets are not installed or mounted", errs.ErrNotWiredYet))
 		return
 	}
 	var req batchUpgradePkgReq
@@ -867,16 +904,22 @@ func (h *Handler) batchUpgradePackage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	arch := strings.TrimSpace(req.Arch)
-	if arch == "" {
-		arch = "linux-amd64"
-	}
-	url, sha, ver, err := h.pkgRes.ResolveBundle(arch, strings.TrimSpace(req.Version))
-	if err != nil {
-		writeErr(w, fmt.Errorf("%w: resolve bundle: %v", errs.ErrInvalid, err))
-		return
-	}
+	requestedArch := strings.TrimSpace(req.Arch)
+	requestedVersion := strings.TrimSpace(req.Version)
 	resp := runEdgeBatch(r.Context(), ids, func(ctx context.Context, id uint64) batchResultItem {
+		arch, err := h.packageArchForEdge(ctx, id)
+		if err != nil {
+			return batchResultItem{ID: id, OK: false, Error: err.Error(), Code: errCode(err)}
+		}
+		if requestedArch != "" && requestedArch != arch {
+			err := fmt.Errorf("%w: requested bundle architecture %q does not match device architecture %q", errs.ErrInvalid, requestedArch, arch)
+			return batchResultItem{ID: id, OK: false, Error: err.Error(), Code: errCode(err)}
+		}
+		url, sha, ver, err := h.pkgRes.ResolveBundle(arch, requestedVersion)
+		if err != nil {
+			resolvedErr := fmt.Errorf("%w: resolve bundle: %v", errs.ErrInvalid, err)
+			return batchResultItem{ID: id, OK: false, Error: resolvedErr.Error(), Code: errCode(resolvedErr)}
+		}
 		stageResp, err := h.svc.FetchPackage(ctx, id, url, sha, ver)
 		if err != nil {
 			return batchResultItem{ID: id, OK: false, Error: fmt.Sprintf("fetch_package: %v", err), Code: errCode(err), Version: ver}

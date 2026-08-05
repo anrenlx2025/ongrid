@@ -1,9 +1,9 @@
 // bundle.go — edge upgrade bundle resolver + static HTTP file
-// server. The manager image bakes bundles at
+// server. The installer places bundles at
 // /usr/share/ongrid/edge-bundles/edge-bundle-<arch>-<version>.tar.gz
-// (plus .sha256 companion); we expose them at
-// /api/v1/edge-bundle/<arch>/<filename> so the edge can pull them
-// over the same nginx pipeline it already trusts.
+// through the manager container's read-only host mount (plus a .sha256
+// companion); nginx exposes the host directory at /edge/<filename> so the
+// Edge can pull them over the same HTTPS endpoint it already trusts.
 package edge
 
 import (
@@ -53,10 +53,10 @@ type BundleInfo struct {
 	Error      string     `json:"error,omitempty"`
 }
 
-// NewFileBundleResolver builds the resolver. dir typically
-// /usr/share/ongrid/edge-bundles (set by Dockerfile.ongrid). publicURL
+// NewFileBundleResolver builds the resolver. dir is typically the
+// /usr/share/ongrid/edge-bundles host mount. publicURL
 // is the manager's externally-reachable origin (no trailing slash);
-// resolver constructs `{publicURL}/api/v1/edge-bundle/<arch>/<file>`.
+// resolver constructs `{publicURL}/edge/<file>`.
 func NewFileBundleResolver(dir, managerVersion, publicURL string) *FileBundleResolver {
 	return &FileBundleResolver{
 		dir:            strings.TrimRight(dir, "/"),
@@ -82,7 +82,10 @@ func (r *FileBundleResolver) ResolveBundle(arch, version string) (url, sha256, r
 	name := fmt.Sprintf("edge-bundle-%s-%s.tar.gz", arch, version)
 	tarball := filepath.Join(r.dir, name)
 	if _, err := os.Stat(tarball); err != nil {
-		return "", "", "", fmt.Errorf("bundle missing: %s (this manager image may have been built without build-edge-bundle)", name)
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", "", fmt.Errorf("bundle missing: %s (installed Edge assets do not contain this architecture/version)", name)
+		}
+		return "", "", "", fmt.Errorf("bundle inaccessible: %s: %w", name, err)
 	}
 	sha, err := readBundleSHA(tarball + ".sha256")
 	if err != nil {
@@ -91,11 +94,9 @@ func (r *FileBundleResolver) ResolveBundle(arch, version string) (url, sha256, r
 	if r.publicURL == "" {
 		return "", "", "", errors.New("publicURL not configured; cannot build bundle URL")
 	}
-	// Bundle bytes are served by nginx from the same /edge/ static
-	// path it already exposes for install.sh + individual binaries —
-	// the bundle file lands next to them after install/upgrade.sh
-	// extracts edge-bundles/ into bin/ (host) → /usr/share/nginx/
-	// html/edge/ (container). Anonymous fetch; sha256 is the gate.
+	// Bundle bytes are served by nginx from the same host Edge directory at
+	// /edge/ that already exposes install.sh and individual binaries.
+	// Anonymous fetch is safe because the verified SHA-256 is the trust gate.
 	return fmt.Sprintf("%s/edge/%s", r.publicURL, name), sha, version, nil
 }
 
@@ -123,7 +124,13 @@ func (r *FileBundleResolver) inspectBundle(arch, version string) BundleInfo {
 	tarball := filepath.Join(r.dir, name)
 	stat, err := os.Stat(tarball)
 	if err != nil {
-		item.Error = "bundle file is missing"
+		if errors.Is(err, os.ErrNotExist) {
+			item.Error = "bundle file is missing"
+		} else if errors.Is(err, os.ErrPermission) {
+			item.Error = "bundle file is inaccessible: permission denied"
+		} else {
+			item.Error = "bundle file cannot be inspected"
+		}
 		return item
 	}
 	if !stat.Mode().IsRegular() {

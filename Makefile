@@ -17,12 +17,14 @@ TARGET_OS   ?= linux
 TARGET_ARCH ?= amd64
 PLATFORM    ?= $(TARGET_OS)/$(TARGET_ARCH)
 endif
-PACKAGE_TARGET := linux
-# Explicit offline bundles embed amd64 Edge assets by default. Override this
-# with "linux-amd64 linux-arm64" when the offline package must serve both
-# architectures. The normal universal package embeds neither architecture.
+PACKAGE_TARGET := $(TARGET_OS)-$(TARGET_ARCH)
+# Package payloads stay architecture-specific for compatibility with existing
+# download URLs and upgrade clients. Edge binaries remain external CNB assets,
+# and every production package caches both architectures so mixed fleets can
+# be upgraded; device dispatch still selects the matching architecture.
+PACKAGE_EDGE_TARGETS ?= linux-amd64 linux-arm64
 EDGE_PLUGIN_ARCHES ?= linux-amd64
-STAGE       := dist/stage/ongrid-$(VERSION)-linux
+STAGE       := dist/stage/ongrid-$(VERSION)-$(PACKAGE_TARGET)
 OUT         := dist/out
 PACKAGE_CLEAN ?= 1
 # Local builds default to amd64. Release publishing produces one multi-arch
@@ -207,7 +209,8 @@ run-ongrid-edge: ## 本地直接跑 ongrid-edge
 # Produces a release tarball ready to scp to any Linux box with docker +
 # docker compose installed. Compose runtime images are pulled from CNB:
 #
-#     dist/out/ongrid-$(VERSION)-linux.tar.xz
+#     dist/out/ongrid-$(VERSION)-linux-amd64.tar.xz
+#     dist/out/ongrid-$(VERSION)-linux-arm64.tar.xz
 #
 # Pipeline:
 #   1. build-edge-attachments — build public dependency archives plus the
@@ -643,10 +646,22 @@ fetch-embedding-model: ## [release] 预拉 BGE 离线嵌入模型到 .cache/（�
 
 .PHONY: check-release-target package package-all test-release-package
 check-release-target:
-	@test "$(PACKAGE_TARGET)" = "linux" || { \
-		echo "unsupported PACKAGE_TARGET=$(PACKAGE_TARGET); expected linux"; \
+	@if [ "$(PLATFORM)" != "$(TARGET_OS)/$(TARGET_ARCH)" ]; then \
+		echo "PLATFORM=$(PLATFORM) does not match TARGET_OS/TARGET_ARCH=$(TARGET_OS)/$(TARGET_ARCH)"; \
+		echo "Use TARGET_ARCH=arm64 or PLATFORM=linux/arm64, but keep them consistent."; \
 		exit 2; \
-	}
+	fi
+	@case "$(PACKAGE_TARGET)" in \
+		linux-amd64|linux-arm64) ;; \
+		*) echo "unsupported PACKAGE_TARGET=$(PACKAGE_TARGET); expected linux-amd64 or linux-arm64"; exit 2 ;; \
+	esac
+	@targets="$(PACKAGE_EDGE_TARGETS)"; \
+		[ -n "$$targets" ] || { echo "PACKAGE_EDGE_TARGETS must not be empty"; exit 2; }; \
+		for target in $$targets; do \
+			case "$$target" in linux-amd64|linux-arm64) ;; \
+				*) echo "unsupported PACKAGE_EDGE_TARGETS value: $$target"; exit 2 ;; \
+			esac; \
+		done
 
 # Direct CNB Release attachments. Target-specific EDGE_PLUGIN_ARCHES makes the
 # existing fetch targets populate both Linux architectures. The dependency tag
@@ -751,18 +766,18 @@ test-release-workflow: ## [test] 校验 GitHub Release 必须等待 CNB Edge Rel
 # For offline RAG (ONGRID_EMBEDDING_PROVIDER=local) run
 # `make fetch-embedding-model` once before `make package`, otherwise
 # dist/package.sh warns and ships a tarball without the model.
-package: check-release-target ## [release] 打通用 Linux 精简安装包到 dist/out/（运行时按架构拉取 Edge 制品）
+package: check-release-target ## [release] 打兼容命名的单架构安装包（安装时缓存双架构 Edge 制品）
 	@if [ "$(PACKAGE_CLEAN)" = "1" ]; then rm -rf dist/stage dist/out; fi
 	@mkdir -p dist/stage dist/out
 	@if [ "$(ONGRID_BUNDLE_EDGE_ASSETS)" = "1" ]; then \
 		$(MAKE) --no-print-directory \
-			$(addprefix build-edge-,$(EDGE_PLUGIN_ARCHES)) \
+			$(addprefix build-edge-,$(PACKAGE_EDGE_TARGETS)) \
 			fetch-promtail fetch-otelcol fetch-node-exporter fetch-process-exporter fetch-db-exporters \
-			EDGE_PLUGIN_ARCHES="$(EDGE_PLUGIN_ARCHES)"; \
+			EDGE_PLUGIN_ARCHES="$(PACKAGE_EDGE_TARGETS)"; \
 	fi
 	PACKAGE_TARGET="$(PACKAGE_TARGET)" \
 	ONGRID_EDGE_DEPS_TAG="$(EDGE_DEPS_TAG)" \
-	EDGE_TARGETS="$(EDGE_PLUGIN_ARCHES)" \
+	EDGE_TARGETS="$(PACKAGE_EDGE_TARGETS)" \
 		bash dist/package.sh "$(VERSION)" "$(STAGE)" "$(OUT)"
 	@echo ""
 	@echo "=== release artefact ==="
@@ -771,13 +786,24 @@ package: check-release-target ## [release] 打通用 Linux 精简安装包到 di
 		cat $(OUT)/ongrid-$(VERSION)-$(PACKAGE_TARGET).tar.xz.sha256; \
 	fi
 
-package-all: package ## [release] 兼容入口：生成唯一的通用 Linux 安装包
+package-all: ## [release] 打 amd64 + arm64 两个生产安装包到 dist/out/
+	@rm -rf dist/stage dist/out
+	@mkdir -p dist/stage dist/out
+	@$(MAKE) --no-print-directory package TARGET_OS=linux TARGET_ARCH=amd64 PLATFORM=linux/amd64 PACKAGE_CLEAN=0
+	@$(MAKE) --no-print-directory package TARGET_OS=linux TARGET_ARCH=arm64 PLATFORM=linux/arm64 PACKAGE_CLEAN=0
+	@echo ""
+	@echo "=== release artefacts ==="
+	@ls -lh $(OUT)/ongrid-$(VERSION)-linux-amd64.tar.xz $(OUT)/ongrid-$(VERSION)-linux-arm64.tar.xz
+	@for f in $(OUT)/ongrid-$(VERSION)-linux-amd64.tar.xz.sha256 $(OUT)/ongrid-$(VERSION)-linux-arm64.tar.xz.sha256; do \
+		[ -f "$$f" ] && cat "$$f"; \
+	done
 
 test-release-package: ## [test] 校验安装 URL 与 Compose 发布包内容
 	bash scripts/test-public-url.sh
 	bash scripts/test-upgrade-data-permissions.sh
 	$(MAKE) --no-print-directory test-edge-attachments
 	bash scripts/test-compose-release-package.sh
+	bash scripts/test-apply-pending-upgrade.sh
 
 .PHONY: dist-clean
 dist-clean: ## [release] 清理 release 产物（dist/stage dist/out bin/<os>-*）

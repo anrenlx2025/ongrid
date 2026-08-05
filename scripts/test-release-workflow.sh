@@ -61,15 +61,17 @@ raise "edge-release must wait for image publication" unless edge.fetch("needs") 
 
 build = jobs.fetch("build")
 raise "package build must wait for finalized release images" unless build.fetch("needs") == "image"
-raise "release must build one universal package without an architecture matrix" if build.key?("strategy")
-build_step = build.fetch("steps").find { |step| step["name"] == "Build universal Linux package" }
-raise "missing universal package build step" unless build_step
-raise "universal package build must call make package" unless build_step.fetch("run").match?(/^make package\s*$/)
+matrix = build.fetch("strategy").fetch("matrix").fetch("include")
+arches = matrix.map { |entry| entry.fetch("arch") }.sort
+raise "release package matrix must contain amd64 and arm64" unless arches == ["amd64", "arm64"]
+build_step = build.fetch("steps").find { |step| step["name"] == "Build ${{ matrix.arch }} package" }
+raise "missing architecture-specific package build step" unless build_step
+build_run = build_step.fetch("run")
+raise "package build must pass the matrix architecture" unless build_run.include?("TARGET_ARCH=${{ matrix.arch }}")
 upload = build.fetch("steps").find { |step| step["name"] == "Upload package artifact" }
-raise "missing universal package upload step" unless upload
+raise "missing package upload step" unless upload
 upload_path = upload.fetch("with").fetch("path")
-raise "release uploads an architecture-specific server package" if upload_path.match?(/linux-(amd64|arm64)/)
-raise "release does not upload the universal server package" unless upload_path.include?("linux.tar.xz")
+raise "release package artifact is not architecture-specific" unless upload_path.include?("linux-${{ matrix.arch }}.tar.xz")
 
 publish = edge.fetch("steps").find { |step| step["name"] == "Publish versioned Edge release to CNB" }
 raise "missing Edge publish step" unless publish
@@ -82,12 +84,22 @@ raise "Edge Go toolchain must be exact for immutable binary comparison" unless g
 release_needs = Array(jobs.fetch("release").fetch("needs"))
 raise "GitHub Release must wait for Edge publication" unless release_needs.sort == ["build", "edge-release"]
 release = jobs.fetch("release")
+download_release = release.fetch("steps").find { |step| step["name"] == "Download package artifacts" }
+raise "release does not merge both package artifacts" unless download_release&.fetch("with")&.fetch("merge-multiple") == true
 publish_release = release.fetch("steps").find { |step| step["name"] == "Publish GitHub Release" }
 raise "missing GitHub Release publish step" unless publish_release
 release_run = publish_release.fetch("run")
-raise "GitHub Release still publishes architecture-specific server packages" if release_run.match?(/linux-(amd64|arm64)/)
-raise "GitHub Release does not publish the universal server package" unless release_run.include?("linux.tar.xz")
+raise "GitHub Release does not publish the amd64 package" unless release_run.include?("linux-amd64.tar.xz")
+raise "GitHub Release does not publish the arm64 package" unless release_run.include?("linux-arm64.tar.xz")
+raise "GitHub Release still publishes the merged universal package" if release_run.match?(/linux\.tar\.xz/)
 ' "$workflow"
+
+grep -Fxq 'PACKAGE_EDGE_TARGETS ?= linux-amd64 linux-arm64' "$makefile" \
+    || { echo "production packages do not cache both Edge architectures" >&2; exit 1; }
+grep -Fxq 'EDGE_ATTACHMENT_TARGETS ?= linux-amd64 linux-arm64' "$makefile" \
+    || { echo "CNB Edge releases do not declare both architectures" >&2; exit 1; }
+grep -Fq 'build-edge-version-attachments: build-edge-linux-amd64 build-edge-linux-arm64' "$makefile" \
+    || { echo "versioned CNB Edge release does not build both architectures" >&2; exit 1; }
 
 grep -Eq '^RELEASE_IMAGE_DIGEST_DIR \?= dist/release-digests$' "$makefile" \
     || { echo "Makefile manager digest directory does not match the workflow artifacts" >&2; exit 1; }

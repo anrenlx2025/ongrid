@@ -55,13 +55,16 @@ ongrid_edge_targets_from_directory() {
 }
 
 ongrid_resolve_edge_targets() {
-    local explicit=$1 installed_config=$2 package_config=$3 existing_edge_dir=$4 raw=""
+    local explicit=$1 package_config=$2 installed_config=$3 existing_edge_dir=$4 raw=""
     if [[ -n "$explicit" ]]; then
         raw=$explicit
     else
-        raw=$(ongrid_edge_config_value "$installed_config" ONGRID_EDGE_TARGETS 2>/dev/null || true)
+        # The current package declares the artifacts required by its manager
+        # version and must supersede an older generated selection. Operators
+        # can still deliberately narrow it with the explicit environment var.
+        raw=$(ongrid_edge_config_value "$package_config" ONGRID_EDGE_TARGETS 2>/dev/null || true)
         if [[ -z "$raw" ]]; then
-            raw=$(ongrid_edge_config_value "$package_config" ONGRID_EDGE_TARGETS 2>/dev/null || true)
+            raw=$(ongrid_edge_config_value "$installed_config" ONGRID_EDGE_TARGETS 2>/dev/null || true)
         fi
         if [[ -z "$raw" ]]; then
             raw=$(ongrid_edge_targets_from_directory "$existing_edge_dir" 2>/dev/null || true)

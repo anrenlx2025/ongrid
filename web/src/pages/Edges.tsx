@@ -40,11 +40,10 @@ import {
   type CreateEdgeResponse,
   type RotateSecretResponse,
   upgradeEdgeAgent,
-  upgradeEdgePackage,
-  batchUpgradeEdgePackage,
   batchUpgradeEdgeAgent,
   batchDeleteEdges,
   type BatchResponse,
+  createEdgeUpgradeJob,
   createEdgeEnrollmentProfile,
   deleteEdgeEnrollmentProfile,
   listEdgeEnrollmentProfiles,
@@ -402,10 +401,9 @@ export default function EdgesPage() {
     }
   }
 
-  // one-button upgrade. Confirms with the operator (the edge
-  // briefly restarts), POSTs to the resolver-backed endpoint, surfaces
-  // a toast. The actual swap happens on systemctl restart inside the
-  // edge; we trust the auto-rollback gate on the far side.
+  // Package upgrades use the persistent rollout coordinator so architecture
+  // selection comes from the linked device and success is reported only after
+  // the restarted Edge re-registers with the target version.
   async function onPackageUpgrade(e: Edge) {
     if (
       !confirm(
@@ -419,19 +417,24 @@ export default function EdgesPage() {
     setPkgUpgradingId(e.id);
     setToast(null);
     try {
-      const resp = await upgradeEdgePackage(e.id);
-      const ok = resp.applied;
+      if (!managerVersion) {
+        throw new Error(
+          tr(
+            "Manager 版本未知，无法创建升级任务",
+            "Manager version is unknown; cannot create upgrade job",
+          ),
+        );
+      }
+      const job = await createEdgeUpgradeJob({
+        edge_ids: [e.id],
+        target_version: managerVersion,
+      });
       setToast({
-        kind: ok ? "ok" : "err",
-        text: ok
-          ? tr(
-              `${e.name} → ${resp.version} 已 stage ${resp.manifest_files} 个文件，重启 swap 中`,
-              `${e.name} → ${resp.version} staged ${resp.manifest_files} files; restarting to apply`,
-            )
-          : tr(
-              `${e.name} stage 成功但 apply 失败：${resp.apply_error ?? "未知"}`,
-              `${e.name} staged OK but apply failed: ${resp.apply_error ?? "unknown"}`,
-            ),
+        kind: "ok",
+        text: tr(
+          `${e.name} → ${managerVersion} 升级任务 #${job.id} 已创建，将在重启注册后确认结果`,
+          `${e.name} → ${managerVersion} upgrade job #${job.id} created; completion is verified after re-registration`,
+        ),
       });
       void refresh();
     } catch (err) {
@@ -537,8 +540,25 @@ export default function EdgesPage() {
     setBatchBusy(true);
     setToast(null);
     try {
-      const resp = await batchUpgradeEdgePackage(ids);
-      summarizeBatch(tr("整包升级", "Package upgrade"), resp);
+      if (!managerVersion) {
+        throw new Error(
+          tr(
+            "Manager 版本未知，无法创建升级任务",
+            "Manager version is unknown; cannot create upgrade job",
+          ),
+        );
+      }
+      const job = await createEdgeUpgradeJob({
+        edge_ids: ids,
+        target_version: managerVersion,
+      });
+      setToast({
+        kind: "ok",
+        text: tr(
+          `已创建升级任务 #${job.id}，共 ${ids.length} 台，将按设备架构分别下发并验证`,
+          `Upgrade job #${job.id} created for ${ids.length} edge(s); each architecture is resolved and verified separately`,
+        ),
+      });
       clearSelection();
       void refresh();
     } catch (err) {

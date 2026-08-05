@@ -73,3 +73,37 @@ func TestFileBundleResolverCurrentBundlesRequiresPublicURL(t *testing.T) {
 		t.Fatalf("missing public URL should be unavailable: %+v", catalog.Items[0])
 	}
 }
+
+func TestFileBundleResolverReportsInaccessibleBundle(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "restricted")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("mkdir restricted dir: %v", err)
+	}
+	name := "edge-bundle-linux-amd64-v1.tar.gz"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("bundle"), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("restrict bundle dir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Errorf("restore bundle dir permissions: %v", err)
+		}
+	})
+
+	resolver := NewFileBundleResolver(dir, "v1", "https://manager.example")
+	_, _, _, err := resolver.ResolveBundle("linux-amd64", "v1")
+	if err == nil || !strings.Contains(err.Error(), "bundle inaccessible") || strings.Contains(err.Error(), "bundle missing") {
+		t.Fatalf("ResolveBundle error = %v, want inaccessible rather than missing", err)
+	}
+
+	catalog, err := resolver.CurrentBundles()
+	if err != nil {
+		t.Fatalf("CurrentBundles: %v", err)
+	}
+	if catalog.Items[0].Available || !strings.Contains(catalog.Items[0].Error, "permission denied") {
+		t.Fatalf("catalog item = %+v, want permission diagnostic", catalog.Items[0])
+	}
+}

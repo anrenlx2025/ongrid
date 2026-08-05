@@ -226,8 +226,6 @@ function CommandList({
 }) {
   const { tr } = useI18n();
   const ordered = useMemo(() => {
-    const universal = commands.find((item) => item.id === 'linux-universal');
-    if (universal) return [universal];
     const auto = commands.find((item) => item.id === 'auto');
     const rest = commands.filter((item) => item.id !== 'auto');
     return auto ? [...rest, auto] : commands;
@@ -236,7 +234,7 @@ function CommandList({
     <section className="space-y-2">
       <div className="flex items-center gap-2 px-1 text-xs font-medium text-zinc-400">
         <TerminalSquare size={13} />
-        <span>{ordered.length === 1 ? tr('升级命令', 'Upgrade command') : tr('升级命令', 'Upgrade commands')}</span>
+        <span>{tr('升级命令', 'Upgrade commands')}</span>
       </div>
       <Card compact className="divide-y divide-zinc-800/60 p-0">
         {ordered.map((item) => (
@@ -246,7 +244,7 @@ function CommandList({
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-zinc-100">{commandLabel(item, tr)}</span>
                 </div>
-                <div className="mt-1 text-[11px] text-zinc-500">{commandTarget(item, tr)}</div>
+                <div className="mt-1 font-mono text-[11px] text-zinc-500">{item.arch}</div>
               </div>
               <Button
                 variant={copied === item.id ? 'subtle' : 'ghost'}
@@ -306,8 +304,6 @@ function getStatus(info: UpgradeInfo | null) {
 
 function commandLabel(item: UpgradeCommand, tr: (zh: string, en: string) => string) {
   switch (item.id) {
-    case 'linux-universal':
-      return tr('通用 Linux 安装包', 'Universal Linux package');
     case 'auto':
       return tr('自动识别 Linux 架构', 'Auto-detect Linux arch');
     case 'linux-amd64':
@@ -317,13 +313,6 @@ function commandLabel(item: UpgradeCommand, tr: (zh: string, en: string) => stri
     default:
       return item.label;
   }
-}
-
-function commandTarget(item: UpgradeCommand, tr: (zh: string, en: string) => string) {
-  if (item.id === 'linux-universal') {
-    return tr('AMD64 / ARM64 · 安装时自动识别', 'AMD64 / ARM64 · detected during installation');
-  }
-  return item.arch;
 }
 
 async function copyText(text: string) {

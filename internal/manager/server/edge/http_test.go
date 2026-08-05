@@ -98,6 +98,7 @@ type fakeSvc struct {
 	listErr  error
 
 	getResp *model.Edge
+	getByID map[uint64]*model.Edge
 	getErr  error
 
 	deleteErr error
@@ -160,7 +161,12 @@ func (f *fakeSvc) List(_ context.Context, flt biz.ListFilter) ([]*model.Edge, er
 	return f.listResp, f.listErr
 }
 func (f *fakeSvc) Get(_ context.Context, id uint64) (*model.Edge, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.lastGetID = id
+	if edge, ok := f.getByID[id]; ok {
+		return edge, nil
+	}
 	return f.getResp, f.getErr
 }
 func (f *fakeSvc) Delete(_ context.Context, id uint64) error {
@@ -451,6 +457,26 @@ func (fakePkgResolver) ResolveBundle(_ string, _ string) (string, string, string
 	return "https://example/ongrid-edge", strings.Repeat("a", 64), "v9.9.9", nil
 }
 
+type recordingPkgResolver struct {
+	mu     sync.Mutex
+	arches []string
+}
+
+func (r *recordingPkgResolver) ResolveBundle(arch, _ string) (string, string, string, error) {
+	r.mu.Lock()
+	r.arches = append(r.arches, arch)
+	r.mu.Unlock()
+	return "https://example/ongrid-edge", strings.Repeat("a", 64), "v9.9.9", nil
+}
+
+func (r *recordingPkgResolver) resolvedArches() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	arches := append([]string(nil), r.arches...)
+	sort.Strings(arches)
+	return arches
+}
+
 type fakePkgCatalogResolver struct{ fakePkgResolver }
 
 func (fakePkgCatalogResolver) CurrentBundles() (BundleCatalog, error) {
@@ -610,9 +636,24 @@ func TestBatchUpgradeAgent_MissingURLInvalid(t *testing.T) {
 }
 
 func TestBatchUpgradePackage_HappyPath(t *testing.T) {
-	svc := &fakeSvc{applyAccepted: true, fetchManifest: 7}
-	h := NewHandler(svc, newFakeDeviceRepo(), nil)
-	h.SetPackageResolver(fakePkgResolver{})
+	device1, device2, device3 := uint64(101), uint64(102), uint64(103)
+	svc := &fakeSvc{
+		applyAccepted: true,
+		fetchManifest: 7,
+		getByID: map[uint64]*model.Edge{
+			1: {ID: 1, DeviceID: &device1},
+			2: {ID: 2, DeviceID: &device2},
+			3: {ID: 3, DeviceID: &device3},
+		},
+	}
+	devices := newFakeDeviceRepo(
+		&devicemodel.Device{ID: device1, OS: "linux", Arch: "amd64"},
+		&devicemodel.Device{ID: device2, OS: "linux", Arch: "aarch64"},
+		&devicemodel.Device{ID: device3, OS: "linux", Arch: "x86_64"},
+	)
+	resolver := &recordingPkgResolver{}
+	h := NewHandler(svc, devices, nil)
+	h.SetPackageResolver(resolver)
 	router := buildRouter(h, tenantctx.Tenant{UserID: 1, Role: "admin"})
 
 	w := postJSON(router, "/v1/edges/batch/upgrade-package", `{"ids":[1,2,3]}`)
@@ -628,6 +669,52 @@ func TestBatchUpgradePackage_HappyPath(t *testing.T) {
 		if !r.Applied || r.Version != "v9.9.9" || r.ManifestFiles != 7 {
 			t.Errorf("result = %+v, want applied=true version=v9.9.9 manifest=7", r)
 		}
+	}
+	wantArches := []string{"linux-amd64", "linux-amd64", "linux-arm64"}
+	if arches := resolver.resolvedArches(); strings.Join(arches, ",") != strings.Join(wantArches, ",") {
+		t.Fatalf("resolved arches = %v, want %v", arches, wantArches)
+	}
+}
+
+func TestUpgradePackageUsesLinkedDeviceArchitecture(t *testing.T) {
+	deviceID := uint64(201)
+	svc := &fakeSvc{
+		getResp:       &model.Edge{ID: 7, DeviceID: &deviceID},
+		applyAccepted: true,
+		fetchManifest: 10,
+	}
+	resolver := &recordingPkgResolver{}
+	h := NewHandler(svc, newFakeDeviceRepo(
+		&devicemodel.Device{ID: deviceID, OS: "linux", Arch: "aarch64"},
+	), nil)
+	h.SetPackageResolver(resolver)
+	router := buildRouter(h, tenantctx.Tenant{UserID: 1, Role: "admin"})
+
+	w := postJSON(router, "/v1/edges/7/upgrade-package", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if arches := resolver.resolvedArches(); strings.Join(arches, ",") != "linux-arm64" {
+		t.Fatalf("resolved arches = %v, want linux-arm64", arches)
+	}
+}
+
+func TestUpgradePackageRejectsMismatchedArchitectureHint(t *testing.T) {
+	deviceID := uint64(202)
+	svc := &fakeSvc{getResp: &model.Edge{ID: 8, DeviceID: &deviceID}}
+	resolver := &recordingPkgResolver{}
+	h := NewHandler(svc, newFakeDeviceRepo(
+		&devicemodel.Device{ID: deviceID, OS: "linux", Arch: "arm64"},
+	), nil)
+	h.SetPackageResolver(resolver)
+	router := buildRouter(h, tenantctx.Tenant{UserID: 1, Role: "admin"})
+
+	w := postJSON(router, "/v1/edges/8/upgrade-package", `{"arch":"linux-amd64"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if arches := resolver.resolvedArches(); len(arches) != 0 {
+		t.Fatalf("resolver was called for mismatched architecture: %v", arches)
 	}
 }
 
