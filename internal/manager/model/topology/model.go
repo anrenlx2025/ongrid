@@ -251,7 +251,7 @@ const (
 	RelConnectedTo  = "connected_to"
 )
 
-// BuiltinRelationTypes is the six-row seed set mandates. The
+// BuiltinRelationTypes is the built-in seed set. The
 // migrator inserts these on every boot via upsert; operators editing
 // a built-in row is a no-op (UI hides the editor for Builtin=true).
 func BuiltinRelationTypes() []RelationType {
