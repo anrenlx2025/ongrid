@@ -84,6 +84,11 @@ export type NetworkInterface = {
   description?: string;
   admin_status?: string;
   oper_status?: string;
+	 speed_bps?: number;
+	 in_octets?: number;
+	 out_octets?: number;
+	 in_errors?: number;
+	 out_errors?: number;
   addresses?: string[];
 };
 
@@ -109,6 +114,12 @@ export type NetworkDeviceDetail = {
   bridge_base_mac?: string;
   reachability_status: string;
   last_reachable_at?: string;
+	 poll_enabled?: boolean;
+	 poll_interval_seconds?: number;
+	 poll_credential_name?: string;
+	 poll_port?: number;
+	 last_poll_at?: string;
+	 last_poll_error?: string;
   discovery_source?: string;
   scanner_edge_id?: number;
   scanner_edge_name?: string;
@@ -129,6 +140,13 @@ export function listNetworkCandidates(params?: { status?: string }) {
     `/network-discovery/candidates${qs}`,
   );
 }
+
+export type NetworkPollingInput = {
+  enabled: boolean;
+  interval_seconds?: number;
+  credential_name?: string;
+  port?: number;
+};
 
 export function scanNetworkCandidate(
   id: string | number,
@@ -156,6 +174,14 @@ export function getNetworkDeviceDetail(id: string | number) {
   return request<NetworkDeviceDetail>(
     'GET',
     `/devices/${encodeURIComponent(String(id))}/network`,
+  );
+}
+
+export function configureNetworkPolling(id: string | number, input: NetworkPollingInput) {
+  return request<NetworkDeviceDetail>(
+    'PATCH',
+    `/devices/${encodeURIComponent(String(id))}/network/polling`,
+    input,
   );
 }
 

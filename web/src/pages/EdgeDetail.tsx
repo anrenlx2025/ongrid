@@ -26,6 +26,8 @@ import {
   Network,
 } from 'lucide-react';
 import { StatusPill } from '@/components/StatusPill';
+import { Modal } from '@/components/Modal';
+import { Button } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { openMetricDrilldown } from '@/lib/drilldown';
 import { relativeTime } from '@/lib/format';
@@ -45,12 +47,15 @@ import {
 import { ApiError } from '@/api/client';
 import {
   getDevice,
+	configureNetworkPolling,
   getNetworkDeviceDetail,
   listDeviceEdges,
   type Device,
   type NetworkDeviceDetail,
   type NetworkInterface,
 } from '@/api/devices';
+import { listSecrets, type SecretView } from '@/api/secrets';
+import { usePermissions } from '@/store/me';
 import { NodeNeighbors } from '@/components/topology/NodeNeighbors';
 import { tr as trInline, useI18n } from '@/i18n/locale';
 
@@ -547,12 +552,49 @@ function NetworkDevicePage({
   onBack(): void;
 }) {
   const { tr } = useI18n();
+	const { isAdmin } = usePermissions();
   const location = useLocation();
   const navigate = useNavigate();
   const [tab, setTab] = useState<NetworkTab>('overview');
   const interfaces = detail?.interfaces ?? [];
   const scanner = detail?.scanner_host_name || detail?.scanner_edge_name;
   const reachable = detail?.reachability_status === 'reachable';
+	const [pollingOpen, setPollingOpen] = useState(false);
+	const [secrets, setSecrets] = useState<SecretView[]>([]);
+	const [pollEnabled, setPollEnabled] = useState(Boolean(detail?.poll_enabled));
+	const [pollInterval, setPollInterval] = useState(detail?.poll_interval_seconds || 300);
+	const [credentialName, setCredentialName] = useState(detail?.poll_credential_name || '');
+	const [pollBusy, setPollBusy] = useState(false);
+	const [pollError, setPollError] = useState<string | null>(null);
+
+	useEffect(() => {
+		setPollEnabled(Boolean(detail?.poll_enabled));
+		setPollInterval(detail?.poll_interval_seconds || 300);
+		setCredentialName(detail?.poll_credential_name || '');
+	}, [detail?.poll_enabled, detail?.poll_interval_seconds, detail?.poll_credential_name]);
+
+	const openPolling = async () => {
+		setPollError(null);
+		try {
+			const response = await listSecrets();
+			setSecrets((response.items || []).filter((secret) => secret.type === 'snmp'));
+			setPollingOpen(true);
+		} catch (err) {
+			setPollError((err as Error).message || tr('加载 SNMP 凭证失败', 'Failed to load SNMP credentials'));
+		}
+	};
+
+	const savePolling = async () => {
+		if (!deviceID) return;
+		setPollBusy(true); setPollError(null);
+		try {
+			await configureNetworkPolling(deviceID, { enabled: pollEnabled, interval_seconds: pollInterval, credential_name: credentialName, port: detail?.poll_port || 161 });
+			setPollingOpen(false);
+			window.location.reload();
+		} catch (err) {
+			setPollError((err as Error).message || tr('保存轮询配置失败', 'Failed to save polling configuration'));
+		} finally { setPollBusy(false); }
+	};
 
   useEffect(() => {
     const requested = new URLSearchParams(location.search).get('tab');
@@ -647,6 +689,19 @@ function NetworkDevicePage({
             </section>
 
             <section className="overflow-hidden rounded-lg border border-zinc-800/60 bg-zinc-900/40">
+              <div className="flex items-center justify-between border-b border-zinc-800/60 px-4 py-3">
+                <h2 className="text-sm font-medium text-zinc-100">{tr('SNMP 轮询', 'SNMP polling')}</h2>
+                {isAdmin && <button type="button" onClick={() => void openPolling()} className="text-xs text-indigo-300 hover:text-indigo-200">{tr('配置', 'Configure')}</button>}
+              </div>
+              <dl className="grid grid-cols-1 divide-y divide-zinc-800/50 md:grid-cols-3 md:divide-y-0">
+                <NetworkDetailField label={tr('状态', 'Status')} value={detail?.poll_enabled ? tr('已启用', 'Enabled') : tr('未启用', 'Disabled')} />
+                <NetworkDetailField label={tr('轮询间隔', 'Interval')} value={detail?.poll_enabled ? `${detail.poll_interval_seconds || 300}s` : undefined} />
+                <NetworkDetailField label={tr('上次轮询', 'Last poll')} value={detail?.last_poll_at ? relativeTime(detail.last_poll_at) : undefined} />
+              </dl>
+              {detail?.last_poll_error && <p className="border-t border-red-500/15 bg-red-500/5 px-4 py-2 text-xs text-red-300">{detail.last_poll_error}</p>}
+            </section>
+
+            <section className="overflow-hidden rounded-lg border border-zinc-800/60 bg-zinc-900/40">
               <div className="border-b border-zinc-800/60 px-4 py-3">
                 <h2 className="text-sm font-medium text-zinc-100">{tr('发现信息', 'Discovery')}</h2>
               </div>
@@ -679,6 +734,16 @@ function NetworkDevicePage({
           />
         )}
       </div>
+
+      <Modal open={pollingOpen} onClose={() => setPollingOpen(false)} title={tr('配置 SNMP 轮询', 'Configure SNMP polling')} size="sm" footer={<><Button onClick={() => setPollingOpen(false)}>{tr('取消', 'Cancel')}</Button><Button variant="primary" disabled={pollBusy} onClick={() => void savePolling()}>{pollBusy ? tr('保存中…', 'Saving…') : tr('保存', 'Save')}</Button></>}>
+        <div className="space-y-4 text-xs">
+          {pollError && <div role="alert" className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-red-300">{pollError}</div>}
+          <label className="flex items-center gap-2 text-zinc-300"><input type="checkbox" checked={pollEnabled} onChange={(event) => setPollEnabled(event.target.checked)} />{tr('启用定时采集', 'Enable scheduled collection')}</label>
+          <label className="block text-zinc-400">{tr('SNMP 凭证', 'SNMP credential')}<select disabled={!pollEnabled} value={credentialName} onChange={(event) => setCredentialName(event.target.value)} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-zinc-100"><option value="">{tr('选择设置中的 SNMP 凭证', 'Select an SNMP credential')}</option>{secrets.map((secret) => <option key={secret.id} value={secret.name}>{secret.name}</option>)}</select></label>
+          <label className="block text-zinc-400">{tr('轮询间隔（秒）', 'Polling interval (seconds)')}<input type="number" min={30} max={86400} value={pollInterval} onChange={(event) => setPollInterval(Number(event.target.value))} disabled={!pollEnabled} className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 font-mono text-zinc-100" /></label>
+          {pollEnabled && secrets.length === 0 && <p className="text-zinc-500">{tr('先在 设置 → Secrets 创建 SNMP 凭证。', 'Create an SNMP credential in Settings → Secrets first.')}</p>}
+        </div>
+      </Modal>
     </main>
   );
 }
@@ -696,7 +761,7 @@ function NetworkInterfacesTable({ interfaces }: { interfaces: NetworkInterface[]
   const { tr } = useI18n();
   return (
     <section className="overflow-x-auto rounded-lg border border-zinc-800/60 bg-zinc-900/40">
-      <table className="w-full min-w-[860px] table-fixed text-xs">
+      <table className="w-full min-w-[1100px] table-fixed text-xs">
         <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase text-zinc-500">
           <tr>
             <th className="w-16 px-3 py-2.5 text-left">Index</th>
@@ -706,11 +771,15 @@ function NetworkInterfacesTable({ interfaces }: { interfaces: NetworkInterface[]
             <th className="px-3 py-2.5 text-left">{tr('地址', 'Addresses')}</th>
             <th className="w-24 px-3 py-2.5 text-left">Admin</th>
             <th className="w-24 px-3 py-2.5 text-left">Oper</th>
+			<th className="w-28 px-3 py-2.5 text-right">{tr('速率', 'Speed')}</th>
+			<th className="w-28 px-3 py-2.5 text-right">{tr('接收', 'RX')}</th>
+			<th className="w-28 px-3 py-2.5 text-right">{tr('发送', 'TX')}</th>
+			<th className="w-24 px-3 py-2.5 text-right">{tr('错误', 'Errors')}</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-zinc-800/40">
           {interfaces.length === 0 ? (
-            <tr><td colSpan={7} className="px-4 py-10 text-center text-zinc-500">{tr('暂无接口数据', 'No interface data')}</td></tr>
+			<tr><td colSpan={11} className="px-4 py-10 text-center text-zinc-500">{tr('暂无接口数据', 'No interface data')}</td></tr>
           ) : interfaces.map((row, index) => (
             <tr key={`${row.if_index ?? index}-${row.name ?? ''}`}>
               <td className="px-3 py-2.5 font-mono text-zinc-500">{row.if_index ?? '—'}</td>
@@ -720,6 +789,10 @@ function NetworkInterfacesTable({ interfaces }: { interfaces: NetworkInterface[]
               <td className="truncate px-3 py-2.5 font-mono text-zinc-400">{row.addresses?.join(', ') || '—'}</td>
               <td className="px-3 py-2.5"><InterfaceStatus value={row.admin_status} /></td>
               <td className="px-3 py-2.5"><InterfaceStatus value={row.oper_status} /></td>
+			  <td className="px-3 py-2.5 text-right font-mono text-zinc-400">{formatBits(row.speed_bps)}</td>
+			  <td className="px-3 py-2.5 text-right font-mono text-zinc-400">{formatBytes(row.in_octets)}</td>
+			  <td className="px-3 py-2.5 text-right font-mono text-zinc-400">{formatBytes(row.out_octets)}</td>
+			  <td className="px-3 py-2.5 text-right font-mono text-zinc-400">{formatCount((row.in_errors || 0) + (row.out_errors || 0))}</td>
             </tr>
           ))}
         </tbody>
@@ -727,6 +800,26 @@ function NetworkInterfacesTable({ interfaces }: { interfaces: NetworkInterface[]
     </section>
   );
 }
+
+function formatBytes(value?: number) {
+  if (!value) return '—';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let next = value;
+  let index = 0;
+  while (next >= 1024 && index < units.length - 1) { next /= 1024; index++; }
+  return `${next >= 10 || index === 0 ? next.toFixed(0) : next.toFixed(1)} ${units[index]}`;
+}
+
+function formatBits(value?: number) {
+  if (!value) return '—';
+  const units = ['bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps'];
+  let next = value;
+  let index = 0;
+  while (next >= 1000 && index < units.length - 1) { next /= 1000; index++; }
+  return `${next >= 10 || index === 0 ? next.toFixed(0) : next.toFixed(1)} ${units[index]}`;
+}
+
+function formatCount(value: number) { return value ? value.toLocaleString() : '—'; }
 
 function InterfaceStatus({ value }: { value?: string }) {
   const normalized = value?.toLowerCase();

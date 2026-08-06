@@ -432,6 +432,11 @@ type NetworkInterfaceReport struct {
 	Description   string   `json:"description,omitempty"`
 	AdminStatus   string   `json:"admin_status,omitempty"`
 	OperStatus    string   `json:"oper_status,omitempty"`
+	SpeedBps      uint64   `json:"speed_bps,omitempty"`
+	InOctets      uint64   `json:"in_octets,omitempty"`
+	OutOctets     uint64   `json:"out_octets,omitempty"`
+	InErrors      uint64   `json:"in_errors,omitempty"`
+	OutErrors     uint64   `json:"out_errors,omitempty"`
 	Addresses     []string `json:"addresses,omitempty"`
 }
 

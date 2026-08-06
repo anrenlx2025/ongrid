@@ -21,6 +21,12 @@ type DeviceNetwork struct {
 	CapabilitiesJSON      string     `gorm:"column:capabilities_json;type:text"`
 	ReachabilityStatus    string     `gorm:"column:reachability_status;size:32;not null;default:'unknown'"`
 	LastReachableAt       *time.Time `gorm:"column:last_reachable_at;index"`
+	PollEnabled           bool       `gorm:"column:poll_enabled;not null;default:false"`
+	PollIntervalSeconds   uint32     `gorm:"column:poll_interval_seconds;not null;default:300"`
+	PollCredentialName    string     `gorm:"column:poll_credential_name;size:128;not null;default:''"`
+	PollPort              uint16     `gorm:"column:poll_port;not null;default:161"`
+	LastPollAt            *time.Time `gorm:"column:last_poll_at;index"`
+	LastPollError         string     `gorm:"column:last_poll_error;size:512;not null;default:''"`
 	NetworkRoleSuppressed bool       `gorm:"column:network_role_suppressed;not null;default:false"`
 	CreatedAt             time.Time  `gorm:"column:created_at"`
 	UpdatedAt             time.Time  `gorm:"column:updated_at"`
@@ -86,6 +92,11 @@ type NetworkInterface struct {
 	Description   string    `gorm:"column:description;size:255;not null;default:''"`
 	AdminStatus   string    `gorm:"column:admin_status;size:32;not null;default:''"`
 	OperStatus    string    `gorm:"column:oper_status;size:32;not null;default:''"`
+	SpeedBps      uint64    `gorm:"column:speed_bps;not null;default:0"`
+	InOctets      uint64    `gorm:"column:in_octets;not null;default:0"`
+	OutOctets     uint64    `gorm:"column:out_octets;not null;default:0"`
+	InErrors      uint64    `gorm:"column:in_errors;not null;default:0"`
+	OutErrors     uint64    `gorm:"column:out_errors;not null;default:0"`
 	AddressesJSON string    `gorm:"column:addresses_json;type:text"`
 	Source        string    `gorm:"column:source;size:32;not null;default:''"`
 	LastSeenAt    time.Time `gorm:"column:last_seen_at;index"`

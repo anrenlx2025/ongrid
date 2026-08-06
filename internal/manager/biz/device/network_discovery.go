@@ -50,6 +50,15 @@ type NetworkPromotionRepo interface {
 	MarkCandidatePromoted(ctx context.Context, id, deviceID uint64) error
 	UpsertDeviceNetwork(ctx context.Context, profile *model.DeviceNetwork) error
 	GetNetworkDeviceDetail(ctx context.Context, deviceID uint64) (*NetworkDeviceDetail, error)
+	ListDueNetworkPolls(ctx context.Context, now time.Time, limit int) ([]*NetworkDeviceDetail, error)
+	ReplaceNetworkInterfaces(ctx context.Context, deviceID uint64, rows []*model.NetworkInterface) error
+}
+
+// NetworkSNMPCredentialResolver resolves an encrypted credential inside the
+// manager process. The device domain deliberately depends on this narrow
+// consumer-owned interface rather than the secret bounded context.
+type NetworkSNMPCredentialResolver interface {
+	ResolveFields(ctx context.Context, name string) (map[string]string, error)
 }
 
 // NetworkDeviceDetail is the read model for a verified network device. The
@@ -69,12 +78,17 @@ type NetworkCandidateFilter struct {
 // NetworkDiscoveryUsecase accepts Edge observations and keeps them in the
 // candidate table. ARP and gateway observations never create a Device row.
 type NetworkDiscoveryUsecase struct {
-	repo       NetworkDiscoveryRepo
-	promotion  NetworkPromotionRepo
-	devices    Repo
-	links      EdgeDeviceRepo
-	edgeCaller NetworkSNMPCaller
-	topology   NetworkTopologyMirror
+	repo        NetworkDiscoveryRepo
+	promotion   NetworkPromotionRepo
+	devices     Repo
+	links       EdgeDeviceRepo
+	edgeCaller  NetworkSNMPCaller
+	credentials NetworkSNMPCredentialResolver
+	topology    NetworkTopologyMirror
+}
+
+func (u *NetworkDiscoveryUsecase) SetCredentialResolver(resolver NetworkSNMPCredentialResolver) {
+	u.credentials = resolver
 }
 
 func NewNetworkDiscoveryUsecase(repo NetworkDiscoveryRepo) *NetworkDiscoveryUsecase {
@@ -107,6 +121,178 @@ func (u *NetworkDiscoveryUsecase) GetNetworkDeviceDetail(ctx context.Context, de
 		return nil, errs.ErrNotWiredYet
 	}
 	return u.promotion.GetNetworkDeviceDetail(ctx, deviceID)
+}
+
+// ConfigureNetworkPolling enables or disables periodic read-only SNMP
+// collection. The device profile stores only a credential name; secret values
+// remain sealed in the shared vault and are resolved immediately before use.
+func (u *NetworkDiscoveryUsecase) ConfigureNetworkPolling(ctx context.Context, deviceID uint64, enabled bool, intervalSeconds uint32, credentialName string, port uint16) (*NetworkDeviceDetail, error) {
+	if u == nil || u.promotion == nil {
+		return nil, errs.ErrNotWiredYet
+	}
+	detail, err := u.promotion.GetNetworkDeviceDetail(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if detail.Profile == nil {
+		return nil, errs.ErrNotFound
+	}
+	if intervalSeconds == 0 {
+		intervalSeconds = 300
+	}
+	if intervalSeconds < 30 || intervalSeconds > 86400 {
+		return nil, fmt.Errorf("%w: poll interval must be between 30 and 86400 seconds", errs.ErrInvalid)
+	}
+	if port == 0 {
+		port = 161
+	}
+	if enabled {
+		credentialName = strings.TrimSpace(credentialName)
+		if credentialName == "" || u.credentials == nil {
+			return nil, fmt.Errorf("%w: an SNMP credential is required for polling", errs.ErrInvalid)
+		}
+		fields, err := u.credentials.ResolveFields(ctx, credentialName)
+		if err != nil {
+			return nil, fmt.Errorf("resolve SNMP credential: %w", err)
+		}
+		if err := validateSNMPCredentialFields(fields); err != nil {
+			return nil, err
+		}
+	}
+	detail.Profile.PollEnabled = enabled
+	detail.Profile.PollIntervalSeconds = intervalSeconds
+	detail.Profile.PollCredentialName = strings.TrimSpace(credentialName)
+	detail.Profile.PollPort = port
+	if !enabled {
+		detail.Profile.PollCredentialName = ""
+		detail.Profile.LastPollError = ""
+	}
+	if err := u.promotion.UpsertDeviceNetwork(ctx, detail.Profile); err != nil {
+		return nil, err
+	}
+	return u.promotion.GetNetworkDeviceDetail(ctx, deviceID)
+}
+
+func validateSNMPCredentialFields(fields map[string]string) error {
+	version := strings.ToLower(strings.TrimSpace(fields["version"]))
+	if version == "" {
+		version = "v2c"
+	}
+	switch version {
+	case "v2c":
+		if strings.TrimSpace(fields["community"]) == "" {
+			return fmt.Errorf("%w: SNMP community is required for v2c", errs.ErrInvalid)
+		}
+	case "v3":
+		if strings.TrimSpace(fields["username"]) == "" {
+			return fmt.Errorf("%w: SNMP username is required for v3", errs.ErrInvalid)
+		}
+	default:
+		return fmt.Errorf("%w: SNMP version must be v2c or v3", errs.ErrInvalid)
+	}
+	return nil
+}
+
+// PollDueNetworkDevices collects the latest SNMP snapshot for at most limit
+// due devices. It is intentionally sequential: calls cross reverse tunnels
+// and bounded polling avoids starving interactive Edge requests.
+func (u *NetworkDiscoveryUsecase) PollDueNetworkDevices(ctx context.Context, now time.Time, limit int) (int, error) {
+	if u == nil || u.promotion == nil || u.edgeCaller == nil || u.credentials == nil {
+		return 0, errs.ErrNotWiredYet
+	}
+	details, err := u.promotion.ListDueNetworkPolls(ctx, now, limit)
+	if err != nil {
+		return 0, err
+	}
+	completed := 0
+	for _, detail := range details {
+		if detail == nil || detail.Profile == nil {
+			continue
+		}
+		if err := u.PollNetworkDevice(ctx, detail.Profile.DeviceID, now); err != nil {
+			continue
+		}
+		completed++
+	}
+	return completed, nil
+}
+
+// PollNetworkDevice executes one configured, read-only SNMP poll.
+func (u *NetworkDiscoveryUsecase) PollNetworkDevice(ctx context.Context, deviceID uint64, now time.Time) error {
+	if u == nil || u.promotion == nil || u.edgeCaller == nil || u.credentials == nil {
+		return errs.ErrNotWiredYet
+	}
+	detail, err := u.promotion.GetNetworkDeviceDetail(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	profile, candidate := detail.Profile, detail.Candidate
+	if profile == nil || candidate == nil || !profile.PollEnabled {
+		return errs.ErrInvalid
+	}
+	fields, err := u.credentials.ResolveFields(ctx, profile.PollCredentialName)
+	if err != nil {
+		return u.recordNetworkPollFailure(ctx, profile, now, "SNMP credential unavailable")
+	}
+	req := tunnel.ProbeNetworkSNMPRequest{Address: firstNonEmpty(profile.ManagementAddress, candidate.IPAddress), Port: profile.PollPort, Version: fields["version"], Community: fields["community"], Username: fields["username"], AuthProtocol: fields["auth_protocol"], AuthSecret: fields["auth_secret"], PrivacyProtocol: fields["privacy_protocol"], PrivacySecret: fields["privacy_secret"], TimeoutMilliseconds: 5000, Retries: 1}
+	if strings.TrimSpace(req.Version) == "" {
+		req.Version = "v2c"
+	}
+	if strings.TrimSpace(req.Address) == "" {
+		return u.recordNetworkPollFailure(ctx, profile, now, "network device has no management address")
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal SNMP poll: %w", err)
+	}
+	pollCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	responseBody, err := u.edgeCaller.Call(pollCtx, candidate.ObserverEdgeID, tunnel.MethodProbeNetworkSNMP, body)
+	if err != nil {
+		return u.recordNetworkPollFailure(ctx, profile, now, "SNMP poll failed")
+	}
+	var response tunnel.ProbeNetworkSNMPResponse
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return u.recordNetworkPollFailure(ctx, profile, now, "invalid SNMP poll response")
+	}
+	if !response.OK {
+		return u.recordNetworkPollFailure(ctx, profile, now, "SNMP poll failed")
+	}
+	if err := mergeSNMPProbe(candidate, response); err != nil {
+		return err
+	}
+	if err := u.repo.UpdateCandidate(ctx, candidate); err != nil {
+		return err
+	}
+	interfaces := networkInterfacesFromReports(deviceID, response.Interfaces, now)
+	if err := u.promotion.ReplaceNetworkInterfaces(ctx, deviceID, interfaces); err != nil {
+		return err
+	}
+	profile.ReachabilityStatus, profile.LastPollError = "reachable", ""
+	profile.LastPollAt, profile.LastReachableAt = &now, &now
+	if err := u.promotion.UpsertDeviceNetwork(ctx, profile); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (u *NetworkDiscoveryUsecase) recordNetworkPollFailure(ctx context.Context, profile *model.DeviceNetwork, now time.Time, message string) error {
+	profile.ReachabilityStatus = "unreachable"
+	profile.LastPollAt = &now
+	profile.LastPollError = message
+	if err := u.promotion.UpsertDeviceNetwork(ctx, profile); err != nil {
+		return err
+	}
+	return fmt.Errorf("%s", message)
+}
+
+func networkInterfacesFromReports(deviceID uint64, reports []tunnel.NetworkInterfaceReport, now time.Time) []*model.NetworkInterface {
+	rows := make([]*model.NetworkInterface, 0, len(reports))
+	for _, report := range reports {
+		addresses, _ := json.Marshal(report.Addresses)
+		rows = append(rows, &model.NetworkInterface{DeviceID: deviceID, IfIndex: report.IfIndex, Name: report.Name, MAC: report.MAC, InterfaceKind: report.InterfaceKind, Description: report.Description, AdminStatus: report.AdminStatus, OperStatus: report.OperStatus, SpeedBps: report.SpeedBps, InOctets: report.InOctets, OutOctets: report.OutOctets, InErrors: report.InErrors, OutErrors: report.OutErrors, AddressesJSON: string(addresses), Source: "snmp", LastSeenAt: now})
+	}
+	return rows
 }
 
 // PromoteCandidate is an explicit administrator action. Weak observations
@@ -296,7 +482,9 @@ func mergeSNMPProbe(candidate *model.NetworkDiscoveryCandidate, response tunnel.
 		}
 		candidate.LinksJSON = string(linksJSON)
 	}
-	candidate.Status = NetworkCandidateStatusSNMPVerified
+	if candidate.Status != NetworkCandidateStatusPromoted {
+		candidate.Status = NetworkCandidateStatusSNMPVerified
+	}
 	candidate.Confidence = 90
 	candidate.LastSeenAt = time.Now().UTC()
 	return nil

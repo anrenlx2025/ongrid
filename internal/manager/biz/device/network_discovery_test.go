@@ -2,8 +2,10 @@ package device
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	model "github.com/ongridio/ongrid/internal/manager/model/device"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
@@ -11,7 +13,9 @@ import (
 )
 
 type fakeNetworkDiscoveryRepo struct {
-	rows []*model.NetworkDiscoveryCandidate
+	rows       []*model.NetworkDiscoveryCandidate
+	profiles   map[uint64]*model.DeviceNetwork
+	interfaces map[uint64][]*model.NetworkInterface
 }
 
 type fakeNetworkSNMPCaller struct {
@@ -63,20 +67,48 @@ func (f *fakeNetworkDiscoveryRepo) MarkCandidatePromoted(_ context.Context, id, 
 	return errs.ErrNotFound
 }
 
-func (f *fakeNetworkDiscoveryRepo) UpsertDeviceNetwork(context.Context, *model.DeviceNetwork) error {
+func (f *fakeNetworkDiscoveryRepo) UpsertDeviceNetwork(_ context.Context, profile *model.DeviceNetwork) error {
+	if f.profiles == nil {
+		f.profiles = map[uint64]*model.DeviceNetwork{}
+	}
+	f.profiles[profile.DeviceID] = profile
 	return nil
 }
 
 func (f *fakeNetworkDiscoveryRepo) GetNetworkDeviceDetail(_ context.Context, deviceID uint64) (*NetworkDeviceDetail, error) {
 	for _, row := range f.rows {
 		if row.PromotedDeviceID != nil && *row.PromotedDeviceID == deviceID {
+			profile := f.profiles[deviceID]
+			if profile == nil {
+				profile = &model.DeviceNetwork{DeviceID: deviceID, DeviceKind: "network"}
+			}
 			return &NetworkDeviceDetail{
-				Profile:   &model.DeviceNetwork{DeviceID: deviceID, DeviceKind: "network"},
+				Profile:   profile,
 				Candidate: row,
 			}, nil
 		}
 	}
 	return nil, errs.ErrNotFound
+}
+
+func (f *fakeNetworkDiscoveryRepo) ListDueNetworkPolls(context.Context, time.Time, int) ([]*NetworkDeviceDetail, error) {
+	return nil, nil
+}
+func (f *fakeNetworkDiscoveryRepo) ReplaceNetworkInterfaces(_ context.Context, deviceID uint64, rows []*model.NetworkInterface) error {
+	if f.interfaces == nil {
+		f.interfaces = map[uint64][]*model.NetworkInterface{}
+	}
+	f.interfaces[deviceID] = rows
+	return nil
+}
+
+type fakeNetworkCredentialResolver struct {
+	fields map[string]string
+	err    error
+}
+
+func (f fakeNetworkCredentialResolver) ResolveFields(context.Context, string) (map[string]string, error) {
+	return f.fields, f.err
 }
 
 func TestNetworkDiscoveryUsecaseKeepsARPAsCandidate(t *testing.T) {
@@ -124,6 +156,54 @@ func TestNetworkDiscoveryUsecaseAcceptsLLDPWithoutIPAddress(t *testing.T) {
 	}
 	if repo.rows[0].Status != NetworkCandidateStatusIdentified {
 		t.Fatalf("LLDP candidate status=%q", repo.rows[0].Status)
+	}
+}
+
+func TestPollNetworkDevicePersistsInterfaceSnapshot(t *testing.T) {
+	deviceID := uint64(42)
+	repo := &fakeNetworkDiscoveryRepo{
+		rows:     []*model.NetworkDiscoveryCandidate{{ID: 4, ObserverEdgeID: 7, IPAddress: "192.0.2.10", Status: NetworkCandidateStatusPromoted, PromotedDeviceID: &deviceID}},
+		profiles: map[uint64]*model.DeviceNetwork{deviceID: {DeviceID: deviceID, ManagementAddress: "192.0.2.10", PollEnabled: true, PollCredentialName: "snmp-lab", PollPort: 161}},
+	}
+	response, err := json.Marshal(tunnel.ProbeNetworkSNMPResponse{OK: true, IPAddress: "192.0.2.10", Interfaces: []tunnel.NetworkInterfaceReport{{IfIndex: 2, Name: "eth0", InOctets: 123, OutOctets: 456, SpeedBps: 1_000_000_000}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := &fakeNetworkSNMPCaller{response: response}
+	uc := NewNetworkDiscoveryUsecase(repo)
+	uc.SetPromotionDependencies(repo, nil, nil)
+	uc.SetEdgeCaller(caller)
+	uc.SetCredentialResolver(fakeNetworkCredentialResolver{fields: map[string]string{"version": "v2c", "community": "test"}})
+	now := time.Now().UTC()
+	if err := uc.PollNetworkDevice(context.Background(), deviceID, now); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	profile := repo.profiles[deviceID]
+	if profile.ReachabilityStatus != "reachable" || profile.LastPollAt == nil || profile.LastPollError != "" {
+		t.Fatalf("profile=%+v", profile)
+	}
+	if caller.calls != 1 || len(repo.interfaces[deviceID]) != 1 || repo.interfaces[deviceID][0].InOctets != 123 {
+		t.Fatalf("calls=%d interfaces=%+v", caller.calls, repo.interfaces[deviceID])
+	}
+}
+
+func TestValidateSNMPCredentialFields(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		fields  map[string]string
+		wantErr bool
+	}{
+		{name: "v2c", fields: map[string]string{"community": "readonly"}},
+		{name: "v3", fields: map[string]string{"version": "v3", "username": "operator"}},
+		{name: "missing community", fields: map[string]string{}, wantErr: true},
+		{name: "unknown version", fields: map[string]string{"version": "v1", "community": "public"}, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateSNMPCredentialFields(test.fields)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, test.wantErr)
+			}
+		})
 	}
 }
 

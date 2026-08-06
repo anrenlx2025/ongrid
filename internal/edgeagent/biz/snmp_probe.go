@@ -26,6 +26,12 @@ const (
 	oidIfOperStatus   = "1.3.6.1.2.1.2.2.1.8"
 	oidIfName         = "1.3.6.1.2.1.31.1.1.1.1"
 	oidIfAlias        = "1.3.6.1.2.1.31.1.1.1.18"
+	oidIfSpeed        = "1.3.6.1.2.1.2.2.1.5"
+	oidIfInErrors     = "1.3.6.1.2.1.2.2.1.14"
+	oidIfOutErrors    = "1.3.6.1.2.1.2.2.1.20"
+	oidIfHCInOctets   = "1.3.6.1.2.1.31.1.1.1.6"
+	oidIfHCOutOctets  = "1.3.6.1.2.1.31.1.1.1.10"
+	oidIfHighSpeed    = "1.3.6.1.2.1.31.1.1.1.15"
 	oidIPAdEntIfIndex = "1.3.6.1.2.1.4.20.1.2"
 	maxSNMPInterfaces = 512
 	maxSNMPAddresses  = 2048
@@ -169,6 +175,18 @@ func collectSNMPInterfaces(params *gosnmp.GoSNMP) []tunnel.NetworkInterfaceRepor
 	walk(oidIfOperStatus, func(row *tunnel.NetworkInterfaceReport, pdu gosnmp.SnmpPDU) {
 		row.OperStatus = snmpInterfaceStatus(snmpInt(pdu.Value))
 	})
+	walk(oidIfSpeed, func(row *tunnel.NetworkInterfaceReport, pdu gosnmp.SnmpPDU) {
+		row.SpeedBps = snmpUint64(pdu.Value)
+	})
+	walk(oidIfHighSpeed, func(row *tunnel.NetworkInterfaceReport, pdu gosnmp.SnmpPDU) {
+		if speedMbps := snmpUint64(pdu.Value); speedMbps > 0 {
+			row.SpeedBps = speedMbps * 1_000_000
+		}
+	})
+	walk(oidIfHCInOctets, func(row *tunnel.NetworkInterfaceReport, pdu gosnmp.SnmpPDU) { row.InOctets = snmpUint64(pdu.Value) })
+	walk(oidIfHCOutOctets, func(row *tunnel.NetworkInterfaceReport, pdu gosnmp.SnmpPDU) { row.OutOctets = snmpUint64(pdu.Value) })
+	walk(oidIfInErrors, func(row *tunnel.NetworkInterfaceReport, pdu gosnmp.SnmpPDU) { row.InErrors = snmpUint64(pdu.Value) })
+	walk(oidIfOutErrors, func(row *tunnel.NetworkInterfaceReport, pdu gosnmp.SnmpPDU) { row.OutErrors = snmpUint64(pdu.Value) })
 	collectSNMPIPv4Addresses(params, rows, get)
 
 	indexes := make([]int, 0, len(rows))
@@ -259,6 +277,14 @@ func snmpInt(value any) int {
 		return 0
 	}
 	return int(integer.Int64())
+}
+
+func snmpUint64(value any) uint64 {
+	integer := gosnmp.ToBigInt(value)
+	if integer == nil || integer.Sign() < 0 || !integer.IsUint64() {
+		return 0
+	}
+	return integer.Uint64()
 }
 
 func snmpInterfaceStatus(value int) string {

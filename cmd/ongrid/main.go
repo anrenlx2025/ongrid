@@ -1896,6 +1896,10 @@ func main() {
 	// HLD-017 generic secret vault: the single semantics-agnostic credential
 	// store installed skills (and future external-MCP clients) inject from.
 	secretUC := managerbizsecret.NewUsecase(managersecretdata.NewRepo(db))
+	// The network device domain owns polling but resolves encrypted credentials
+	// through this narrow vault facade. Only the credential name is persisted.
+	networkDiscoveryUC.SetCredentialResolver(secretUC)
+	managerbizdevice.NewNetworkPollScheduler(networkDiscoveryUC, log).Start(rootCtx)
 	secretHandler := managerserversecret.NewHandler(secretUC)
 	// HLD-018 MCP client: external MCP servers config + connect/list-tools.
 	// Reuses the credential vault (secretUC) for server auth injection.
