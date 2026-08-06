@@ -39,6 +39,8 @@ English | [简体中文](./README_ZH.md) | [日本語](./README_JA.md) | [한국
 - 🧠 **Bring your own model** — Anthropic / OpenAI / GLM / DeepSeek / Gemini / Kimi, hot routing
 - 💬 **Two-way IM channels** — Slack / Telegram / Larksuite / DingTalk / WeCom, per-channel locale
 - 🛠️ **Read-only host tools** — bash sandbox + 26+ inspection tools; every call audited
+- ☸️ **Kubernetes lifecycle** — enroll clusters, inspect workloads and events, manage upgrades, and mirror Kubernetes resources into topology
+- 🌐 **Network device management** — discover neighbors from Edge hosts, verify with SNMP, poll interfaces, and map host-to-network-device links
 
 ## Install
 

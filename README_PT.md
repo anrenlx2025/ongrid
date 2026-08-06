@@ -39,6 +39,8 @@
 - 🧠 **Traga seu próprio modelo** — Anthropic / OpenAI / GLM / DeepSeek / Gemini / Kimi, roteamento a quente
 - 💬 **Canais IM bidirecionais** — Slack / Telegram / Larksuite / DingTalk / WeCom, idioma por canal
 - 🛠️ **Ferramentas de host só-leitura** — sandbox bash + 26+ ferramentas, cada chamada auditada
+- ☸️ **Ciclo de vida do Kubernetes** — registre clusters, inspecione workloads e eventos, gerencie upgrades e reflita recursos na topologia
+- 🌐 **Gestão de dispositivos de rede** — descubra vizinhos a partir de hosts Edge, valide com SNMP, colete interfaces e mapeie vínculos host-dispositivo
 
 ## Instalação
 

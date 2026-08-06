@@ -39,6 +39,8 @@
 - 🧠 **Eigenes Modell mitbringen** — Anthropic / OpenAI / GLM / DeepSeek / Gemini / Kimi, Hot-Routing
 - 💬 **Zweiwege-IM-Kanäle** — Slack / Telegram / Larksuite / DingTalk / WeCom, Sprache pro Kanal
 - 🛠️ **Schreibgeschützte Host-Tools** — bash Sandbox + 26+ Tools, jeder Aufruf auditiert
+- ☸️ **Kubernetes-Lebenszyklus** — Cluster registrieren, Workloads und Events prüfen, Upgrades verwalten und Kubernetes-Ressourcen in die Topologie spiegeln
+- 🌐 **Netzwerkgeräteverwaltung** — Nachbarn über Edge-Hosts erkennen, per SNMP prüfen, Schnittstellen abfragen und Host-Geräte-Verbindungen abbilden
 
 ## Installation
 
