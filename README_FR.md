@@ -21,6 +21,13 @@
   <img src="docs/assets/demo.gif" alt="Ongrid demo" width="100%" />
 </p>
 
+<p align="center">
+  <img src="docs/assets/kubernetes-release-banner.png" alt="Cycle de vie Kubernetes" width="100%" />
+  <br />
+  <strong>☸️ La gestion du cycle de vie Kubernetes est disponible</strong><br />
+  <sub>Enregistrez des clusters via Edge, inspectez charges et événements, gérez les mises à niveau et reliez les ressources Kubernetes à la topologie.</sub>
+</p>
+
 <div align="center">
 
 [Fonctionnalités](#fonctionnalités) • [Installation](#installation) • [Intégrations](#intégrations) • [Licence](#licence)

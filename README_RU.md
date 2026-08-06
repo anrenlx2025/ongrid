@@ -21,6 +21,13 @@
   <img src="docs/assets/demo.gif" alt="Ongrid demo" width="100%" />
 </p>
 
+<p align="center">
+  <img src="docs/assets/kubernetes-release-banner.png" alt="Управление жизненным циклом Kubernetes" width="100%" />
+  <br />
+  <strong>☸️ Управление жизненным циклом Kubernetes уже доступно</strong><br />
+  <sub>Подключайте кластеры через Edge, проверяйте нагрузки и события, управляйте обновлениями и связывайте ресурсы Kubernetes с топологией.</sub>
+</p>
+
 <div align="center">
 
 [Возможности](#возможности) • [Установка](#установка) • [Интеграции](#интеграции) • [Лицензия](#лицензия)

@@ -21,6 +21,13 @@
   <img src="docs/assets/demo.gif" alt="Ongrid demo" width="100%" />
 </p>
 
+<p align="center">
+  <img src="docs/assets/kubernetes-release-banner.png" alt="Kubernetes 라이프사이클 관리" width="100%" />
+  <br />
+  <strong>☸️ Kubernetes 라이프사이클 관리 기능을 출시했습니다</strong><br />
+  <sub>Edge로 클러스터를 등록하고, 워크로드와 이벤트를 확인하며, 업그레이드를 관리하고 Kubernetes 리소스를 토폴로지에 연결합니다.</sub>
+</p>
+
 <div align="center">
 
 [기능](#기능) • [설치](#설치) • [연동](#연동) • [라이선스](#라이선스)

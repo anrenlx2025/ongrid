@@ -21,6 +21,13 @@
   <img src="docs/assets/demo.gif" alt="Ongrid demo" width="100%" />
 </p>
 
+<p align="center">
+  <img src="docs/assets/kubernetes-release-banner.png" alt="Kubernetes ライフサイクル管理" width="100%" />
+  <br />
+  <strong>☸️ Kubernetes ライフサイクル管理をリリースしました</strong><br />
+  <sub>Edge 経由でクラスタを登録し、ワークロードとイベントを確認、アップグレードを管理し、Kubernetes リソースをトポロジーに関連付けます。</sub>
+</p>
+
 <div align="center">
 
 [機能](#機能) • [インストール](#インストール) • [インテグレーション](#インテグレーション) • [ライセンス](#ライセンス)

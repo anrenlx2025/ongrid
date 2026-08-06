@@ -21,6 +21,13 @@
   <img src="docs/assets/demo.gif" alt="Ongrid demo" width="100%" />
 </p>
 
+<p align="center">
+  <img src="docs/assets/kubernetes-release-banner.png" alt="Kubernetes 生命周期管理" width="100%" />
+  <br />
+  <strong>☸️ Kubernetes 生命周期管理现已发布</strong><br />
+  <sub>通过 Edge 注册集群，查看工作负载与事件，管理升级，并将 Kubernetes 资源关联到拓扑。</sub>
+</p>
+
 <div align="center">
 
 [特性](#特性) • [安装](#安装) • [集成](#集成) • [许可证](#许可证)
