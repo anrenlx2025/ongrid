@@ -4,7 +4,7 @@
 // (so a "hard_dep" edge always reads the same regardless of which
 // custom relation type carries that tag — matches the AIOps dispatch
 // rule).
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -13,6 +13,7 @@ import {
   Handle,
   MiniMap,
   Node,
+  NodeChange,
   NodeProps,
   Position,
   ReactFlow,
@@ -40,6 +41,7 @@ const HIDDEN_HANDLE_STYLE = { visibility: 'hidden' as const };
 type NodeColor = { bg: string; border: string; fg: string };
 const NODE_COLORS_DARK: Record<string, NodeColor> = {
   device: { bg: '#1e293b', border: '#475569', fg: '#e4e4e7' },
+  network_device: { bg: '#164e63', border: '#22d3ee', fg: '#ecfeff' },
   service: { bg: '#312e81', border: '#6366f1', fg: '#e4e4e7' },
   cluster: { bg: '#064e3b', border: '#10b981', fg: '#e4e4e7' },
   app: { bg: '#7c2d12', border: '#fb923c', fg: '#e4e4e7' },
@@ -47,6 +49,7 @@ const NODE_COLORS_DARK: Record<string, NodeColor> = {
 };
 const NODE_COLORS_LIGHT: Record<string, NodeColor> = {
   device: { bg: '#e2e8f0', border: '#94a3b8', fg: '#0f172a' },  // slate-200/400/900
+  network_device: { bg: '#cffafe', border: '#0891b2', fg: '#164e63' }, // cyan-100/600/900
   service: { bg: '#e0e7ff', border: '#6366f1', fg: '#1e1b4b' }, // indigo-100/500/950
   cluster: { bg: '#d1fae5', border: '#10b981', fg: '#064e3b' }, // emerald-100/500/900
   app: { bg: '#ffedd5', border: '#fb923c', fg: '#7c2d12' },    // orange-100/400/900
@@ -61,6 +64,7 @@ const NODE_COLORS_FALLBACK_LIGHT: NodeColor = { bg: '#f1f5f9', border: '#cbd5e1'
 // the minimap background is always dark per our index.css override.
 const MINIMAP_NODE_COLORS: Record<string, string> = {
   device: '#60a5fa',  // blue-400
+  network_device: '#22d3ee', // cyan-400
   service: '#818cf8', // indigo-400
   cluster: '#34d399', // emerald-400
   app: '#fb923c',     // orange-400
@@ -103,8 +107,9 @@ const TYPE_TIER: Record<string, number> = {
   app: 0,        // 业务系统（顶层）
   service: 1,    // 微服务
   cluster: 2,    // 集群（有状态组件）
-  device: 3,     // 主机
-  rack: 4,       // 物理位置（底层）
+  network_device: 3, // 网络设备（主机之上）
+  device: 4,     // 主机
+  rack: 5,       // 物理位置（底层）
 };
 const TIER_BAND_HEIGHT = NODE_HEIGHT + 140;
 const NODE_X_SPACING = NODE_WIDTH + 80;
@@ -112,6 +117,18 @@ const NODE_X_SPACING = NODE_WIDTH + 80;
 function semanticsForType(relTypes: RelationType[], typeName: string): string {
   const rt = relTypes.find((t) => t.name === typeName);
   return rt?.semantics_tag ?? 'annotation';
+}
+
+function isNetworkDevice(node: TopologyNode | undefined): boolean {
+  return node?.type === 'device' && node.props?.device_kind === 'network';
+}
+
+function visualNodeType(node: TopologyNode | undefined): string {
+  return isNetworkDevice(node) ? 'network_device' : (node?.type ?? '');
+}
+
+function nodeTier(node: TopologyNode | undefined): number {
+  return TYPE_TIER[visualNodeType(node)] ?? 99;
 }
 
 // CustomTopologyNode renders one node tile inside react-flow. Colors
@@ -199,7 +216,7 @@ export function TopologyGraph({
 }: Props) {
   const { resolved } = useThemeMode();
   const isLight = resolved === 'light';
-  const { rfNodes, rfEdges } = useMemo(
+  const { rfNodes: layoutNodes, rfEdges } = useMemo(
     () =>
       layoutGraph(
         nodes,
@@ -212,6 +229,31 @@ export function TopologyGraph({
       ),
     [nodes, relations, relationTypes, selectedID, hideOrphans, visibleRelationTypes, isLight],
   );
+  // React Flow is controlled here because the graph is rebuilt from the
+  // server-side topology data. Keep drag positions separately so a node does
+  // not snap back on every render or when another node is selected.
+  const [draggedPositions, setDraggedPositions] = useState<Record<string, { x: number; y: number }>>({});
+  const rfNodes = useMemo(
+    () => layoutNodes.map((node) => ({
+      ...node,
+      position: draggedPositions[node.id] ?? node.position,
+    })),
+    [layoutNodes, draggedPositions],
+  );
+  const onNodesChange = useCallback((changes: NodeChange[]) => {
+    setDraggedPositions((previous) => {
+      const next = { ...previous };
+      for (const change of changes) {
+        if (change.type === 'position' && change.position) {
+          next[change.id] = change.position;
+        }
+        if (change.type === 'remove') {
+          delete next[change.id];
+        }
+      }
+      return next;
+    });
+  }, []);
 
   // Cheap effect: force a window-resize event after first paint so
   // react-flow recomputes its container bounds. Without it the canvas
@@ -228,6 +270,7 @@ export function TopologyGraph({
         nodes={rfNodes}
         edges={rfEdges}
         nodeTypes={nodeTypes}
+        onNodesChange={onNodesChange}
         nodesDraggable
         nodesConnectable={false}
         elementsSelectable
@@ -348,7 +391,7 @@ function layoutGraph(
   // spread fixes it.
   const byTier = new Map<number, TopologyNode[]>();
   for (const n of visibleNodes) {
-    const tier = TYPE_TIER[n.type] ?? 99;
+    const tier = nodeTier(n);
     const bucket = byTier.get(tier) ?? [];
     bucket.push(n);
     byTier.set(tier, bucket);
@@ -392,12 +435,12 @@ function layoutGraph(
       height: NODE_HEIGHT,
       data: {
         label: n.name,
-        type: n.type,
+        type: visualNodeType(n),
         selected: selectedID === n.id,
         // Pre-resolve colors here so CustomTopologyNode stays a pure
         // presentational component (no hook needed inside the
         // ReactFlow render tree).
-        colors: colorTable[n.type] ?? colorFallback,
+        colors: colorTable[visualNodeType(n)] ?? colorFallback,
         selectionRing,
       },
     };
@@ -428,8 +471,8 @@ function layoutGraph(
       const pairKey = `${r.src_id}->${r.dst_id}`;
       const showLabel = !seenPairs.has(pairKey);
       seenPairs.add(pairKey);
-      const srcTier = TYPE_TIER[nodeByID.get(r.src_id)?.type ?? ''] ?? 99;
-      const dstTier = TYPE_TIER[nodeByID.get(r.dst_id)?.type ?? ''] ?? 99;
+      const srcTier = nodeTier(nodeByID.get(r.src_id));
+      const dstTier = nodeTier(nodeByID.get(r.dst_id));
       const pointsUp = srcTier > dstTier;
       return {
         id: `rel-${r.id}`,

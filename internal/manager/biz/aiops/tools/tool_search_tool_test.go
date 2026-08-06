@@ -55,6 +55,31 @@ func TestToolSearch_SelectExactName(t *testing.T) {
 	}
 }
 
+func TestToolSearch_UsesFullSchemaAfterPersonaFiltering(t *testing.T) {
+	original := &stubTool{
+		name:        "query_network_devices",
+		description: "list verified network devices",
+		params:      `{"type":"object","properties":{"reachability":{"type":"string"}}}`,
+	}
+	bag := &stubBagProvider{all: []basetool.BaseTool{original}}
+	ts := NewToolSearchTool(bag, nil)
+	ctx := basetool.WithFilteredTools(context.Background(), []basetool.BaseTool{
+		redactedTool{inner: original},
+	})
+
+	out, err := ts.InvokableRun(ctx, `{"query":"select:query_network_devices"}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	resp := decodeToolSearchResp(t, out)
+	if len(resp.Tools) != 1 {
+		t.Fatalf("got %d tools, want 1: %s", len(resp.Tools), out)
+	}
+	if !strings.Contains(string(resp.Tools[0].Parameters), "reachability") {
+		t.Fatalf("ToolSearch returned redacted schema instead of the full schema: %s", resp.Tools[0].Parameters)
+	}
+}
+
 // TestToolSearch_SelectMultiple tests the CSV form select:a,b.
 func TestToolSearch_SelectMultiple(t *testing.T) {
 	a := newStub("host_find_large_files", "")

@@ -135,7 +135,10 @@ fi
 # root:adm 640. systemd-journal lets promtail journal-source read
 # /var/log/journal/. Both groups are membership-only — no privilege
 # escalation. Idempotent: usermod is a no-op if already a member.
-for grp in adm systemd-journal; do
+# lldpd exposes its read-only control socket to the _lldpd group. Add the
+# service user when lldpd is installed so the optional LLDP collector works
+# under the non-root systemd service; on hosts without lldpd this is a no-op.
+for grp in adm systemd-journal _lldpd; do
     if getent group "$grp" >/dev/null 2>&1; then
         usermod -aG "$grp" "$SERVICE_USER" 2>/dev/null || true
     fi

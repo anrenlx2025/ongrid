@@ -125,7 +125,14 @@ export function StatusRow() {
 
   if (devices && !devicesError) {
     const total = devices.length;
-    const online = devices.filter((device) => device.online === true).length;
+    const online = devices.filter((device) => {
+      if (device.os?.trim().toLowerCase() !== 'network') {
+        return device.online === true;
+      }
+      return ['reachable', 'online', 'up'].includes(
+        device.reachability_status?.trim().toLowerCase() ?? '',
+      );
+    }).length;
     const offline = total - online;
     if (total > 0) {
       pills.push({

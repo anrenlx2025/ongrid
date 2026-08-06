@@ -39,6 +39,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
+	"gorm.io/gorm"
 
 	"github.com/ongridio/ongrid/internal/pkg/auth"
 	"github.com/ongridio/ongrid/internal/pkg/authzmw"
@@ -247,6 +248,9 @@ func main() {
 		log.Error("open db", slog.Any("err", err))
 		os.Exit(1)
 	}
+	// This flag is sampled before AutoMigrate. It distinguishes an existing
+	// installation being upgraded from a fresh database created by this boot.
+	upgradingExistingInstall := db.Migrator().HasTable("devices")
 	if err := dbx.RunMigrations(db, log,
 		iamdatauser.Migrate,
 		iamdataorg.Migrate,
@@ -404,6 +408,9 @@ func main() {
 	// exists yet, so previous admin edits survive restarts.
 	settingRepo := managersettingdata.NewRepo(db)
 	settingSvc := managerbizsetting.New(settingRepo, log.With(slog.String("comp", "setting")))
+	if upgradingExistingInstall {
+		seedInfrastructureMenuDefaults(rootCtx, db, settingSvc, log)
+	}
 	queryFallback := cfg.Prom.URL
 	if cfg.Prom.QueryURL != "" {
 		queryFallback = cfg.Prom.QueryURL
@@ -735,6 +742,10 @@ func main() {
 	deviceRepo := managerdevicedata.NewRepo(db)
 	edgeDeviceRepo := managerdevicedata.NewEdgeDeviceRepo(db)
 	deviceUC := managerbizdevice.NewUsecase(deviceRepo, edgeDeviceRepo, log)
+	networkDiscoveryRepo := managerdevicedata.NewNetworkDiscoveryRepo(db)
+	networkDiscoveryUC := managerbizdevice.NewNetworkDiscoveryUsecase(networkDiscoveryRepo)
+	networkDiscoveryUC.SetPromotionDependencies(networkDiscoveryRepo, deviceRepo, edgeDeviceRepo)
+	deviceUC.SetNetworkDiscovery(networkDiscoveryUC)
 	edgeUC := managerbizedge.NewUsecase(edgeRepo, deviceRepo, edgeDeviceRepo, log)
 
 	// Boot backfill: heal "stale online" edge rows. A manager crash or any
@@ -885,6 +896,7 @@ func main() {
 	// registers + any device that landed between migration and now.
 	edgeUC.SetNodeMirror(topologyUC)
 	deviceUC.SetTopologyMirror(topologyUC)
+	networkDiscoveryUC.SetTopologyMirror(topologyUC)
 	if n, err := deviceUC.ReconcileDeletedTopology(rootCtx); err != nil {
 		log.Warn("device: deleted topology reconcile on boot failed", slog.Any("err", err))
 	} else if n > 0 {
@@ -1110,6 +1122,7 @@ func main() {
 	// exists. Until this point UpgradeAgent surfaced a "not wired" error
 	// — by design, because we don't accept HTTP traffic until later.
 	edgeSvc.SetEdgeCaller(fbClient)
+	networkDiscoveryUC.SetEdgeCaller(fbClient)
 
 	// promIngester for the Wiring is typed as the interface; passing a
 	// typed-nil *Ingester would be a non-nil interface, so explicitly hand
@@ -1135,10 +1148,11 @@ func main() {
 		// DeviceResolver wires the post-split edge_id → device_id
 		// resolution path (push pipeline). The biz junction repo is the
 		// source of truth.
-		DeviceResolver: edgeDeviceRepo,
-		K8sRegistry:    k8sSvc,
-		K8sInventory:   k8sSvc,
-		Log:            log.With(slog.String("comp", "frontierbound")),
+		DeviceResolver:   edgeDeviceRepo,
+		K8sRegistry:      k8sSvc,
+		K8sInventory:     k8sSvc,
+		NetworkDiscovery: networkDiscoveryUC,
+		Log:              log.With(slog.String("comp", "frontierbound")),
 	}); err != nil {
 		log.Error("frontierbound: install handlers", slog.Any("err", err))
 		os.Exit(1)
@@ -1889,6 +1903,10 @@ func main() {
 	// HLD-017 generic secret vault: the single semantics-agnostic credential
 	// store installed skills (and future external-MCP clients) inject from.
 	secretUC := managerbizsecret.NewUsecase(managersecretdata.NewRepo(db))
+	// The network device domain owns polling but resolves encrypted credentials
+	// through this narrow vault facade. Only the credential name is persisted.
+	networkDiscoveryUC.SetCredentialResolver(secretUC)
+	managerbizdevice.NewNetworkPollScheduler(networkDiscoveryUC, log).Start(rootCtx)
 	secretHandler := managerserversecret.NewHandler(secretUC)
 	// HLD-018 MCP client: external MCP servers config + connect/list-tools.
 	// Reuses the credential vault (secretUC) for server auth injection.
@@ -3417,6 +3435,12 @@ var coordinatorExtraToolNames = []string{
 	"install_skill",
 	"serve_page",
 	"send_im_message",
+	// Network inventory remains specialty/schema-redacted. These entries only
+	// let explicit network-asset requests discover it through ToolSearch.
+	aiopstools.ToolSearchToolName,
+	aiopstools.ToolNameQueryNetworkDevices,
+	aiopstools.ToolNameQueryNetworkInterfaces,
+	aiopstools.ToolNameGetNetworkNeighbors,
 }
 
 const defaultCoordinatorMaxTurns = 30
@@ -5079,5 +5103,44 @@ func runK8sTopologyReconcile(ctx context.Context, uc *managerbizk8s.Usecase, log
 				log.Warn("k8s topology reconcile failed", slog.Any("err", err))
 			}
 		}
+	}
+}
+
+// seedInfrastructureMenuDefaults is a one-time upgrade migration. Fresh
+// installs never call it; existing installations receive a conservative
+// sidebar default, while subsequent changes remain entirely user-owned.
+func seedInfrastructureMenuDefaults(ctx context.Context, db *gorm.DB, settings *managerbizsetting.Service, log *slog.Logger) {
+	if settings == nil {
+		return
+	}
+	hidden := make([]string, 0, 4)
+	counts := map[string]struct{ table, where string }{
+		"clusters": {"device_clusters", ""}, "network-devices": {"devices", "os = 'network'"},
+		"kubernetes": {"kubernetes_clusters", ""}, "topology": {"topology_nodes", ""},
+	}
+	for key, query := range counts {
+		if !db.Migrator().HasTable(query.table) {
+			hidden = append(hidden, key)
+			continue
+		}
+		var count int64
+		dbq := db.WithContext(ctx).Table(query.table)
+		if query.where != "" {
+			dbq = dbq.Where(query.where)
+		}
+		if err := dbq.Count(&count).Error; err != nil {
+			log.Warn("count infrastructure menu data", slog.String("table", query.table), slog.Any("err", err))
+			return
+		}
+		if count == 0 {
+			hidden = append(hidden, key)
+		}
+	}
+	value, err := json.Marshal(map[string][]string{"hidden": hidden})
+	if err != nil {
+		return
+	}
+	if err := settings.SetIfAbsent(ctx, "ui", "infrastructure_menu_upgrade_v0_10", string(value), false); err != nil {
+		log.Warn("seed infrastructure menu defaults", slog.Any("err", err))
 	}
 }

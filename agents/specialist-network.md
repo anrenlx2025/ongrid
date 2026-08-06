@@ -22,6 +22,9 @@ tools:
   - host_netns_inspect
   - query_promql
   - get_host_load
+  - query_network_devices
+  - get_network_neighbors
+  - ToolSearch
 permission_mode: read-only
 max_turns: 15
 ---

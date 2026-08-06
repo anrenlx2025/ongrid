@@ -76,6 +76,11 @@ export default function ClustersPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] =
+    useState<DeviceClusterSummary | null>(null);
+  const [deletingClusterID, setDeletingClusterID] = useState<number | null>(
+    null,
+  );
 
   const refresh = useCallback(
     async (silent = false) => {
@@ -85,7 +90,7 @@ export default function ClustersPage() {
         const [nodes, devicesOut, relations, profiles] = await Promise.all([
           loadAllNodes("cluster"),
           listDevices(),
-          loadAllRelations({ type: "member_of" }),
+          loadAllRelations({}),
           loadAllEnrollmentProfiles(),
         ]);
         setSummaries(
@@ -127,6 +132,29 @@ export default function ClustersPage() {
     0,
   );
   const onlineTotal = summaries.reduce((sum, item) => sum + item.online, 0);
+
+  async function performDelete() {
+    if (!deleteTarget) return;
+    const blockedReason = clusterDeleteBlockedReason(deleteTarget, tr);
+    if (blockedReason) return;
+
+    setDeletingClusterID(deleteTarget.cluster.id);
+    try {
+      await deleteNode(deleteTarget.cluster.id);
+      setSummaries((current) =>
+        current.filter((item) => item.cluster.id !== deleteTarget.cluster.id),
+      );
+      setDeleteTarget(null);
+    } catch (err) {
+      setError(
+        (err as Error).message ||
+          tr("删除集群失败", "Failed to delete cluster"),
+      );
+      setDeleteTarget(null);
+    } finally {
+      setDeletingClusterID(null);
+    }
+  }
 
   return (
     <>
@@ -223,6 +251,12 @@ export default function ClustersPage() {
                         {tr("安装批次", "Install batches")}
                       </th>
                       <th className="px-4 py-2.5 font-medium">
+                        {tr("拓扑连接", "Topology links")}
+                      </th>
+                      <th className="px-4 py-2.5 font-medium">
+                        {tr("最近活动", "Last activity")}
+                      </th>
+                      <th className="px-4 py-2.5 font-medium">
                         {tr("更新时间", "Updated")}
                       </th>
                       <th className="px-4 py-2.5 text-right font-medium">
@@ -232,7 +266,13 @@ export default function ClustersPage() {
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60">
                     {visible.map((summary) => (
-                      <ClusterRow key={summary.cluster.id} summary={summary} />
+                      <ClusterRow
+                        key={summary.cluster.id}
+                        summary={summary}
+                        isAdmin={isAdmin}
+                        deleting={deletingClusterID === summary.cluster.id}
+                        onDelete={() => setDeleteTarget(summary)}
+                      />
                     ))}
                   </tbody>
                 </table>
@@ -250,13 +290,35 @@ export default function ClustersPage() {
           navigate(`/clusters/${cluster.id}`);
         }}
       />
+      <DeleteDeviceClusterModal
+        cluster={deleteTarget?.cluster ?? null}
+        blockedReason={
+          deleteTarget
+            ? clusterDeleteBlockedReason(deleteTarget, tr)
+            : undefined
+        }
+        deleting={deletingClusterID === deleteTarget?.cluster.id}
+        onClose={() => setDeleteTarget(null)}
+        onDelete={() => void performDelete()}
+      />
     </>
   );
 }
 
-function ClusterRow({ summary }: { summary: DeviceClusterSummary }) {
+function ClusterRow({
+  summary,
+  isAdmin,
+  deleting,
+  onDelete,
+}: {
+  summary: DeviceClusterSummary;
+  isAdmin: boolean;
+  deleting: boolean;
+  onDelete(): void;
+}) {
   const { tr } = useI18n();
   const navigate = useNavigate();
+  const deleteBlockedReason = clusterDeleteBlockedReason(summary, tr);
   const description =
     typeof summary.cluster.props?.description === "string"
       ? summary.cluster.props.description
@@ -305,29 +367,94 @@ function ClusterRow({ summary }: { summary: DeviceClusterSummary }) {
       </td>
       <td className="px-4 py-3">
         {summary.activeProfiles > 0 ? (
-          <Chip tone="accent">
+          <Chip tone="accent" title={tr("有效 / 总安装批次", "Active / total install batches")}>
             {tr(
-              `${summary.activeProfiles} 个有效`,
-              `${summary.activeProfiles} active`,
+              `${summary.activeProfiles} / ${summary.profiles.length} 个有效`,
+              `${summary.activeProfiles} / ${summary.profiles.length} active`,
             )}
           </Chip>
+        ) : (
+          <span className="text-zinc-600">
+            {summary.profiles.length > 0
+              ? tr(`0 / ${summary.profiles.length} 个有效`, `0 / ${summary.profiles.length} active`)
+              : "—"}
+          </span>
+        )}
+      </td>
+      <td className="px-4 py-3 text-zinc-300">
+        {summary.externalRelations.length > 0 ? (
+          <span>
+            {tr(
+              `${summary.externalRelations.length} 条连接`,
+              `${summary.externalRelations.length} links`,
+            )}
+          </span>
         ) : (
           <span className="text-zinc-600">—</span>
         )}
       </td>
       <td className="whitespace-nowrap px-4 py-3 text-zinc-500">
+        {relativeTime(summary.lastMemberSeenAt)}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 text-zinc-500">
         {relativeTime(summary.cluster.updated_at)}
       </td>
       <td className="px-4 py-3 text-right">
-        <Link
-          to={`/clusters/${summary.cluster.id}`}
-          className="inline-flex items-center rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
-        >
-          {tr("管理", "Manage")}
-        </Link>
+        <div className="inline-flex items-center gap-1">
+          <Link
+            to={`/clusters/${summary.cluster.id}`}
+            className="inline-flex items-center rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+          >
+            {tr("管理", "Manage")}
+          </Link>
+          {isAdmin && (
+            <button
+              type="button"
+              aria-label={tr(
+                `删除集群 ${summary.cluster.name}`,
+                `Delete cluster ${summary.cluster.name}`,
+              )}
+              title={deleteBlockedReason}
+              disabled={Boolean(deleteBlockedReason) || deleting}
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete();
+              }}
+              className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-600"
+            >
+              <Trash2 size={12} />
+              {deleting ? tr("删除中…", "Deleting…") : tr("删除", "Delete")}
+            </button>
+          )}
+        </div>
       </td>
     </tr>
   );
+}
+
+function clusterDeleteBlockedReason(
+  summary: DeviceClusterSummary,
+  tr: (zh: string, en: string) => string,
+): string | undefined {
+  if (summary.memberRelations.length > 0) {
+    return tr(
+      "请先移除全部成员，再删除集群。",
+      "Remove all members before deleting the cluster.",
+    );
+  }
+  if (summary.externalRelations.length > 0) {
+    return tr(
+      "集群仍被其他拓扑关系引用，请先在拓扑页解除关系。",
+      "Other topology relations still reference this cluster. Remove them in Topology first.",
+    );
+  }
+  if (summary.activeProfiles > 0) {
+    return tr(
+      "请先删除全部有效安装批次，再删除集群。",
+      "Delete all active installation batches before deleting the cluster.",
+    );
+  }
+  return undefined;
 }
 
 export function DeviceClusterDetailPage() {
@@ -699,6 +826,16 @@ export function DeviceClusterDetailPage() {
                     <PackageOpen size={13} />
                     {tr("批量升级", "Batch upgrade")}
                   </Button>
+                  <Button
+                    variant="danger"
+                    aria-label={tr("删除集群", "Delete cluster")}
+                    disabled={Boolean(deleteBlockedReason)}
+                    title={deleteBlockedReason}
+                    onClick={() => setDeleteOpen(true)}
+                  >
+                    <Trash2 size={13} />
+                    {tr("删除", "Delete")}
+                  </Button>
                 </>
               )}
             </>
@@ -947,6 +1084,10 @@ export function DeviceClusterDetailPage() {
                           {isAdmin && (
                             <button
                               type="button"
+                              aria-label={tr(
+                                `删除安装批次 ${profile.name}`,
+                                `Delete installation batch ${profile.name}`,
+                              )}
                               disabled={deletingProfileID === profile.id}
                               onClick={() => void deleteProfile(profile)}
                               className="text-zinc-500 hover:text-red-300 disabled:opacity-40"
@@ -963,36 +1104,6 @@ export function DeviceClusterDetailPage() {
                 )}
               </Card>
 
-              {isAdmin && (
-                <Card>
-                  <div className="flex items-start gap-3">
-                    <Trash2
-                      size={15}
-                      className="mt-0.5 shrink-0 text-zinc-600"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <h2 className="text-xs font-medium text-zinc-300">
-                        {tr("集群生命周期", "Cluster lifecycle")}
-                      </h2>
-                      <p className="mt-1 text-[11px] leading-5 text-zinc-600">
-                        {deleteBlockedReason ??
-                          tr(
-                            "当前为空集群，可以安全删除。",
-                            "This cluster is empty and can be safely deleted.",
-                          )}
-                      </p>
-                      <Button
-                        className="mt-3"
-                        disabled={Boolean(deleteBlockedReason)}
-                        onClick={() => setDeleteOpen(true)}
-                      >
-                        <Trash2 size={12} />
-                        {tr("删除集群", "Delete cluster")}
-                      </Button>
-                    </div>
-                  </div>
-                </Card>
-              )}
             </div>
           </div>
 

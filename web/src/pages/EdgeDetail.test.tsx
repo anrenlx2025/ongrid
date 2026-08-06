@@ -134,6 +134,80 @@ describe('EdgeDetailPage high-cardinality metrics', () => {
   });
 });
 
+describe('EdgeDetailPage network device layout', () => {
+  beforeEach(() => {
+    localStorage.setItem('ongrid-locale', 'zh-CN');
+    server.use(
+      http.get('/api/v1/devices/140', () =>
+        HttpResponse.json({
+          id: 140,
+          name: 'ongrid-netdev-b',
+          hostname: 'ongrid-netdev-b',
+          os: 'network',
+          arch: 'network',
+          ip_address: '10.20.0.3',
+          roles: ['network'],
+          online: false,
+        }),
+      ),
+      http.get('/api/v1/devices/140/edges', () => HttpResponse.json({ items: [] })),
+      http.get('/api/v1/devices/140/network', () =>
+        HttpResponse.json({
+          device_id: 140,
+          device_kind: 'network',
+          management_address: '10.20.0.3',
+          sys_name: 'ongrid-netdev-b',
+          vendor: 'Ongrid Lab',
+          model: 'Virtual Switch',
+          reachability_status: 'reachable',
+          discovery_source: 'snmp',
+          scanner_host_name: 'VM-4-17-ubuntu',
+          last_observed_at: '2026-08-04T08:00:00Z',
+          interfaces: [
+            { if_index: 1, name: 'eth0', mac: '02:42:ac:14:00:03', interface_kind: 'ethernet', oper_status: 'up' },
+          ],
+          links: [],
+        }),
+      ),
+    );
+  });
+
+  it('使用网络设备专属标签和接口，不显示主机页签', async () => {
+    render(
+      <MemoryRouter initialEntries={['/devices/140']}>
+        <Routes>
+          <Route path="/devices/:edgeId" element={<EdgeDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Ongrid Lab')).toBeInTheDocument();
+    expect(screen.getByText('可达')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '概览' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '接口' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '指标' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '主机信息' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '插件' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '接口' }));
+    expect(await screen.findByText('eth0')).toBeInTheDocument();
+    expect(screen.getByText('02:42:ac:14:00:03')).toBeInTheDocument();
+  });
+
+  it('从查询参数直接打开网络拓扑页签', async () => {
+    render(
+      <MemoryRouter initialEntries={['/devices/140?tab=topology']}>
+        <Routes>
+          <Route path="/devices/:edgeId" element={<EdgeDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('ongrid-netdev-b');
+    expect(screen.getByRole('button', { name: '拓扑' })).toHaveClass('border-zinc-100');
+  });
+});
+
 describe('findNearestTooltipEntry', () => {
   it('自动纵轴使用实际数据范围而不是强制从零开始', () => {
     const rows = [

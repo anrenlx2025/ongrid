@@ -110,7 +110,9 @@ describe("device cluster pages", () => {
     });
     expect(clusterLink).toHaveAttribute("href", "/clusters/501");
     expect(screen.queryByText("k8s-prod")).not.toBeInTheDocument();
-    expect(screen.getByText("1 个有效")).toBeInTheDocument();
+    expect(screen.getByText("1 / 1 个有效")).toBeInTheDocument();
+    expect(screen.getByText("最近活动")).toBeInTheDocument();
+    expect(screen.getByText("拓扑连接")).toBeInTheDocument();
     expect(
       screen.getByText("1 个集群 · 1 台设备 · 1 台在线"),
     ).toBeInTheDocument();
@@ -139,6 +141,46 @@ describe("device cluster pages", () => {
     expect(
       await screen.findByText("cluster detail target"),
     ).toBeInTheDocument();
+  });
+
+  it("deletes an empty cluster from the list action", async () => {
+    const user = userEvent.setup();
+    let deletedCluster = 0;
+    const emptyCluster = {
+      ...manualCluster,
+      id: 502,
+      name: "empty-cluster",
+    };
+    server.use(
+      http.get("/api/v1/topology/nodes", () =>
+        HttpResponse.json({ items: [emptyCluster], total: 1 }),
+      ),
+      http.get("/api/v1/topology/relations", () =>
+        HttpResponse.json({ items: [], total: 0 }),
+      ),
+      http.get("/api/v1/edge-enrollment-profiles", () =>
+        HttpResponse.json({ items: [], total: 0, page: 1, page_size: 100 }),
+      ),
+      http.delete("/api/v1/topology/nodes/:id", ({ params }) => {
+        deletedCluster = Number(params.id);
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <ClustersPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "删除集群 empty-cluster" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "删除设备集群" });
+    await user.click(within(dialog).getByRole("button", { name: "删除集群" }));
+
+    await waitFor(() => expect(deletedCluster).toBe(502));
+    expect(screen.queryByText("empty-cluster")).not.toBeInTheDocument();
   });
 
   it("adds an eligible host while excluding Kubernetes-managed devices", async () => {
@@ -251,7 +293,9 @@ describe("device cluster pages", () => {
     try {
       renderDetail();
       await screen.findByRole("heading", { name: "成员设备" });
-      await user.click(screen.getByRole("button", { name: "删除" }));
+      await user.click(
+        screen.getByRole("button", { name: "删除安装批次 prod rollout" }),
+      );
 
       await waitFor(() => expect(deletedProfile).toBe(31));
       expect(screen.queryByText("prod rollout")).not.toBeInTheDocument();
@@ -407,10 +451,13 @@ describe("device cluster pages", () => {
     renderDetail();
 
     await screen.findByRole("heading", { name: "成员设备" });
-    expect(screen.getByRole("button", { name: "删除集群" })).toBeDisabled();
-    expect(
-      screen.getByText("请先移除全部成员，再删除集群。"),
-    ).toBeInTheDocument();
+    const deleteButton = screen.getByRole("button", { name: "删除集群" });
+    expect(deleteButton).toBeDisabled();
+    expect(deleteButton).toHaveAttribute(
+      "title",
+      "请先移除全部成员，再删除集群。",
+    );
+    expect(screen.queryByText("集群生命周期")).not.toBeInTheDocument();
   });
 });
 

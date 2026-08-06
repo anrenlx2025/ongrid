@@ -267,7 +267,14 @@ export default function DashboardPage() {
       const bucketAvgs = (buckets: number[][]) =>
         buckets.map((b) => avg(b)).filter((v): v is number => v !== null);
 
-      const onlineNow = devices.filter((device) => device.online === true).length;
+      const onlineNow = devices.filter((device) => {
+        if (device.os?.trim().toLowerCase() !== 'network') {
+          return device.online === true;
+        }
+        return ['reachable', 'online', 'up'].includes(
+          device.reachability_status?.trim().toLowerCase() ?? '',
+        );
+      }).length;
       return {
         cpuAvg24h: avg(cpuVals),
         cpuTrend: bucketAvgs(cpuByBucket),

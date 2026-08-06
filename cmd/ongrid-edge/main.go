@@ -209,10 +209,12 @@ func main() {
 		stageDir = "/var/lib/ongrid-edge/.upgrade"
 	}
 	agent := edgebiz.NewAgent(client, collector, edgebiz.Config{
-		MetricsInterval: cfg.Edge.CollectorInterval,
-		AgentVersion:    version,
-		Kubernetes:      k8sInfo,
-		UpgradeStageDir: stageDir,
+		MetricsInterval:          cfg.Edge.CollectorInterval,
+		NetworkDiscoveryEnabled:  parseBoolEnv("ONGRID_NETWORK_DISCOVERY_ENABLED", false),
+		NetworkDiscoveryInterval: parseDurationEnv("ONGRID_NETWORK_DISCOVERY_INTERVAL", time.Minute),
+		AgentVersion:             version,
+		Kubernetes:               k8sInfo,
+		UpgradeStageDir:          stageDir,
 	}, log)
 	if isK8sController(k8sInfo) {
 		inventoryInterval := parseDurationEnv("ONGRID_K8S_INVENTORY_INTERVAL", 10*time.Minute)
@@ -437,7 +439,7 @@ func buildCollector(ctx context.Context, cfg *config.Config, log *slog.Logger, e
 		if err != nil {
 			return nil, nil, fmt.Errorf("embedded collector: %w", err)
 		}
-		return collectorAdapter{c: edgecollector.NewNoopPush(em)}, nil, nil
+		return collectorAdapter{c: edgecollector.NewNoopPush(em), network: edgecollector.NewNetworkDiscovery()}, nil, nil
 
 	case "auto":
 		em, err := edgecollector.NewEmbedded(log)
@@ -447,11 +449,11 @@ func buildCollector(ctx context.Context, cfg *config.Config, log *slog.Logger, e
 		sc, err := edgecollector.LoadScrapeConfig(cfg.Edge.ScrapeConfigFile)
 		if err != nil {
 			log.Warn("scrape config unavailable; using embedded baseline only", slog.Any("err", err))
-			return collectorAdapter{c: em}, nil, nil
+			return collectorAdapter{c: em, network: edgecollector.NewNetworkDiscovery()}, nil, nil
 		}
 		scraper := edgecollector.NewScraper(sc, log)
 		eg.Go(func() error { return scraper.Run(ctx) })
-		return collectorAdapter{c: edgecollector.NewComposite(em, scraper, log)}, scraper, nil
+		return collectorAdapter{c: edgecollector.NewComposite(em, scraper, log), network: edgecollector.NewNetworkDiscovery()}, scraper, nil
 
 	case "scrape":
 		sc, err := edgecollector.LoadScrapeConfig(cfg.Edge.ScrapeConfigFile)
@@ -460,14 +462,14 @@ func buildCollector(ctx context.Context, cfg *config.Config, log *slog.Logger, e
 		}
 		scraper := edgecollector.NewScraper(sc, log)
 		eg.Go(func() error { return scraper.Run(ctx) })
-		return collectorAdapter{c: scraper}, scraper, nil
+		return collectorAdapter{c: scraper, network: edgecollector.NewNetworkDiscovery()}, scraper, nil
 
 	case "embedded":
 		em, err := edgecollector.NewEmbedded(log)
 		if err != nil {
 			return nil, nil, fmt.Errorf("embedded collector: %w", err)
 		}
-		return collectorAdapter{c: em}, nil, nil
+		return collectorAdapter{c: em, network: edgecollector.NewNetworkDiscovery()}, nil, nil
 	default:
 		return nil, nil, fmt.Errorf("unknown collector mode %q", cfg.Edge.CollectorMode)
 	}
@@ -842,7 +844,8 @@ func envOr(key, def string) string {
 // internal/edgeagent/collector (avoids cycles when the collector package
 // in turn depends on tunnel types).
 type collectorAdapter struct {
-	c edgecollector.Collector
+	c       edgecollector.Collector
+	network *edgecollector.NetworkDiscoveryCollector
 }
 
 func (a collectorAdapter) CollectAll(ctx context.Context) ([]edgebiz.CollectorOutput, error) {
@@ -872,4 +875,11 @@ func (a collectorAdapter) GetHostLoad(ctx context.Context) (tunnel.GetHostLoadRe
 
 func (a collectorAdapter) GetProcessList(ctx context.Context, topN int, sortBy string) (tunnel.GetProcessListResponse, error) {
 	return a.c.GetProcessList(ctx, topN, sortBy)
+}
+
+func (a collectorAdapter) CollectNetworkDiscovery(ctx context.Context) (tunnel.NetworkDiscoveryRequest, error) {
+	if a.network == nil {
+		return tunnel.NetworkDiscoveryRequest{}, nil
+	}
+	return a.network.CollectNetworkDiscovery(ctx)
 }

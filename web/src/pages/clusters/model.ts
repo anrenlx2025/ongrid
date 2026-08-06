@@ -6,10 +6,12 @@ export type DeviceClusterSummary = {
   cluster: TopologyNode;
   members: Device[];
   memberRelations: TopologyRelation[];
+  externalRelations: TopologyRelation[];
   profiles: EdgeEnrollmentProfile[];
   online: number;
   offline: number;
   activeProfiles: number;
+  lastMemberSeenAt?: string;
 };
 
 export function isDeviceCluster(node: TopologyNode): boolean {
@@ -34,6 +36,14 @@ export function buildDeviceClusterSummaries(
         (relation) =>
           relation.type === "member_of" && relation.dst_id === cluster.id,
       );
+      const memberRelationIDs = new Set(
+        memberRelations.map((relation) => relation.id),
+      );
+      const externalRelations = relations.filter(
+        (relation) =>
+          (relation.src_id === cluster.id || relation.dst_id === cluster.id) &&
+          !memberRelationIDs.has(relation.id),
+      );
       const members = memberRelations
         .map((relation) => devicesByNodeID.get(relation.src_id))
         .filter((device): device is Device => Boolean(device))
@@ -48,19 +58,31 @@ export function buildDeviceClusterSummaries(
           profile.cluster_node_id === cluster.id,
       );
       const online = members.filter((device) => device.online === true).length;
+      const lastMemberSeenAt = latestMemberSeenAt(members);
       return {
         cluster,
         members,
         memberRelations,
+        externalRelations,
         profiles: clusterProfiles,
         online,
         offline: members.length - online,
         activeProfiles: clusterProfiles.filter(
           (profile) => profile.status === "active",
         ).length,
+        lastMemberSeenAt,
       };
     })
     .sort((left, right) => left.cluster.name.localeCompare(right.cluster.name));
+}
+
+function latestMemberSeenAt(members: Device[]): string | undefined {
+  return members.reduce<string | undefined>((latest, device) => {
+    const candidate = device.last_seen_at ?? device.updated_at;
+    if (!candidate || Number.isNaN(Date.parse(candidate))) return latest;
+    if (!latest || Date.parse(candidate) > Date.parse(latest)) return candidate;
+    return latest;
+  }, undefined);
 }
 
 export function clusterMembershipByDeviceNode(

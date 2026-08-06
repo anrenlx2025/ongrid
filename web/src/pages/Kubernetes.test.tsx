@@ -26,6 +26,13 @@ const cluster = {
   inventory_synced_at: new Date(Date.now() - 30_000).toISOString(),
   inventory_watch_lag_seconds: 2,
   inventory_sync_duration_ms: 51,
+  node_edge_coverage: {
+    total: 3,
+    edge_linked: 2,
+    device_linked: 2,
+    missing: 1,
+    percent: 67,
+  },
   created_at: '2026-06-29T09:00:00Z',
   updated_at: '2026-06-29T10:00:00Z',
   upgrade_command: "helm upgrade ongrid-edge 'oci://helm.cnb.cool/ongridio/ongrid-edge' --version '0.10.0' --namespace 'ongrid-system' --reset-then-reuse-values --set-string manager.publicURL='https://manager.example' --set-string manager.tunnelAddr='manager.example:40012' --set-string manager.tlsInsecure=true --wait --wait-for-jobs --atomic --timeout '15m'",
@@ -287,6 +294,10 @@ describe('KubernetesPage', () => {
     expect(screen.getByText('online')).toBeInTheDocument();
     expect(screen.getByText('Controller 运行中')).toBeInTheDocument();
     expect(screen.getByText('ongrid-k8s-control-plane')).toBeInTheDocument();
+    expect(screen.getByText('K8S 版本')).toBeInTheDocument();
+    expect(screen.getByText('v1.30.0')).toBeInTheDocument();
+    expect(screen.getByText('2 / 3')).toBeInTheDocument();
+    expect(screen.getByText('1 个待接入')).toBeInTheDocument();
   });
 
   it('集群列表支持删除集群', async () => {
@@ -827,7 +838,7 @@ describe('KubernetesPage', () => {
     });
   });
 
-  it('K8s 指标使用 Grafana 11 Explore 深链打开 Prometheus 查询', async () => {
+  it('K8S 指标使用 Grafana 11 Explore 深链打开 Prometheus 查询', async () => {
     let launchPayload: { expr?: string } | null = null;
     const replace = vi.fn();
     const open = vi.spyOn(window, 'open').mockReturnValue({
@@ -1835,7 +1846,7 @@ describe('KubernetesPage', () => {
     expect(screen.getByTestId('initial-prompt')).toHaveTextContent('回滚方案');
   });
 
-  it('渲染当前集群的 K8s 写动作审计记录', async () => {
+  it('渲染当前集群的 K8S 写动作审计记录', async () => {
     renderKubernetesDetail('/kubernetes/1?tab=actions');
 
     expect(await screen.findByText('写动作')).toBeInTheDocument();
@@ -1849,7 +1860,7 @@ describe('KubernetesPage', () => {
     expect(screen.getAllByText('restart rollout').length).toBeGreaterThan(0);
     expect(screen.getAllByText('delete pod').length).toBeGreaterThan(0);
     expect(screen.queryByText('apply patch')).not.toBeInTheDocument();
-    expect(await screen.findByText('K8s 写动作审计')).toBeInTheDocument();
+    expect(await screen.findByText('K8S 写动作审计')).toBeInTheDocument();
     expect(screen.getByText('rollout_restart · default · Deployment/api')).toBeInTheDocument();
     expect(screen.getAllByText('已执行').length).toBeGreaterThan(0);
     expect(screen.getByText('请求已记录')).toBeInTheDocument();

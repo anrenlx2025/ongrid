@@ -116,8 +116,9 @@ func (f *fakeClient) lastReq(method string) any {
 
 // fakeCollector returns deterministic non-zero values.
 type fakeCollector struct {
-	collectCount atomic.Int32
-	hostInfoHits atomic.Int32
+	collectCount          atomic.Int32
+	hostInfoHits          atomic.Int32
+	networkDiscoveryCount atomic.Int32
 }
 
 func (c *fakeCollector) CollectAll(ctx context.Context) ([]biz.CollectorOutput, error) {
@@ -145,6 +146,52 @@ func (c *fakeCollector) GetProcessList(ctx context.Context, topN int, sortBy str
 	return tunnel.GetProcessListResponse{
 		Processes: []tunnel.ProcessInfo{{PID: 1, Name: "init"}},
 	}, nil
+}
+func (c *fakeCollector) CollectNetworkDiscovery(context.Context) (tunnel.NetworkDiscoveryRequest, error) {
+	c.networkDiscoveryCount.Add(1)
+	return tunnel.NetworkDiscoveryRequest{
+		Candidates: []tunnel.NetworkDiscoveryCandidateReport{{
+			Source:    "gateway",
+			IPAddress: "192.0.2.1",
+		}},
+	}, nil
+}
+
+func TestAgent_NetworkDiscoveryRequiresExplicitEnable(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		wantMin int32
+		wantMax int32
+	}{
+		{name: "disabled by default", wantMax: 0},
+		{name: "enabled", enabled: true, wantMin: 1, wantMax: 10},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := newFakeClient()
+			coll := &fakeCollector{}
+			a := biz.NewAgent(fc, coll, biz.Config{
+				HeartbeatInterval:        time.Second,
+				MetricsInterval:          time.Second,
+				NetworkDiscoveryEnabled:  tt.enabled,
+				NetworkDiscoveryInterval: 10 * time.Millisecond,
+			}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+			ctx, cancel := context.WithTimeout(context.Background(), 70*time.Millisecond)
+			defer cancel()
+			if err := a.Run(ctx); err != nil {
+				t.Fatalf("Run returned err: %v", err)
+			}
+			got := coll.networkDiscoveryCount.Load()
+			if got < tt.wantMin || got > tt.wantMax {
+				t.Fatalf("network discovery calls=%d, want between %d and %d", got, tt.wantMin, tt.wantMax)
+			}
+			if tt.enabled && fc.countOf(tunnel.MethodPushNetworkDiscovery) < 1 {
+				t.Fatal("push_network_discovery was not called")
+			}
+		})
+	}
 }
 
 // TestAgent_RunBasics runs the agent for ~250ms with sub-second tickers

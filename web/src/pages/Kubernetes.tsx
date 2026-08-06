@@ -145,7 +145,7 @@ export default function KubernetesPage() {
 
   return (
     <>
-      <main className="anim-fade flex flex-1 flex-col overflow-hidden">
+      <main className="anim-fade flex min-w-0 flex-1 flex-col overflow-hidden">
         <PageHeader
           title={tr('Kubernetes 集群', 'Kubernetes clusters')}
           subtitle={tr(
@@ -168,7 +168,7 @@ export default function KubernetesPage() {
           }
         />
 
-        <div className="flex-1 overflow-y-auto px-6 py-6">
+        <div className="min-w-0 flex-1 overflow-y-auto px-6 py-6">
           {error && (
             <div className="mb-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">
               {tr('加载失败：', 'Load failed: ')}
@@ -176,28 +176,30 @@ export default function KubernetesPage() {
             </div>
           )}
 
-          <div className="overflow-x-auto rounded-xl border border-zinc-800/60 bg-zinc-900/40">
-            <table className="min-w-[820px] w-full text-sm">
+          <div className="w-full min-w-0 max-w-full overflow-x-auto rounded-xl border border-zinc-800/60 bg-zinc-900/40">
+            <table className="min-w-[1120px] w-full text-sm">
               <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
                 <tr>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('集群', 'Cluster')}</th>
+                  <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('K8S 版本', 'K8S version')}</th>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('模式', 'Mode')}</th>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('状态', 'Status')}</th>
-                  <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('Controller Edge', 'Controller edge')}</th>
+                  <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('节点接入', 'Node access')}</th>
+                  <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('Controller', 'Controller')}</th>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('最近同步', 'Last sync')}</th>
-                  <th className="px-4 py-2.5 text-right">{tr('操作', 'Actions')}</th>
+                  <th className="sticky right-0 z-20 min-w-[340px] border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-left">{tr('操作', 'Actions')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/40">
                 {loading && clusters.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-4 py-10 text-center text-zinc-500">
+                    <td colSpan={8} className="px-4 py-10 text-center text-zinc-500">
                       {tr('加载中…', 'Loading…')}
                     </td>
                   </tr>
                 ) : clusters.length === 0 ? (
                   <tr>
-                    <td colSpan={6}>
+                    <td colSpan={8}>
                       <EmptyState
                         icon={ShipWheel}
                         title={tr('暂无 Kubernetes 集群', 'No Kubernetes clusters')}
@@ -226,11 +228,17 @@ export default function KubernetesPage() {
                           {cluster.uid || `cluster-${cluster.id}`}
                         </div>
                       </td>
+                      <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-zinc-400">
+                        {cluster.version || '—'}
+                      </td>
                       <td className="whitespace-nowrap px-4 py-2.5">
                         <ModeChip mode={cluster.mode} />
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5">
                         <ClusterStatusChip status={cluster.status} />
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-2.5">
+                        <NodeAccessCoverage coverage={cluster.node_edge_coverage} />
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5">
                         {cluster.status === 'online' && cluster.controller_edge_id ? (
@@ -242,19 +250,22 @@ export default function KubernetesPage() {
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
                         {relativeTime(clusterSyncTime(cluster))}
                       </td>
-                      <td className="px-4 py-2.5 text-right" onClick={(ev) => ev.stopPropagation()}>
-                        <div className="inline-flex items-center justify-end gap-1">
+                      <td className="sticky right-0 z-10 min-w-[340px] border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-left" onClick={(ev) => ev.stopPropagation()}>
+                        <div className="flex items-center gap-1">
                           <Link
                             to={`/kubernetes/${cluster.id}`}
+                            aria-label={tr(`查看集群 ${cluster.name} 详情`, `View cluster ${cluster.name} details`)}
+                            title={tr('详情', 'Details')}
                             className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
                           >
                             <ExternalLink size={13} />
-                            {tr('详情', 'Detail')}
+                            {tr('详情', 'Details')}
                           </Link>
                           {isAdmin && (
                             <button
                               type="button"
                               aria-label={tr(`查看集群 ${cluster.name} 的升级命令`, `View upgrade command for cluster ${cluster.name}`)}
+                              title={tr('升级命令', 'Upgrade command')}
                               onClick={() => setUpgradeCluster(cluster)}
                               className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
                             >
@@ -266,6 +277,7 @@ export default function KubernetesPage() {
                             <button
                               type="button"
                               aria-label={tr(`查看集群 ${cluster.name} 的卸载命令`, `View uninstall command for cluster ${cluster.name}`)}
+                              title={tr('卸载命令', 'Uninstall command')}
                               onClick={() => setUninstallCluster(cluster)}
                               className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
                             >
@@ -277,6 +289,7 @@ export default function KubernetesPage() {
                             <button
                               type="button"
                               aria-label={tr(`删除集群 ${cluster.name}`, `Delete cluster ${cluster.name}`)}
+                              title={tr('删除', 'Delete')}
                               disabled={deletingClusterID === cluster.id}
                               onClick={() => setDeleteClusterTarget(cluster)}
                               className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-red-300 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-50"
@@ -1007,7 +1020,7 @@ export function KubernetesClusterDetailPage() {
                     </Button>
                   </div>
                 )}
-                <div className="overflow-x-auto">
+                <div className="w-full min-w-0 max-w-full overflow-x-auto">
                   {activeTab === 'nodes' && (
                     <NodesTable
                       items={filteredNodes}
@@ -1938,7 +1951,7 @@ function K8sTelemetryDrilldowns({
       <div className="divide-y divide-zinc-800/60">
         <TelemetryLinkCell
           icon={BarChart3}
-          title={tr('K8s 指标', 'K8s metrics')}
+          title={tr('K8S 指标', 'K8S metrics')}
           source="Prometheus"
           statusLabel={clusterID ? tr('查询已就绪', 'query ready') : tr('等待 cluster_id', 'waiting for cluster_id')}
           statusTone={clusterID ? 'info' : 'default'}
@@ -1949,7 +1962,7 @@ function K8sTelemetryDrilldowns({
         />
         <TelemetryLinkCell
           icon={FileText}
-          title={tr('K8s 日志', 'K8s logs')}
+          title={tr('K8S 日志', 'K8S logs')}
           source="Loki"
           statusLabel={clusterID ? tr('查询已就绪', 'query ready') : tr('等待 cluster_id', 'waiting for cluster_id')}
           statusTone={clusterID ? 'info' : 'default'}
@@ -1960,7 +1973,7 @@ function K8sTelemetryDrilldowns({
         />
         <TelemetryLinkCell
           icon={Waypoints}
-          title={tr('K8s 链路', 'K8s traces')}
+          title={tr('K8S 链路', 'K8S traces')}
           source="Tempo"
           statusLabel={clusterID ? tr('查询已就绪', 'query ready') : tr('等待 cluster_id', 'waiting for cluster_id')}
           statusTone={clusterID ? 'info' : 'default'}
@@ -2268,7 +2281,7 @@ function K8sActionAudit({
         <div className="flex min-w-0 items-center gap-2">
           <ShieldCheck size={15} className="text-zinc-400" />
           <div className="min-w-0">
-            <div className="text-sm font-medium text-zinc-100">{tr('K8s 写动作审计', 'K8s action audit')}</div>
+            <div className="text-sm font-medium text-zinc-100">{tr('K8S 写动作审计', 'K8S action audit')}</div>
             <div className="mt-0.5 text-xs text-zinc-500">
               {loading && !hasRows
                 ? tr('加载中…', 'Loading…')
@@ -2349,7 +2362,7 @@ function K8sActionAudit({
         ) : (
           <FilteredResourceEmptyState
             icon={ShieldCheck}
-            title={filtered ? tr('暂无匹配写动作审计记录', 'No matching action audit record') : tr('暂无当前集群的 K8s 写动作审批记录。', 'No K8s write-action approval records for this cluster.')}
+            title={filtered ? tr('暂无匹配写动作审计记录', 'No matching action audit record') : tr('暂无当前集群的 K8S 写动作审批记录。', 'No K8S write-action approval records for this cluster.')}
             filtered={filtered}
             hint={emptyHint}
             onClear={onClearFilters}
@@ -3001,7 +3014,7 @@ function NodesTable({
           <th className="whitespace-nowrap px-4 py-2.5 text-left">CPU</th>
           <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('内存', 'Memory')}</th>
           <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('最近同步', 'Last sync')}</th>
-          {actions && <th className="whitespace-nowrap px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
+          {actions && <th className="sticky right-0 z-20 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
         </tr>
       </thead>
       <tbody className="divide-y divide-zinc-800/40">
@@ -3031,7 +3044,7 @@ function NodesTable({
               <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-zinc-400">{formatKubernetesMemory(resourceValue(item.capacity, 'memory'))}</td>
               <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">{relativeTime(item.last_seen_at)}</td>
               {actions && (
-                <td className="whitespace-nowrap px-4 py-2.5 text-right">
+                <td className="sticky right-0 z-10 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-right">
                   <ResourceRowActions issue={issue} actions={actions} />
                 </td>
               )}
@@ -3101,7 +3114,7 @@ function WorkloadsTable({
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('进度', 'Progress')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('状态', 'Status')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('最近同步', 'Last sync')}</th>
-            {actions && <th className="whitespace-nowrap px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
+            {actions && <th className="sticky right-0 z-20 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-zinc-800/40">
@@ -3149,7 +3162,7 @@ function WorkloadsTable({
                   </td>
                   <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">{relativeTime(item.last_seen_at)}</td>
                   {actions && (
-                    <td className="whitespace-nowrap px-4 py-2.5 text-right">
+                    <td className="sticky right-0 z-10 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-right">
                       <ResourceRowActions issue={issue} actions={actions} />
                     </td>
                   )}
@@ -3271,7 +3284,7 @@ function PodsTable({
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('重启', 'Restarts')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('原因', 'Reason')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('最近同步', 'Last sync')}</th>
-            {actions && <th className="whitespace-nowrap px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
+            {actions && <th className="sticky right-0 z-20 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-zinc-800/40">
@@ -3290,7 +3303,7 @@ function PodsTable({
                 <td className="max-w-[220px] truncate px-4 py-2.5 text-zinc-400">{item.reason || '—'}</td>
                 <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">{relativeTime(item.last_seen_at)}</td>
                 {actions && (
-                  <td className="whitespace-nowrap px-4 py-2.5 text-right">
+                  <td className="sticky right-0 z-10 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-right">
                     <ResourceRowActions issue={issue} actions={actions} />
                   </td>
                 )}
@@ -3352,7 +3365,7 @@ function EventsTable({
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('次数', 'Count')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('最近事件', 'Last event')}</th>
             <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('同步', 'Synced')}</th>
-            {actions && <th className="whitespace-nowrap px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
+            {actions && <th className="sticky right-0 z-20 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-950 px-4 py-2.5 text-right">{tr('排障', 'Triage')}</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-zinc-800/40">
@@ -3373,7 +3386,7 @@ function EventsTable({
                 </td>
                 <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">{relativeTime(item.last_seen_at)}</td>
                 {actions && (
-                  <td className="whitespace-nowrap px-4 py-2.5 text-right">
+                  <td className="sticky right-0 z-10 whitespace-nowrap border-l border-zinc-800/60 bg-zinc-900 px-4 py-2.5 text-right">
                     {issue ? <ResourceRowActions issue={issue} actions={actions} /> : <span className="text-zinc-600">—</span>}
                   </td>
                 )}
@@ -3606,6 +3619,23 @@ function ClusterStatusChip({ status }: { status?: string }) {
 
 function ModeChip({ mode }: { mode?: string }) {
   return <Chip tone="accent">{mode || 'full-node'}</Chip>;
+}
+
+function NodeAccessCoverage({ coverage }: { coverage?: KubernetesCluster['node_edge_coverage'] }) {
+  const { tr } = useI18n();
+  if (!coverage || coverage.total <= 0) return <span className="text-zinc-500">—</span>;
+  const linked = Math.min(coverage.edge_linked, coverage.total);
+  const missing = Math.max(coverage.missing, coverage.total - linked);
+  return (
+    <div className="leading-tight">
+      <div className="font-mono text-xs text-zinc-300">{linked} / {coverage.total}</div>
+      <div className={cn('mt-0.5 text-[11px]', missing > 0 ? 'text-amber-500' : 'text-zinc-500')}>
+        {missing > 0
+          ? tr(`${missing} 个待接入`, `${missing} missing`)
+          : tr('全部已接入', 'All linked')}
+      </div>
+    </div>
+  );
 }
 
 function WorkloadStatusChip({ item, tr }: { item: KubernetesWorkload; tr: (zh: string, en: string) => string }) {

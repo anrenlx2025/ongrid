@@ -21,6 +21,13 @@ English | [简体中文](./README_ZH.md) | [日本語](./README_JA.md) | [한국
   <img src="docs/assets/demo.gif" alt="Ongrid demo" width="100%" />
 </p>
 
+<p align="center">
+  <img src="docs/assets/kubernetes-release-banner.png" alt="Kubernetes lifecycle management" width="100%" />
+  <br />
+  <strong>☸️ Kubernetes lifecycle management is now available</strong><br />
+  <sub>Enroll clusters through Edge, inspect workloads and events, manage upgrades, and connect Kubernetes resources to topology.</sub>
+</p>
+
 <div align="center">
 
 [Features](#features) • [Install](#install) • [Integrations](#integrations) • [License](#license)
@@ -39,6 +46,8 @@ English | [简体中文](./README_ZH.md) | [日本語](./README_JA.md) | [한국
 - 🧠 **Bring your own model** — Anthropic / OpenAI / GLM / DeepSeek / Gemini / Kimi, hot routing
 - 💬 **Two-way IM channels** — Slack / Telegram / Larksuite / DingTalk / WeCom, per-channel locale
 - 🛠️ **Read-only host tools** — bash sandbox + 26+ inspection tools; every call audited
+- ☸️ **Kubernetes lifecycle** — enroll clusters, inspect workloads and events, manage upgrades, and mirror Kubernetes resources into topology
+- 🌐 **Network device management** — discover neighbors from Edge hosts, verify with SNMP, poll interfaces, and map host-to-network-device links
 
 ## Install
 

@@ -134,6 +134,10 @@ func (r *Registry) BuildBaseTools() *ToolBag {
 	if r.edges != nil || r.devices != nil {
 		out = append(out, NewQueryEdgesTool(r.devices, r.edges, r.log))
 	}
+	if r.devices != nil && r.devices.NetworkDiscovery() != nil {
+		out = append(out, NewQueryNetworkDevicesTool(r.devices, r.devices.NetworkDiscovery(), r.log))
+		out = append(out, NewQueryNetworkInterfacesTool(r.devices, r.devices.NetworkDiscovery(), r.log))
+	}
 	if r.edges != nil {
 		out = append(out, NewGetTopologyTool(r.edges, r.alertUC, r.topology, r.log))
 	}
@@ -207,6 +211,9 @@ func (r *Registry) BuildBaseTools() *ToolBag {
 	if r.topologyGraph != nil {
 		out = append(out, NewExpandTopologyTool(r.topologyGraph, r.devices, r.log))
 		out = append(out, NewFindTopologyNodeTool(r.topologyGraph, r.log))
+		if r.devices != nil {
+			out = append(out, NewGetNetworkNeighborsTool(r.devices, r.topologyGraph, r.log))
+		}
 	}
 
 	// 18: bash — generic host shell skill. Read commands use the edge

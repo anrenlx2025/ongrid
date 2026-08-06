@@ -38,4 +38,32 @@ describe('StatusRow', () => {
     expect(await screen.findByText('1/1 在线设备')).toBeInTheDocument();
     expect(screen.queryByText('2/2 在线设备')).not.toBeInTheDocument();
   });
+
+  it('将 SNMP 网络设备的可达性计入可用设备', async () => {
+    server.use(
+      http.get('/api/v1/devices', () =>
+        HttpResponse.json({
+          items: [
+            { id: 33, name: 'host-a', online: true },
+            {
+              id: 34,
+              name: 'switch-a',
+              os: 'network',
+              online: false,
+              reachability_status: 'reachable',
+            },
+          ],
+          total: 2,
+        }),
+      ),
+    );
+
+    render(
+      <MemoryRouter>
+        <StatusRow />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('2/2 在线设备')).toBeInTheDocument();
+  });
 });

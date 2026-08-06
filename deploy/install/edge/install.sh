@@ -273,7 +273,10 @@ fi
 # /var/log/* (root:adm 640) and the journal (systemd-journal). Idempotent.
 # Re-asserted on every root start by apply-pending-upgrade.sh, so bundle
 # upgrades that skip this installer don't silently lose it.
-for grp in adm systemd-journal; do
+# lldpd exposes its read-only control socket to the _lldpd group. Add the
+# service user when lldpd is installed so the optional LLDP collector works
+# under the non-root systemd service; on hosts without lldpd this is a no-op.
+for grp in adm systemd-journal _lldpd; do
     if getent group "$grp" >/dev/null 2>&1; then
         usermod -aG "$grp" "$SERVICE_USER" 2>/dev/null || true
     fi

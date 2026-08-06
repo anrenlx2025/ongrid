@@ -21,6 +21,13 @@
   <img src="docs/assets/demo.gif" alt="Ongrid demo" width="100%" />
 </p>
 
+<p align="center">
+  <img src="docs/assets/kubernetes-release-banner.png" alt="Kubernetes 生命周期管理" width="100%" />
+  <br />
+  <strong>☸️ Kubernetes 生命周期管理现已发布</strong><br />
+  <sub>通过 Edge 注册集群，查看工作负载与事件，管理升级，并将 Kubernetes 资源关联到拓扑。</sub>
+</p>
+
 <div align="center">
 
 [特性](#特性) • [安装](#安装) • [集成](#集成) • [许可证](#许可证)
@@ -39,6 +46,8 @@
 - 🧠 **自带任意模型** — Anthropic / OpenAI / GLM / DeepSeek / Gemini / Kimi, 热路由
 - 💬 **双向 IM 通道** — Slack / Telegram / Larksuite / DingTalk / WeCom, 按通道语言
 - 🛠️ **只读主机巡检工具** — bash 沙箱 + 26+ 工具, 每次调用全审计
+- ☸️ **Kubernetes 生命周期管理** — 注册集群、查看工作负载与事件、管理升级，并将 Kubernetes 资源映射到拓扑
+- 🌐 **网络设备管理** — 从 Edge 主机发现邻居，经 SNMP 校验和轮询接口状态，并建立主机到网络设备的拓扑关系
 
 ## 安装
 

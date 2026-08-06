@@ -19,6 +19,21 @@ type Usecase struct {
 	links    EdgeDeviceRepo
 	topology TopologyMirror
 	log      *slog.Logger
+	network  *NetworkDiscoveryUsecase
+}
+
+// SetNetworkDiscovery wires the optional network-neighbor discovery facade.
+func (u *Usecase) SetNetworkDiscovery(discovery *NetworkDiscoveryUsecase) {
+	u.network = discovery
+}
+
+func (u *Usecase) NetworkDiscovery() *NetworkDiscoveryUsecase { return u.network }
+
+func (u *Usecase) ListNetworkCandidates(ctx context.Context, filter NetworkCandidateFilter) ([]*model.NetworkDiscoveryCandidate, int64, error) {
+	if u.network == nil {
+		return nil, 0, nil
+	}
+	return u.network.ListCandidates(ctx, filter)
 }
 
 // NewUsecase builds the usecase. links may be nil — junction-aware methods

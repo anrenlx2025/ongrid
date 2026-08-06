@@ -219,6 +219,32 @@ func topologyPropsSource(propsJSON string) string {
 	return source
 }
 
+// EnsureDeviceConnection mirrors an observed physical adjacency into the
+// generic topology graph. Device IDs are ordered so repeated discovery
+// reports produce one canonical undirected relation.
+func (u *Usecase) EnsureDeviceConnection(ctx context.Context, deviceID, peerDeviceID uint64, propsJSON string) error {
+	if deviceID == 0 || peerDeviceID == 0 || deviceID == peerDeviceID {
+		return fmt.Errorf("%w: two distinct device ids are required", errs.ErrInvalid)
+	}
+	if deviceID > peerDeviceID {
+		deviceID, peerDeviceID = peerDeviceID, deviceID
+	}
+	existing, err := u.relations.List(ctx, RelationListFilter{
+		SrcID: deviceID, DstID: peerDeviceID, Type: model.RelConnectedTo, Limit: 1,
+	})
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		if existing[0].PropsJSON == propsJSON {
+			return nil
+		}
+		return u.relations.Update(ctx, existing[0].ID, propsJSON)
+	}
+	_, err = u.CreateRelation(ctx, deviceID, peerDeviceID, model.RelConnectedTo, propsJSON)
+	return err
+}
+
 // UpdateRelation rewrites only the props bag — the (src, dst, type)
 // triple is the identity and changing it is just "delete and recreate".
 func (u *Usecase) UpdateRelation(ctx context.Context, id uint64, propsJSON string) error {
@@ -310,6 +336,37 @@ func (u *Usecase) EnsureNodeForDevice(ctx context.Context, deviceID uint64, devi
 			slog.Uint64("device_id", deviceID), slog.Uint64("node_id", n.ID), slog.String("name", deviceName))
 	}
 	return n.ID, nil
+}
+
+// EnsureNetworkDeviceNode mirrors a network Device and marks the node so
+// topology clients can render it separately from host devices.
+func (u *Usecase) EnsureNetworkDeviceNode(ctx context.Context, deviceID uint64, deviceName string) (uint64, error) {
+	nodeID, err := u.EnsureNodeForDevice(ctx, deviceID, deviceName)
+	if err != nil {
+		return 0, err
+	}
+	n, err := u.nodes.Get(ctx, nodeID)
+	if err != nil {
+		return 0, err
+	}
+	props := map[string]any{}
+	if strings.TrimSpace(n.PropsJSON) != "" {
+		if err := json.Unmarshal([]byte(n.PropsJSON), &props); err != nil {
+			props = map[string]any{}
+		}
+	}
+	props["device_id"] = deviceID
+	props["device_kind"] = "network"
+	propsJSON, err := json.Marshal(props)
+	if err != nil {
+		return 0, fmt.Errorf("marshal network device node props: %w", err)
+	}
+	if n.PropsJSON != string(propsJSON) {
+		if err := u.nodes.Update(ctx, nodeID, n.Name, string(propsJSON)); err != nil {
+			return 0, err
+		}
+	}
+	return nodeID, nil
 }
 
 // DeleteNodeForDevice removes the topology node owned by a deleted device.

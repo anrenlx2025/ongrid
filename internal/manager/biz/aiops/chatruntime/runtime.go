@@ -1161,6 +1161,15 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 		strings.Contains(userText, "变更事件") || strings.Contains(userText, "审计变更") || strings.Contains(userText, "谁改") || strings.Contains(userText, "改过")
 	alertRulesIntent := containsAny(low, "alert rule", "alert rules") || strings.Contains(userText, "告警规则")
 	incidentIntent := containsAny(low, "incident", "incidents") || strings.Contains(userText, "告警")
+	networkInventoryIntent := containsAny(low,
+		"network device", "network devices", "snmp", "switch", "router", "firewall",
+		"network neighbor", "network neighbours", "connected host", "connection history",
+		"network interface", "interface status", "switch port", "port status") ||
+		strings.Contains(userText, "网络设备") || strings.Contains(userText, "网络邻居") ||
+		strings.Contains(userText, "交换机") || strings.Contains(userText, "路由器") ||
+		strings.Contains(userText, "防火墙") || strings.Contains(userText, "连接关系") ||
+		strings.Contains(userText, "SNMP") || strings.Contains(userText, "接口状态") ||
+		strings.Contains(userText, "端口状态")
 	complexHint := complexCoordinatorHint(low, userText)
 	topologyIntent := strings.Contains(low, "topology") || strings.Contains(low, "fleet") || strings.Contains(low, "deployment") ||
 		strings.Contains(userText, "拓扑") || strings.Contains(userText, "规模") || strings.Contains(userText, "版本") || strings.Contains(userText, "部署")
@@ -1171,7 +1180,7 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 	}
 	hostIntent := strings.Contains(low, "host_bash") || strings.Contains(low, "journalctl") || strings.Contains(low, "systemctl") ||
 		strings.Contains(low, "dmesg") || strings.Contains(low, "device_id") || strings.Contains(userText, "主机") || strings.Contains(userText, "文件")
-	if !knowledgeIntent && !metricIntent && !logIntent && !traceIntent && !sourceSearchIntent && !dbHealthIntent && !changeEventIntent && !alertRulesIntent && !incidentIntent && !complexHint {
+	if !knowledgeIntent && !metricIntent && !logIntent && !traceIntent && !sourceSearchIntent && !dbHealthIntent && !changeEventIntent && !alertRulesIntent && !incidentIntent && !networkInventoryIntent && !complexHint {
 		return bag
 	}
 	if knowledgeIntent && knowledgeLookupIntent(low, userText) {
@@ -1179,6 +1188,14 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 	}
 	if topologyIntent && topologyFactsIntent(low, userText) {
 		return filterCoordinatorToolNames(bag, "get_topology")
+	}
+	if networkInventoryIntent && !complexHint {
+		return filterCoordinatorToolNames(bag,
+			"ToolSearch",
+			"query_network_devices",
+			"query_network_interfaces",
+			"get_network_neighbors",
+		)
 	}
 	if metricCatalogIntent {
 		return filterCoordinatorToolNames(bag, "list_metric_catalog")

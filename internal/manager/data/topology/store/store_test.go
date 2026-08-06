@@ -28,7 +28,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-// TestMigrateSeedsBuiltinRelationTypes asserts the six seed rows land
+// TestMigrateSeedsBuiltinRelationTypes asserts every seed row lands
 // on a clean DB and the upsert on second migration is idempotent.
 func TestMigrateSeedsBuiltinRelationTypes(t *testing.T) {
 	db := newTestDB(t)
@@ -39,13 +39,13 @@ func TestMigrateSeedsBuiltinRelationTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(rows) != 6 {
-		t.Fatalf("expected 6 builtin rows, got %d", len(rows))
+	wantBuiltin := model.BuiltinRelationTypes()
+	if len(rows) != len(wantBuiltin) {
+		t.Fatalf("expected %d builtin rows, got %d", len(wantBuiltin), len(rows))
 	}
-	wantNames := map[string]bool{
-		model.RelMemberOf: true, model.RelDependsOn: true,
-		model.RelDeployedOn: true, model.RelReplicatesTo: true,
-		model.RelMonitors: true, model.RelRoutesTo: true,
+	wantNames := make(map[string]bool, len(wantBuiltin))
+	for _, relationType := range wantBuiltin {
+		wantNames[relationType.Name] = true
 	}
 	for _, r := range rows {
 		if !r.Builtin {
@@ -62,8 +62,8 @@ func TestMigrateSeedsBuiltinRelationTypes(t *testing.T) {
 		t.Fatalf("second Migrate: %v", err)
 	}
 	rows, _ = rtRepo.List(ctx)
-	if len(rows) != 6 {
-		t.Fatalf("after second Migrate, expected 6 rows still, got %d", len(rows))
+	if len(rows) != len(wantBuiltin) {
+		t.Fatalf("after second Migrate, expected %d rows still, got %d", len(wantBuiltin), len(rows))
 	}
 }
 

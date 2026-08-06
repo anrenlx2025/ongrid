@@ -112,4 +112,16 @@ func init() {
 		Fields:    []CredField{{Key: "token", Label: "Personal Access Token", Secret: true}},
 		InjectEnv: map[string]string{"GITHUB_TOKEN": "{{token}}"},
 	})
+	registerCredType(&CredType{
+		Name: "snmp", Label: "SNMP", Builtin: true,
+		Fields: []CredField{
+			{Key: "version", Label: "Version (v2c or v3)"},
+			{Key: "community", Label: "Community", Secret: true},
+			{Key: "username", Label: "Username"},
+			{Key: "auth_protocol", Label: "Auth protocol"},
+			{Key: "auth_secret", Label: "Auth secret", Secret: true},
+			{Key: "privacy_protocol", Label: "Privacy protocol"},
+			{Key: "privacy_secret", Label: "Privacy secret", Secret: true},
+		},
+	})
 }

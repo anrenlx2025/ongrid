@@ -21,6 +21,13 @@
   <img src="docs/assets/demo.gif" alt="Ongrid demo" width="100%" />
 </p>
 
+<p align="center">
+  <img src="docs/assets/kubernetes-release-banner.png" alt="Kubernetes ライフサイクル管理" width="100%" />
+  <br />
+  <strong>☸️ Kubernetes ライフサイクル管理をリリースしました</strong><br />
+  <sub>Edge 経由でクラスタを登録し、ワークロードとイベントを確認、アップグレードを管理し、Kubernetes リソースをトポロジーに関連付けます。</sub>
+</p>
+
 <div align="center">
 
 [機能](#機能) • [インストール](#インストール) • [インテグレーション](#インテグレーション) • [ライセンス](#ライセンス)
@@ -39,6 +46,8 @@
 - 🧠 **任意モデル持ち込み** — Anthropic / OpenAI / GLM / DeepSeek / Gemini / Kimi、ホット切り替え
 - 💬 **双方向 IM チャネル** — Slack / Telegram / Larksuite / DingTalk / WeCom、チャネル別ロケール
 - 🛠️ **読み取り専用ホストツール** — bash サンドボックス + 26+ ツール、全コール監査
+- ☸️ **Kubernetes ライフサイクル管理** — クラスタ登録、ワークロードとイベントの確認、アップグレード管理、Kubernetes リソースのトポロジー反映
+- 🌐 **ネットワーク機器管理** — Edge ホストから隣接機器を検出し、SNMP で検証・インターフェースをポーリング、ホストと機器の接続を可視化
 
 ## インストール
 

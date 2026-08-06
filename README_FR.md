@@ -21,6 +21,13 @@
   <img src="docs/assets/demo.gif" alt="Ongrid demo" width="100%" />
 </p>
 
+<p align="center">
+  <img src="docs/assets/kubernetes-release-banner.png" alt="Cycle de vie Kubernetes" width="100%" />
+  <br />
+  <strong>☸️ La gestion du cycle de vie Kubernetes est disponible</strong><br />
+  <sub>Enregistrez des clusters via Edge, inspectez charges et événements, gérez les mises à niveau et reliez les ressources Kubernetes à la topologie.</sub>
+</p>
+
 <div align="center">
 
 [Fonctionnalités](#fonctionnalités) • [Installation](#installation) • [Intégrations](#intégrations) • [Licence](#licence)
@@ -39,6 +46,8 @@
 - 🧠 **Apportez votre modèle** — Anthropic / OpenAI / GLM / DeepSeek / Gemini / Kimi, routage à chaud
 - 💬 **Canaux IM bidirectionnels** — Slack / Telegram / Larksuite / DingTalk / WeCom, langue par canal
 - 🛠️ **Outils host en lecture seule** — sandbox bash + 26+ outils, chaque appel audité
+- ☸️ **Cycle de vie Kubernetes** — enregistrez les clusters, inspectez charges et événements, gérez les mises à niveau et reflétez les ressources dans la topologie
+- 🌐 **Gestion des équipements réseau** — découvrez les voisins depuis les hôtes Edge, validez-les par SNMP, sondez les interfaces et cartographiez les liens hôte-équipement
 
 ## Installation
 

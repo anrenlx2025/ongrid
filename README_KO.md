@@ -21,6 +21,13 @@
   <img src="docs/assets/demo.gif" alt="Ongrid demo" width="100%" />
 </p>
 
+<p align="center">
+  <img src="docs/assets/kubernetes-release-banner.png" alt="Kubernetes 라이프사이클 관리" width="100%" />
+  <br />
+  <strong>☸️ Kubernetes 라이프사이클 관리 기능을 출시했습니다</strong><br />
+  <sub>Edge로 클러스터를 등록하고, 워크로드와 이벤트를 확인하며, 업그레이드를 관리하고 Kubernetes 리소스를 토폴로지에 연결합니다.</sub>
+</p>
+
 <div align="center">
 
 [기능](#기능) • [설치](#설치) • [연동](#연동) • [라이선스](#라이선스)
@@ -39,6 +46,8 @@
 - 🧠 **원하는 모델 사용** — Anthropic / OpenAI / GLM / DeepSeek / Gemini / Kimi, 핫 라우팅
 - 💬 **양방향 IM 채널** — Slack / Telegram / Larksuite / DingTalk / WeCom, 채널별 로케일
 - 🛠️ **읽기 전용 호스트 도구** — bash 샌드박스 + 26+ 도구, 모든 호출 감사
+- ☸️ **Kubernetes 라이프사이클 관리** — 클러스터 등록, 워크로드와 이벤트 조회, 업그레이드 관리, Kubernetes 리소스를 토폴로지에 반영
+- 🌐 **네트워크 장비 관리** — Edge 호스트에서 이웃을 발견하고 SNMP로 검증 및 인터페이스를 폴링하며 호스트-장비 연결을 표시
 
 ## 설치
 

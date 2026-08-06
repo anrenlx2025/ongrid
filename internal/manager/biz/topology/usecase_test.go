@@ -223,6 +223,46 @@ func TestValidateUpgradeClusterRequiresEveryRequestedMember(t *testing.T) {
 	}
 }
 
+func TestEnsureDeviceConnectionIsCanonicalAndIdempotent(t *testing.T) {
+	uc := newUC(t)
+	ctx := context.Background()
+	a, err := uc.CreateNode(ctx, string(model.NodeTypeDevice), "host-a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := uc.CreateNode(ctx, string(model.NodeTypeDevice), "switch-a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := uc.EnsureDeviceConnection(ctx, b.ID, a.ID, `{"source":"network_discovery"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := uc.EnsureDeviceConnection(ctx, a.ID, b.ID, `{"source":"network_discovery"}`); err != nil {
+		t.Fatal(err)
+	}
+	rels, _, err := uc.ListRelations(ctx, biz.RelationListFilter{Type: model.RelConnectedTo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rels) != 1 || rels[0].SrcID != minID(a.ID, b.ID) || rels[0].DstID != maxID(a.ID, b.ID) {
+		t.Fatalf("relations=%+v", rels)
+	}
+}
+
+func minID(a, b uint64) uint64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxID(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func TestEnsureKubernetesClusterUpsertsTopologyNode(t *testing.T) {
 	uc := newUC(t)
 	ctx := context.Background()
