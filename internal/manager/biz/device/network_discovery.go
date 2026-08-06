@@ -61,6 +61,10 @@ type NetworkSNMPCredentialResolver interface {
 	ResolveFields(ctx context.Context, name string) (map[string]string, error)
 }
 
+// NetworkDiscoveryEnabledProvider keeps the platform setting at the
+// composition boundary. The device domain does not import the setting domain.
+type NetworkDiscoveryEnabledProvider func(ctx context.Context) bool
+
 // NetworkDeviceDetail is the read model for a verified network device. The
 // candidate carries the latest protocol observation while Profile contains
 // the durable identity promoted into the device inventory.
@@ -85,6 +89,7 @@ type NetworkDiscoveryUsecase struct {
 	edgeCaller  NetworkSNMPCaller
 	credentials NetworkSNMPCredentialResolver
 	topology    NetworkTopologyMirror
+	enabled     NetworkDiscoveryEnabledProvider
 }
 
 func (u *NetworkDiscoveryUsecase) SetCredentialResolver(resolver NetworkSNMPCredentialResolver) {
@@ -107,6 +112,13 @@ func (u *NetworkDiscoveryUsecase) SetEdgeCaller(caller NetworkSNMPCaller) {
 
 func (u *NetworkDiscoveryUsecase) SetTopologyMirror(mirror NetworkTopologyMirror) {
 	u.topology = mirror
+}
+
+// SetEnabledProvider supplies the platform-wide discovery admission gate.
+// A nil provider preserves the default-enabled behavior for standalone tests
+// and older composition roots.
+func (u *NetworkDiscoveryUsecase) SetEnabledProvider(provider NetworkDiscoveryEnabledProvider) {
+	u.enabled = provider
 }
 
 func (u *NetworkDiscoveryUsecase) ListCandidates(ctx context.Context, filter NetworkCandidateFilter) ([]*model.NetworkDiscoveryCandidate, int64, error) {
@@ -534,6 +546,9 @@ var _ interface {
 // the same neighbor seen from two hosts remains explainable in the UI.
 func (u *NetworkDiscoveryUsecase) IngestNetworkDiscovery(ctx context.Context, edgeID uint64, in tunnel.NetworkDiscoveryRequest) (int, error) {
 	if u == nil || u.repo == nil || edgeID == 0 {
+		return 0, nil
+	}
+	if u.enabled != nil && !u.enabled(ctx) {
 		return 0, nil
 	}
 	if len(in.Candidates) == 0 {

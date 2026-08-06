@@ -745,6 +745,7 @@ func main() {
 	deviceUC := managerbizdevice.NewUsecase(deviceRepo, edgeDeviceRepo, log)
 	networkDiscoveryRepo := managerdevicedata.NewNetworkDiscoveryRepo(db)
 	networkDiscoveryUC := managerbizdevice.NewNetworkDiscoveryUsecase(networkDiscoveryRepo)
+	networkDiscoveryUC.SetEnabledProvider(settingSvc.NetworkDiscoveryEnabled)
 	networkDiscoveryUC.SetPromotionDependencies(networkDiscoveryRepo, deviceRepo, edgeDeviceRepo)
 	deviceUC.SetNetworkDiscovery(networkDiscoveryUC)
 	edgeUC := managerbizedge.NewUsecase(edgeRepo, deviceRepo, edgeDeviceRepo, log)

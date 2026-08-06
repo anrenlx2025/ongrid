@@ -131,6 +131,21 @@ func TestNetworkDiscoveryUsecaseKeepsARPAsCandidate(t *testing.T) {
 	}
 }
 
+func TestNetworkDiscoveryUsecaseRespectsPlatformGate(t *testing.T) {
+	repo := &fakeNetworkDiscoveryRepo{}
+	uc := NewNetworkDiscoveryUsecase(repo)
+	uc.SetEnabledProvider(func(context.Context) bool { return false })
+
+	accepted, err := uc.IngestNetworkDiscovery(context.Background(), 7, tunnel.NetworkDiscoveryRequest{
+		Candidates: []tunnel.NetworkDiscoveryCandidateReport{{
+			IPAddress: "192.0.2.1", Source: "gateway",
+		}},
+	})
+	if err != nil || accepted != 0 || len(repo.rows) != 0 {
+		t.Fatalf("accepted=%d rows=%d err=%v", accepted, len(repo.rows), err)
+	}
+}
+
 func TestNetworkDiscoveryUsecaseDeduplicatesBatch(t *testing.T) {
 	repo := &fakeNetworkDiscoveryRepo{}
 	uc := NewNetworkDiscoveryUsecase(repo)

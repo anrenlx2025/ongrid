@@ -64,9 +64,9 @@ type Config struct {
 	MetricsInterval time.Duration // default 10s
 	// MetricsBatchSize is how many points to buffer before push.
 	MetricsBatchSize int // default 30 (5min at 10s)
-	// NetworkDiscoveryEnabled explicitly enables passive gateway/ARP/LLDP
-	// reports. It defaults to false so installing an Edge does not start
-	// network discovery without operator intent.
+	// NetworkDiscoveryEnabled controls passive gateway/ARP/LLDP reports. The
+	// Edge entrypoint defaults it to true; an operator can disable one host via
+	// its local environment file.
 	NetworkDiscoveryEnabled bool
 	// NetworkDiscoveryInterval controls passive gateway/ARP/LLDP reports when
 	// discovery is enabled. Zero uses one minute.

@@ -42,6 +42,15 @@ const (
 	CategoryTempo     = "tempo"     // external Tempo OTLP HTTP endpoint + auth
 	CategoryWebSearch = "websearch" // built-in web_search skill: Tavily key + future provider knobs
 	CategoryAgent     = "agent"     // AI agent behaviour toggles (write-action gate, …)
+	CategoryPlatform  = "platform"  // platform-wide infrastructure behaviour toggles
+)
+
+// Well-known keys under CategoryPlatform.
+const (
+	// KeyNetworkDiscoveryEnabled controls whether the manager accepts passive
+	// network-discovery reports from Edges. Unset defaults to enabled so a new
+	// installation discovers candidates without an additional configuration step.
+	KeyNetworkDiscoveryEnabled = "network_discovery_enabled"
 )
 
 // Well-known keys under CategoryAgent.

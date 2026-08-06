@@ -845,7 +845,7 @@ export default function EdgesPage() {
             </div>
           )}
 
-          <div className="w-full min-w-0 max-w-full overflow-x-auto rounded-xl border border-zinc-800/60 bg-zinc-900/40">
+          <div className="device-list-table w-full min-w-0 max-w-full overflow-x-auto rounded-xl border border-zinc-800/60 bg-zinc-900/40">
             <table
               className={cn(
                 "min-w-full text-xs",
@@ -883,7 +883,7 @@ export default function EdgesPage() {
                   <col className="w-[190px]" />
                 </colgroup>
               )}
-              <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
+              <thead className="device-list-table__header border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
                 <tr>
                   <th className="px-2.5 py-2.5 text-left">
                     <input
@@ -949,7 +949,7 @@ export default function EdgesPage() {
                       <th className="px-2.5 py-2.5 text-left">Edge</th>
                     </>
                   )}
-                  <th className="sticky right-0 z-20 border-l border-zinc-800/60 bg-zinc-950 px-2.5 py-2.5 text-left">
+                  <th className="sticky right-0 z-20 border-l border-zinc-800/60 bg-zinc-900 px-2.5 py-2.5 text-left">
                     {tr("操作", "Actions")}
                   </th>
                 </tr>
@@ -1582,9 +1582,9 @@ function NetworkDiscoveryTable({
     }
   };
   return (
-    <div className="overflow-x-auto rounded-xl border border-zinc-800/60 bg-zinc-900/40">
+    <div className="network-discovery-table overflow-x-auto rounded-xl border border-zinc-800/60 bg-zinc-900/40">
       <table className="w-full min-w-[1040px] text-xs">
-        <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
+        <thead className="network-discovery-table__header border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
           <tr>
             <th className="px-3 py-2.5 text-left">IP</th>
             <th className="px-3 py-2.5 text-left">MAC</th>

@@ -157,14 +157,14 @@ func (c *fakeCollector) CollectNetworkDiscovery(context.Context) (tunnel.Network
 	}, nil
 }
 
-func TestAgent_NetworkDiscoveryRequiresExplicitEnable(t *testing.T) {
+func TestAgent_NetworkDiscoveryHonorsLocalEnablement(t *testing.T) {
 	tests := []struct {
 		name    string
 		enabled bool
 		wantMin int32
 		wantMax int32
 	}{
-		{name: "disabled by default", wantMax: 0},
+		{name: "disabled locally", wantMax: 0},
 		{name: "enabled", enabled: true, wantMin: 1, wantMax: 10},
 	}
 	for _, tt := range tests {

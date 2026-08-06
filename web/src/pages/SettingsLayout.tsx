@@ -12,6 +12,7 @@ import {
   Lock,
   Plug,
   Shield,
+  SlidersHorizontal,
   UploadCloud,
 } from 'lucide-react';
 import { cn } from '@/lib/cn';
@@ -36,6 +37,7 @@ const RAIL_ITEMS: RailItem[] = [
   { to: 'health', icon: HeartPulse, labelZh: '健康', labelEn: 'Health', hintZh: '平台自检 / 依赖状态', hintEn: 'Platform self-check / dependency status' },
   { to: 'upgrade', icon: UploadCloud, labelZh: '升级', labelEn: 'Upgrade', hintZh: '检测版本 / 复制命令', hintEn: 'Check version / copy command' },
   { to: 'integrations', icon: Plug, labelZh: '集成', labelEn: 'Integrations', hintZh: 'Prometheus / Grafana 等外部系统', hintEn: 'External systems — Prometheus / Grafana / etc.' },
+  { to: 'general', icon: SlidersHorizontal, labelZh: '全局配置', labelEn: 'Global', hintZh: '平台级基础能力开关', hintEn: 'Platform-wide capability controls' },
   // marketplace entry retired 2026-05-19 — install/uninstall moved to
   // /skills?tab=install so the whole skill story (loaded + installed)
   // lives on one page. The Settings route still redirects bookmarks.
