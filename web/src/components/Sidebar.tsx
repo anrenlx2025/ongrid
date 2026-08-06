@@ -49,6 +49,7 @@ import { useIncidentBadge } from '@/store/incidentBadge';
 import { useMe, usePermissions } from '@/store/me';
 import { useChatSessions, invalidateChatSessions } from '@/store/chatSessions';
 import { deleteSession, renameSession, type ChatSession } from '@/api/chat';
+import { listSettings } from '@/api/settings';
 
 type SidebarSectionItem = {
   key: string;
@@ -82,6 +83,15 @@ export function Sidebar() {
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ChatSession | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+	const [upgradeHiddenResources, setUpgradeHiddenResources] = useState<string[]>([]);
+	useEffect(() => {
+		if (localStorage.getItem('sidebar.infrastructure.upgrade.v0_10')) return;
+		void listSettings('ui').then((out) => {
+			const row = out.items.find((item) => item.key === 'infrastructure_menu_upgrade_v0_10');
+			if (!row) return;
+			try { const parsed = JSON.parse(row.value) as { hidden?: string[] }; setUpgradeHiddenResources(parsed.hidden ?? []); } catch { /* ignore malformed upgrade seed */ }
+		});
+	}, []);
   // Version + upgrade check moved to Settings → About / Upgrade (the brand mark
   // stays clean), so the sidebar no longer fetches version here.
 
@@ -412,6 +422,7 @@ export function Sidebar() {
           storageKey="agent"
           title="Agent"
           defaultOpen
+		  initialHiddenKeys={upgradeHiddenResources}
           items={[
             { key: 'assistants', to: '/agents', icon: Bot, label: tr('助理', 'Assistants') },
             { key: 'workflows', to: '/workflows', icon: Route, label: tr('工作流', 'Workflows') },
@@ -725,11 +736,13 @@ function CollapsibleSection({
   title,
   defaultOpen = false,
   items,
+	initialHiddenKeys = [],
 }: {
   storageKey: string;
   title: string;
   defaultOpen?: boolean;
   items: SidebarSectionItem[];
+	initialHiddenKeys?: string[];
 }) {
   const { tr } = useI18n();
   const manageRef = useRef<HTMLDivElement | null>(null);
@@ -758,6 +771,17 @@ function CollapsibleSection({
       return [];
     }
   });
+	useEffect(() => {
+		const marker = `sidebar.${storageKey}.upgrade.v0_10`;
+		if (storageKey !== 'resources' || initialHiddenKeys.length === 0 || localStorage.getItem(marker)) return;
+		try {
+			if (localStorage.getItem(`sidebar.section.${storageKey}.hidden`)) return;
+			localStorage.setItem(`sidebar.section.${storageKey}.hidden`, JSON.stringify(initialHiddenKeys));
+			localStorage.setItem(marker, '1');
+			localStorage.setItem('sidebar.infrastructure.upgrade.v0_10', '1');
+			setHiddenKeys(initialHiddenKeys);
+		} catch { /* localStorage unavailable */ }
+	}, [initialHiddenKeys, storageKey]);
 
   const updateManagePosition = () => {
     const rect = manageButtonRef.current?.getBoundingClientRect();
