@@ -132,6 +132,33 @@ func TestServiceGetMissingReturnsFoundFalse(t *testing.T) {
 	}
 }
 
+func TestNetworkDiscoveryEnabled(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		name  string
+		value string
+		set   bool
+		want  bool
+	}{
+		{name: "unset defaults enabled", want: true},
+		{name: "explicit enabled", value: "true", set: true, want: true},
+		{name: "explicit disabled", value: "false", set: true, want: false},
+		{name: "malformed defaults enabled", value: "not-a-bool", set: true, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := newFakeRepo()
+			if test.set {
+				if _, err := repo.Set(ctx, model.CategoryPlatform, model.KeyNetworkDiscoveryEnabled, test.value, false); err != nil {
+					t.Fatalf("seed setting: %v", err)
+				}
+			}
+			if got := New(repo, nil).NetworkDiscoveryEnabled(ctx); got != test.want {
+				t.Fatalf("NetworkDiscoveryEnabled() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestServiceSetInvalidatesCache(t *testing.T) {
 	repo := newFakeRepo()
 	if _, err := repo.Set(context.Background(), "llm", "openai_model", "gpt-4o", false); err != nil {

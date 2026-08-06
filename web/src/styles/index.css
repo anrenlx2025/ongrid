@@ -149,6 +149,14 @@ html.light .bg-zinc-800\/40,
 html.light .bg-zinc-800\/60,
 html.light .bg-zinc-800\/80       { background-color: rgb(226 232 240 / 0.7); }
 
+/* Device and network-discovery tables need opaque light surfaces. Their
+   scrolling container and header otherwise inherit transparent zinc fills,
+   which can expose a dark background beneath an embedded table. */
+html.light .device-list-table,
+html.light .network-discovery-table { background-color: rgb(var(--card)); }
+html.light .device-list-table__header,
+html.light .network-discovery-table__header { background-color: rgb(248 250 252); }
+
 html.light .text-zinc-100         { color: rgb(var(--text)); }
 html.light .text-zinc-200         { color: rgb(var(--text)); }
 html.light .text-zinc-300         { color: rgb(var(--text-muted)); }

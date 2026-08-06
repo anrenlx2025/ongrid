@@ -26,7 +26,7 @@
 
 ### 第一阶段
 
-- Edge 配置提供 `network_discovery.enabled` 开关，默认开启；管理员可在 Edge 环境文件中显式关闭。
+- 平台全局配置提供网络发现开关，默认开启；关闭后 Manager 忽略新的候选上报。Edge 环境文件仍可对单台主机显式关闭本地采集。
 - 默认发现默认网关、ARP/Neighbor、LLDP 邻居；不做 CIDR 全网扫描。
 - SNMP 使用管理员配置的只读凭据，仅查询 sysName、sysDescr 和 sysObjectID；一期凭据仅在单次扫描内存中使用，不落库、不回显，接口和 LLDP MIB enrichment 后续补齐。
 - SNMP 校验同时读取 IF-MIB 接口状态与 IPv4 地址归属；SNMPv3 支持 SHA-1/SHA-2 认证及 AES-128/192/256 隐私协议，配置项使用受控选项而非任意字符串。
@@ -58,7 +58,7 @@
 
 ## 验收标准
 
-- [ ] 开关关闭时 Edge 不执行网络发现。
+- [ ] 全局开关关闭时 Manager 不创建或更新网络发现候选。
 - [ ] 开关开启后能上报默认网关和 LLDP 邻居。
 - [ ] LLDP 与 SNMP 命中强身份时归并为同一个 `devices.id`。
 - [ ] 只有 IP/sysName 相同不会自动永久合并。

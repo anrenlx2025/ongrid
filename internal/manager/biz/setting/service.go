@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -168,6 +169,27 @@ func (s *Service) SetIfAbsent(ctx context.Context, category, key, value string, 
 		return err
 	}
 	return s.Set(ctx, category, key, value, sensitive)
+}
+
+// NetworkDiscoveryEnabled returns the platform-wide network discovery gate.
+// Missing or malformed values resolve to enabled, matching the new-install
+// default. An explicit false is the only opt-out, so an unavailable settings
+// store cannot silently disable inventory collection.
+func (s *Service) NetworkDiscoveryEnabled(ctx context.Context) bool {
+	value, found, err := s.Get(ctx, model.CategoryPlatform, model.KeyNetworkDiscoveryEnabled)
+	if err != nil {
+		s.log.Warn("read network discovery setting", slog.Any("err", err))
+		return true
+	}
+	if !found {
+		return true
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		s.log.Warn("invalid network discovery setting; using enabled default", slog.String("value", value))
+		return true
+	}
+	return enabled
 }
 
 // List returns all rows in the category, sensitive values masked.
