@@ -29,6 +29,22 @@ type workloadPageService struct {
 	countFilters []biz.ListWorkloadsFilter
 }
 
+type actionAuditReader struct {
+	clusterID uint64
+	limit     int
+	offset    int
+	items     []ActionAuditRecord
+	total     int
+	err       error
+}
+
+func (r *actionAuditReader) ListK8sActionAudits(_ context.Context, clusterID uint64, limit, offset int) ([]ActionAuditRecord, int, error) {
+	r.clusterID = clusterID
+	r.limit = limit
+	r.offset = offset
+	return r.items, r.total, r.err
+}
+
 func (s *workloadPageService) ListWorkloads(_ context.Context, f biz.ListWorkloadsFilter) ([]*model.Workload, error) {
 	s.listFilter = f
 	createdAt := time.Date(2026, time.July, 28, 8, 9, 10, 0, time.UTC)
@@ -113,6 +129,44 @@ func TestRefreshTelemetryConfigUsesAuthenticatedControllerIdentity(t *testing.T)
 		got.TracesBasicUser != "tempo-user" || got.TracesBasicPass != "tempo-pass" || !got.TracesTLSInsecure ||
 		got.LogsEndpoint != "https://loki.example/loki/api/v1/push" || got.LogsAuthMode != "backend" {
 		t.Fatalf("signal target response = %#v", got)
+	}
+}
+
+func TestListActionAuditsReturnsClusterScopedUnifiedRecords(t *testing.T) {
+	now := time.Date(2026, time.August, 6, 8, 21, 22, 0, time.UTC)
+	reader := &actionAuditReader{
+		items: []ActionAuditRecord{{
+			ID: "approval-1", ClusterID: 48, SessionID: "session-1",
+			ToolName: "execute_k8s_action", ArgsJSON: `{"cluster_id":48,"action":"scale"}`,
+			ToolClass: "write", ApprovalMode: "human", Decision: "approve", Status: "executed",
+			OperatorUserID: 7, CreatedAt: now, ExecutedAt: &now,
+		}},
+		total: 3,
+	}
+	h := NewHandler(&telemetryRefreshService{}, reader)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/k8s/clusters/48/actions?limit=8&offset=1", nil)
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("cluster_id", "48")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+	resp := httptest.NewRecorder()
+
+	h.listActionAudits(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if reader.clusterID != 48 || reader.limit != 8 || reader.offset != 1 {
+		t.Fatalf("reader args = cluster:%d limit:%d offset:%d", reader.clusterID, reader.limit, reader.offset)
+	}
+	var got listActionAuditsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Total != 3 || got.Limit != 8 || got.Offset != 1 || len(got.Items) != 1 {
+		t.Fatalf("response = %+v", got)
+	}
+	if got.Items[0].ApprovalMode != "human" || got.Items[0].Status != "executed" {
+		t.Fatalf("record = %+v", got.Items[0])
 	}
 }
 

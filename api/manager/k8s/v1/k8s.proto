@@ -17,6 +17,7 @@ service KubernetesService {
     rpc ListWorkloads(ListWorkloadsRequest) returns (ListWorkloadsResponse);
     rpc ListPods(ListPodsRequest) returns (ListPodsResponse);
     rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+    rpc ListActionAudits(ListActionAuditsRequest) returns (ListActionAuditsResponse);
     rpc RotateBootstrapToken(RotateBootstrapTokenRequest) returns (RotateBootstrapTokenResponse);
     rpc DeleteCluster(DeleteClusterRequest) returns (DeleteClusterResponse);
 
@@ -322,6 +323,44 @@ message ListEventsRequest {
 
 message ListEventsResponse {
     repeated KubernetesEvent items = 1 [json_name = "items"];
+    int32 total = 2 [json_name = "total"];
+    int32 limit = 3 [json_name = "limit"];
+    int32 offset = 4 [json_name = "offset"];
+}
+
+// KubernetesActionAudit is the sanitized, unified read model for Kubernetes
+// writes. It merges graph ReviewGate decisions and legacy human approvals;
+// args_json never contains the one-time preflight_token.
+message KubernetesActionAudit {
+    string id = 1 [json_name = "id"];
+    uint64 cluster_id = 2 [json_name = "cluster_id"];
+    string session_id = 3 [json_name = "session_id"];
+    string message_id = 4 [json_name = "message_id"];
+    string tool_call_id = 5 [json_name = "tool_call_id"];
+    string tool_name = 6 [json_name = "tool_name"];
+    string args_json = 7 [json_name = "args_json"];
+    string tool_class = 8 [json_name = "tool_class"];
+    string approval_mode = 9 [json_name = "approval_mode"];
+    string reviewer_agent = 10 [json_name = "reviewer_agent"];
+    string reviewer_task_id = 11 [json_name = "reviewer_task_id"];
+    string decision = 12 [json_name = "decision"];
+    string status = 13 [json_name = "status"];
+    string decision_reason = 14 [json_name = "decision_reason"];
+    uint64 operator_user_id = 15 [json_name = "operator_user_id"];
+    uint64 approver_user_id = 16 [json_name = "approver_user_id"];
+    google.protobuf.Timestamp created_at = 17 [json_name = "created_at"];
+    google.protobuf.Timestamp decided_at = 18 [json_name = "decided_at"];
+    google.protobuf.Timestamp executed_at = 19 [json_name = "executed_at"];
+}
+
+message ListActionAuditsRequest {
+    uint64 cluster_id = 1 [json_name = "cluster_id"];
+    int32 limit = 2 [json_name = "limit"];
+    int32 offset = 3 [json_name = "offset"];
+}
+
+message ListActionAuditsResponse {
+    repeated KubernetesActionAudit items = 1 [json_name = "items"];
     int32 total = 2 [json_name = "total"];
     int32 limit = 3 [json_name = "limit"];
     int32 offset = 4 [json_name = "offset"];

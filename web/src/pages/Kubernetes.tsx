@@ -30,10 +30,6 @@ import { Modal } from '@/components/Modal';
 import { Button, Card, Chip, EmptyState, PageHeader } from '@/components/ui';
 import type { IconType } from '@/lib/icon';
 import { ApiError } from '@/api/client';
-import {
-  listMutatingProposals,
-  type MutatingProposal,
-} from '@/api/aiops';
 import { createSession } from '@/api/chat';
 import {
   listEdges,
@@ -44,6 +40,7 @@ import {
   deleteKubernetesCluster,
   getKubernetesCluster,
   getKubernetesClusterHealth,
+  listKubernetesActionAudits,
   listKubernetesClusters,
   listKubernetesEvents,
   listKubernetesNodes,
@@ -52,6 +49,7 @@ import {
   rotateKubernetesBootstrapToken,
   type KubernetesCluster,
   type KubernetesClusterHealth,
+  type KubernetesActionAudit,
   type KubernetesEvent,
   type KubernetesNode,
   type KubernetesPod,
@@ -354,7 +352,7 @@ export function KubernetesClusterDetailPage() {
   const [warningEvents, setWarningEvents] = useState<KubernetesEvent[]>([]);
   const [warningEventTotal, setWarningEventTotal] = useState(0);
   const [edgeVersionsByID, setEdgeVersionsByID] = useState<Record<number, string>>({});
-  const [actionProposals, setActionProposals] = useState<MutatingProposal[]>([]);
+  const [actionProposals, setActionProposals] = useState<KubernetesActionAudit[]>([]);
   const [actionProposalTotal, setActionProposalTotal] = useState(0);
   const [actionAuditError, setActionAuditError] = useState<string | null>(null);
   const [totals, setTotals] = useState<ResourceTotals>({ nodes: 0, workloads: 0, pods: 0, events: 0 });
@@ -388,7 +386,7 @@ export function KubernetesClusterDetailPage() {
     try {
       let auditLoadError: unknown = null;
       const auditPromise = isAdmin
-        ? listMutatingProposals({ tool_name: 'execute_k8s_action', limit: 100 }).catch((e) => {
+        ? listKubernetesActionAudits(clusterId, { limit: 100 }).catch((e) => {
             auditLoadError = e;
             return null;
           })
@@ -457,10 +455,8 @@ export function KubernetesClusterDetailPage() {
       setCrashLoopTotal(crashLoopPodsOut.total ?? (crashLoopPodsOut.items?.length ?? 0));
       setResourceFilterRefreshNonce((value) => value + 1);
       if (auditOut) {
-        const clusterIDNum = Number(clusterId);
-        const clusterItems = (auditOut.items ?? []).filter((item) => proposalClusterID(item) === clusterIDNum);
-        setActionProposals(clusterItems.slice(0, 8));
-        setActionProposalTotal(clusterItems.length);
+        setActionProposals((auditOut.items ?? []).slice(0, 8));
+        setActionProposalTotal(auditOut.total ?? (auditOut.items?.length ?? 0));
         setActionAuditError(null);
       } else {
         setActionProposals([]);
@@ -2263,7 +2259,7 @@ function K8sActionAudit({
   onClearFilters,
   embedded,
 }: {
-  proposals: MutatingProposal[];
+  proposals: KubernetesActionAudit[];
   total: number;
   loading: boolean;
   error: string | null;
@@ -2289,7 +2285,7 @@ function K8sActionAudit({
             </div>
           </div>
         </div>
-        <Chip tone={hasRows ? 'info' : 'default'}>{tr('ReviewGate', 'ReviewGate')}</Chip>
+        <Chip tone={hasRows ? 'info' : 'default'}>{tr('统一审计', 'Unified audit')}</Chip>
       </div>
       {error ? (
         <div className="px-4 py-3 text-xs text-amber-300">
@@ -2318,7 +2314,8 @@ function K8sActionAudit({
                 <div className="min-w-0 text-xs">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <ProposalDecisionChip proposal={proposal} />
-                    <Chip dense>{proposal.reviewer_agent || 'reviewer'}</Chip>
+                    <Chip dense>{k8sActionApprovalModeLabel(proposal.approval_mode, tr)}</Chip>
+                    {proposal.reviewer_agent && <Chip dense>{proposal.reviewer_agent}</Chip>}
                     {proposal.reviewer_task_id && <Chip dense>{shortID(proposal.reviewer_task_id, 12)}</Chip>}
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-500">
@@ -2343,7 +2340,7 @@ function K8sActionAudit({
                     {args.reason && <Chip tone="info" dense>{args.reason}</Chip>}
                   </div>
                   <div className="mt-1 truncate text-zinc-400">
-                    {proposal.decision_reason || tr('暂无 reviewer 说明', 'No reviewer note')}
+                    {proposal.decision_reason || tr('暂无审批说明', 'No approval note')}
                   </div>
                 </div>
                 <K8sActionAuditTrail proposal={proposal} args={args} />
@@ -2383,12 +2380,15 @@ function K8sActionAudit({
   );
 }
 
-function ProposalDecisionChip({ proposal }: { proposal: MutatingProposal }) {
+function ProposalDecisionChip({ proposal }: { proposal: KubernetesActionAudit }) {
   const { tr } = useI18n();
-  if (proposal.decision === 'approve' && proposal.executed_at) {
+  if (proposal.status === 'failed') {
+    return <Chip tone="danger">{tr('执行失败', 'Failed')}</Chip>;
+  }
+  if (proposal.status === 'executed' || (proposal.decision === 'approve' && proposal.executed_at)) {
     return <Chip tone="success">{tr('已执行', 'Executed')}</Chip>;
   }
-  if (proposal.decision === 'approve') {
+  if (proposal.status === 'approved' || proposal.decision === 'approve') {
     return <Chip tone="success">{tr('已批准', 'Approved')}</Chip>;
   }
   if (proposal.decision === 'reject') {
@@ -2397,8 +2397,15 @@ function ProposalDecisionChip({ proposal }: { proposal: MutatingProposal }) {
   return <Chip tone="warning">{tr('待审批', 'Pending')}</Chip>;
 }
 
-function proposalExecutionText(proposal: MutatingProposal, tr: (zh: string, en: string) => string) {
-  if (proposal.executed_at) return tr(`工具已返回 ${relativeTime(proposal.executed_at)}`, `tool returned ${relativeTime(proposal.executed_at)}`);
+function proposalExecutionText(proposal: KubernetesActionAudit, tr: (zh: string, en: string) => string) {
+  if (proposal.status === 'failed') return proposal.executed_at
+    ? tr(`执行失败 ${relativeTime(proposal.executed_at)}`, `failed ${relativeTime(proposal.executed_at)}`)
+    : tr('执行失败', 'execution failed');
+  if (proposal.status === 'executed' || proposal.executed_at) {
+    return proposal.executed_at
+      ? tr(`工具已返回 ${relativeTime(proposal.executed_at)}`, `tool returned ${relativeTime(proposal.executed_at)}`)
+      : tr('已执行', 'executed');
+  }
   if (proposal.decision === 'reject') return tr('已拒绝，未执行', 'rejected, not executed');
   if (proposal.decision === 'approve') return tr('已批准，等待执行结果', 'approved, awaiting execution result');
   return tr('未执行', 'not executed');
@@ -2411,7 +2418,7 @@ type K8sActionAuditStep = {
   tone: 'success' | 'warning' | 'danger' | 'default';
 };
 
-function K8sActionAuditTrail({ proposal, args }: { proposal: MutatingProposal; args: K8sActionArgs }) {
+function K8sActionAuditTrail({ proposal, args }: { proposal: KubernetesActionAudit; args: K8sActionArgs }) {
   const { tr } = useI18n();
   const steps = k8sActionAuditSteps(proposal, args, tr);
   return (
@@ -2447,10 +2454,11 @@ function K8sActionAuditTrail({ proposal, args }: { proposal: MutatingProposal; a
 }
 
 function k8sActionAuditSteps(
-  proposal: MutatingProposal,
+  proposal: KubernetesActionAudit,
   args: K8sActionArgs,
   tr: (zh: string, en: string) => string,
 ): K8sActionAuditStep[] {
+  const preflightVerified = Boolean(args.dry_run || proposal.approval_mode === 'human' || proposal.executed_at);
   return [
     {
       key: 'request',
@@ -2460,9 +2468,17 @@ function k8sActionAuditSteps(
     },
     {
       key: 'dry-run',
-      label: args.dry_run ? tr('Dry run 已记录', 'Dry run recorded') : tr('Dry run 要求', 'Dry run required'),
-      detail: args.dry_run ? tr('当前记录为 dry-run', 'This record is a dry-run') : tr('执行前必须先完成', 'Must complete before execution'),
-      tone: args.dry_run ? 'success' : 'default',
+      label: args.dry_run
+        ? tr('Dry run 已记录', 'Dry run recorded')
+        : preflightVerified
+          ? tr('Dry run 已验证', 'Dry run verified')
+          : tr('Dry run 要求', 'Dry run required'),
+      detail: args.dry_run
+        ? tr('当前记录为 dry-run', 'This record is a dry-run')
+        : preflightVerified
+          ? tr('写入前预检已通过', 'Preflight passed before the write')
+          : tr('执行前必须先完成', 'Must complete before execution'),
+      tone: preflightVerified ? 'success' : 'default',
     },
     {
       key: 'approval',
@@ -2471,25 +2487,29 @@ function k8sActionAuditSteps(
         : proposal.decision === 'reject'
           ? tr('审批拒绝', 'Rejected')
           : tr('等待审批', 'Awaiting approval'),
-      detail: proposal.decided_at ? relativeTime(proposal.decided_at) : tr('ReviewGate 未决策', 'ReviewGate pending'),
+      detail: proposal.decided_at
+        ? relativeTime(proposal.decided_at)
+        : tr(`${k8sActionApprovalModeLabel(proposal.approval_mode, tr)}未决策`, `${k8sActionApprovalModeLabel(proposal.approval_mode, tr)} pending`),
       tone: proposal.decision === 'approve' ? 'success' : proposal.decision === 'reject' ? 'danger' : 'warning',
     },
     {
       key: 'execution',
-      label: proposal.executed_at
+      label: proposal.status === 'failed'
+        ? tr('执行失败', 'Execution failed')
+        : proposal.executed_at
         ? tr('执行完成', 'Executed')
         : proposal.decision === 'approve'
           ? tr('等待执行结果', 'Awaiting result')
           : tr('未执行', 'Not executed'),
       detail: proposal.executed_at ? relativeTime(proposal.executed_at) : proposalExecutionText(proposal, tr),
-      tone: proposal.executed_at ? 'success' : proposal.decision === 'approve' ? 'warning' : 'default',
+      tone: proposal.status === 'failed' ? 'danger' : proposal.executed_at ? 'success' : proposal.decision === 'approve' ? 'warning' : 'default',
     },
   ];
 }
 
 function k8sActionRollbackHint(
   args: K8sActionArgs,
-  proposal: MutatingProposal,
+  proposal: KubernetesActionAudit,
   tr: (zh: string, en: string) => string,
 ) {
   if (proposal.decision === 'reject') {
@@ -2519,6 +2539,10 @@ function shortID(value: string | undefined, max = 8) {
   return value.length <= max ? value : value.slice(0, max);
 }
 
+function k8sActionApprovalModeLabel(mode: string | undefined, tr: (zh: string, en: string) => string) {
+  return mode === 'human' ? tr('人工审批', 'Human approval') : tr('ReviewGate', 'ReviewGate');
+}
+
 type K8sActionArgs = {
   cluster_id?: number | string;
   action?: string;
@@ -2537,16 +2561,6 @@ function parseK8sActionArgs(argsJSON: string): K8sActionArgs {
   } catch {
     return {};
   }
-}
-
-function proposalClusterID(proposal: MutatingProposal): number | null {
-  const raw = parseK8sActionArgs(proposal.args_json).cluster_id;
-  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
-  if (typeof raw === 'string') {
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
 }
 
 function k8sActionTitle(args: K8sActionArgs, tr: (zh: string, en: string) => string): string {
@@ -2625,9 +2639,9 @@ type ResourceFilters = {
   actionType: string;
 };
 
-type ActionDecisionFilter = 'all' | 'pending' | 'approved' | 'executed' | 'rejected';
+type ActionDecisionFilter = 'all' | 'pending' | 'approved' | 'executed' | 'failed' | 'rejected';
 
-const ACTION_DECISION_FILTERS: ActionDecisionFilter[] = ['all', 'pending', 'approved', 'executed', 'rejected'];
+const ACTION_DECISION_FILTERS: ActionDecisionFilter[] = ['all', 'pending', 'approved', 'executed', 'failed', 'rejected'];
 
 type ServerFilteredResources = {
   requestKey: string;
@@ -2662,7 +2676,7 @@ function ResourceViewHeader({
   warningEventTotal: number;
   namespaces: string[];
   namespaceRows: NamespaceRow[];
-  actionProposals: MutatingProposal[];
+  actionProposals: KubernetesActionAudit[];
   actionProposalTotal: number;
   edgeAccess: { linked: number; total: number; pct: number } | null;
   onOpenTab(tab: DetailTab): void;
@@ -2673,7 +2687,7 @@ function ResourceViewHeader({
   const nodeIssues = issueTotals.nodes;
   const missingEdgeNodes = edgeAccess ? edgeAccess.total - edgeAccess.linked : 0;
   const namespaceWarnings = namespaceRows.filter((row) => row.warnings > 0).length;
-  const pendingActions = actionProposals.filter((item) => (item.decision || '').toLowerCase() === 'pending').length;
+  const pendingActions = actionProposals.filter((item) => actionDecisionValue(item) === 'pending').length;
   const context = resourceViewContext({
     activeTab,
     totals,
@@ -4096,7 +4110,7 @@ function detailTabLoadedCount(
   pods: KubernetesPod[],
   events: KubernetesEvent[],
   namespaceRows: NamespaceRow[],
-  actionProposals: MutatingProposal[],
+  actionProposals: KubernetesActionAudit[],
 ) {
   switch (tab) {
     case 'nodes':
@@ -4223,7 +4237,7 @@ function filterNamespaceRows(items: NamespaceRow[], filters: ResourceFilters) {
   });
 }
 
-function filterActionProposals(items: MutatingProposal[], filters: ResourceFilters) {
+function filterActionProposals(items: KubernetesActionAudit[], filters: ResourceFilters) {
   const query = normalizeFilterQuery(filters.query);
   return items.filter((item) => {
     const args = parseK8sActionArgs(item.args_json);
@@ -4231,11 +4245,11 @@ function filterActionProposals(items: MutatingProposal[], filters: ResourceFilte
     if (filters.actionDecision !== 'all' && actionDecisionValue(item) !== filters.actionDecision) return false;
     if (filters.actionType !== 'all' && action !== filters.actionType) return false;
     if (!matchesNamespaceFilter(args.namespace, filters.namespace)) return false;
-    return matchesQuery(query, item.tool_name, item.tool_class, item.decision, item.decision_reason, item.reviewer_agent, action, k8sActionTitle(args, (zh) => zh), item.args_json);
+    return matchesQuery(query, item.tool_name, item.tool_class, item.decision, item.status, item.approval_mode, item.decision_reason, item.reviewer_agent, action, k8sActionTitle(args, (zh) => zh), item.args_json);
   });
 }
 
-function collectActionTypes(items: MutatingProposal[]) {
+function collectActionTypes(items: KubernetesActionAudit[]) {
   return Array.from(
     new Set(items.map((item) => normalizeActionType(parseK8sActionArgs(item.args_json).action)).filter(Boolean)),
   ).sort((a, b) => a.localeCompare(b));
@@ -4245,8 +4259,9 @@ function normalizeActionType(action?: string) {
   return (action || '').trim();
 }
 
-function actionDecisionValue(proposal: MutatingProposal): ActionDecisionFilter {
-  if (proposal.decision === 'approve' && proposal.executed_at) return 'executed';
+function actionDecisionValue(proposal: KubernetesActionAudit): ActionDecisionFilter {
+  if (proposal.status === 'failed') return 'failed';
+  if (proposal.status === 'executed' || (proposal.decision === 'approve' && proposal.executed_at)) return 'executed';
   if (proposal.decision === 'approve') return 'approved';
   if (proposal.decision === 'reject') return 'rejected';
   return 'pending';
@@ -4260,6 +4275,8 @@ function actionDecisionFilterLabel(value: ActionDecisionFilter, tr: (zh: string,
       return tr('已批准', 'Approved');
     case 'executed':
       return tr('已执行', 'Executed');
+    case 'failed':
+      return tr('执行失败', 'Failed');
     case 'rejected':
       return tr('已拒绝', 'Rejected');
     default:

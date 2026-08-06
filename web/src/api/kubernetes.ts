@@ -121,6 +121,30 @@ export type KubernetesEvent = {
   last_seen_at?: string | null;
 };
 
+export type KubernetesActionAuditStatus = 'pending' | 'approved' | 'rejected' | 'executed' | 'failed' | string;
+
+export type KubernetesActionAudit = {
+  id: string;
+  cluster_id: number;
+  session_id?: string;
+  message_id?: string;
+  tool_call_id?: string;
+  tool_name: string;
+  args_json: string;
+  tool_class: string;
+  approval_mode: 'review_gate' | 'human' | string;
+  reviewer_agent?: string;
+  reviewer_task_id?: string;
+  decision: 'pending' | 'approve' | 'reject' | string;
+  status: KubernetesActionAuditStatus;
+  decision_reason?: string;
+  operator_user_id: number;
+  approver_user_id?: number;
+  created_at: string;
+  decided_at?: string;
+  executed_at?: string;
+};
+
 export type KubernetesRegistration = {
   cluster: KubernetesCluster;
   bootstrap_token: string;
@@ -259,6 +283,17 @@ export function listKubernetesEvents(
   return request<ListResponse<KubernetesEvent>>(
     'GET',
     `/k8s/clusters/${encodeURIComponent(String(clusterID))}/events${qs}`,
+  );
+}
+
+export function listKubernetesActionAudits(
+  clusterID: string | number,
+  params?: { limit?: number; offset?: number },
+) {
+  const qs = buildQuery(params);
+  return request<ListResponse<KubernetesActionAudit>>(
+    'GET',
+    `/k8s/clusters/${encodeURIComponent(String(clusterID))}/actions${qs}`,
   );
 }
 

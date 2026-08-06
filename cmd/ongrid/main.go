@@ -146,6 +146,7 @@ import (
 	managerflowdata "github.com/ongridio/ongrid/internal/manager/data/flow/store"
 	managerreportdata "github.com/ongridio/ongrid/internal/manager/data/report/store"
 	manageraiopsmodel "github.com/ongridio/ongrid/internal/manager/model/aiops"
+	managerapprovalmodel "github.com/ongridio/ongrid/internal/manager/model/approval"
 	managerserveraiops "github.com/ongridio/ongrid/internal/manager/server/aiops"
 	managerserveralert "github.com/ongridio/ongrid/internal/manager/server/alert"
 	managerserverapproval "github.com/ongridio/ongrid/internal/manager/server/approval"
@@ -803,8 +804,6 @@ func main() {
 	k8sSvc := managersvck8s.New(k8sUC)
 	telemetryAuthn := managerbizk8s.NewTelemetryAuthenticator(k8sRepo)
 	edgeSvc.SetManagedEdgeGuard(k8sSvc)
-	k8sHandler := managerserverk8s.NewHandler(k8sSvc)
-
 	// Plugin runtime config storage. UC notifier
 	// (cloud → edge reload push) is back-filled after frontierbound is
 	// constructed below; until then SetEdge() etc. are no-ops on the wire
@@ -1262,6 +1261,9 @@ func main() {
 		aiopsagent.Config{Model: cfg.OpenAI.Model, Temperature: 0.1, MaxIterations: 30},
 		log,
 	)
+	aiopsAgent.SetAgentWriteEnabledProvider(func(ctx context.Context) bool {
+		return settingSvc.AgentWriteEnabled(ctx)
+	})
 	aiopsUsage := managerbizaiops.NewUsageUsecase(aiopsRepo, log)
 
 	// PR-9 of optional new graph-based agent kernel. Default
@@ -2018,6 +2020,16 @@ func main() {
 		tool := aiopstools.NewBashToolWithProposer(fbClient, edgeUC, deviceUC, nil, log)
 		return tool.RunApproved(ctx, p.DeviceIDs, p.Command, p.TimeoutSeconds)
 	})
+	approvalUC.RegisterExecutor(aiopstools.ToolNameExecuteK8sAction, func(ctx context.Context, payloadJSON string) (string, error) {
+		var p k8sActionPayload
+		if err := json.Unmarshal([]byte(payloadJSON), &p); err != nil {
+			return "", fmt.Errorf("decode %s approval payload: %w", aiopstools.ToolNameExecuteK8sAction, err)
+		}
+		if !settingSvc.AgentWriteEnabled(ctx) {
+			return "", fmt.Errorf("%s: Agent write actions are disabled", aiopstools.ToolNameExecuteK8sAction)
+		}
+		return toolsReg.RunApprovedK8sAction(ctx, p.Args, p.UserID, p.SessionID)
+	})
 	// HLD-018 P2: mcp_call executor — on approve, connect the server and run
 	// the tool. Trusted servers skip this and run synchronously in the tool.
 	approvalUC.RegisterExecutor("mcp_call", func(ctx context.Context, payloadJSON string) (string, error) {
@@ -2062,6 +2074,13 @@ func main() {
 	})
 	toolsReg.SetCloudBashProposer(cloudBashProposerShim{uc: approvalUC})
 	toolsReg.SetHostBashProposer(hostBashProposerShim{uc: approvalUC})
+	toolsReg.SetK8sActionProposer(k8sActionProposerShim{uc: approvalUC})
+	// The Actions page is a read-only projection over two immutable audit
+	// sources: graph ReviewGate decisions and legacy human approvals.
+	k8sHandler := managerserverk8s.NewHandler(k8sSvc, k8sActionAuditReader{
+		proposals: mutatingProposalRepo,
+		approvals: approvalUC,
+	})
 	// send_im_message: the assistant can proactively push to a configured
 	// channel (飞书/钉钉/…), reusing the same BuildSenderFromChannel path the
 	// alert notifier + flow notify node use.
@@ -3915,6 +3934,180 @@ type hostBashPayload struct {
 	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
 }
 
+// k8sActionPayload stores the exact preflight-validated action plus the
+// identity to which its one-time token was bound. The approval executor uses
+// this immutable payload after a human approves the card.
+type k8sActionPayload struct {
+	Args      aiopstools.ExecuteK8sActionArgs `json:"args"`
+	UserID    uint64                          `json:"user_id"`
+	SessionID string                          `json:"session_id"`
+}
+
+const (
+	k8sActionAuditSourcePageSize = 500
+	// The UI intentionally presents recent audit history. Keep aggregation
+	// bounded even if a long-lived installation accumulates millions of rows;
+	// the normalized table/index can replace this compatibility projection in
+	// a future migration without changing the HTTP contract.
+	k8sActionAuditMaxSourceRows = 5000
+)
+
+type k8sActionProposalReader interface {
+	ListMutatingProposals(context.Context, managerbizaiops.MutatingProposalFilter) ([]*manageraiopsmodel.MutatingProposal, error)
+}
+
+type k8sActionApprovalReader interface {
+	ListKind(context.Context, string, int, int) ([]*managerapprovalmodel.Approval, error)
+}
+
+// k8sActionAuditReader is the composition-root adapter for the Kubernetes
+// server's consumer-owned ActionAuditReader interface. Keeping the merge here
+// prevents the k8s domain from importing the aiops or approval domains.
+type k8sActionAuditReader struct {
+	proposals k8sActionProposalReader
+	approvals k8sActionApprovalReader
+}
+
+func (r k8sActionAuditReader) ListK8sActionAudits(ctx context.Context, clusterID uint64, limit, offset int) ([]managerserverk8s.ActionAuditRecord, int, error) {
+	if r.proposals == nil || r.approvals == nil {
+		return nil, 0, fmt.Errorf("kubernetes action audit readers are not configured")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	records := make([]managerserverk8s.ActionAuditRecord, 0, limit)
+	for sourceOffset := 0; sourceOffset < k8sActionAuditMaxSourceRows; sourceOffset += k8sActionAuditSourcePageSize {
+		rows, err := r.proposals.ListMutatingProposals(ctx, managerbizaiops.MutatingProposalFilter{
+			ToolName: aiopstools.ToolNameExecuteK8sAction,
+			Limit:    k8sActionAuditSourcePageSize,
+			Offset:   sourceOffset,
+		})
+		if err != nil {
+			return nil, 0, fmt.Errorf("list ReviewGate Kubernetes actions: %w", err)
+		}
+		for _, row := range rows {
+			if record, ok := k8sActionAuditFromProposal(row, clusterID); ok {
+				records = append(records, record)
+			}
+		}
+		if len(rows) < k8sActionAuditSourcePageSize {
+			break
+		}
+	}
+	for sourceOffset := 0; sourceOffset < k8sActionAuditMaxSourceRows; sourceOffset += k8sActionAuditSourcePageSize {
+		rows, err := r.approvals.ListKind(ctx, aiopstools.ToolNameExecuteK8sAction, k8sActionAuditSourcePageSize, sourceOffset)
+		if err != nil {
+			return nil, 0, fmt.Errorf("list human-approved Kubernetes actions: %w", err)
+		}
+		for _, row := range rows {
+			if record, ok := k8sActionAuditFromApproval(row, clusterID); ok {
+				records = append(records, record)
+			}
+		}
+		if len(rows) < k8sActionAuditSourcePageSize {
+			break
+		}
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].CreatedAt.Equal(records[j].CreatedAt) {
+			return records[i].ID > records[j].ID
+		}
+		return records[i].CreatedAt.After(records[j].CreatedAt)
+	})
+	total := len(records)
+	if offset >= total {
+		return []managerserverk8s.ActionAuditRecord{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return records[offset:end], total, nil
+}
+
+func k8sActionAuditFromProposal(row *manageraiopsmodel.MutatingProposal, clusterID uint64) (managerserverk8s.ActionAuditRecord, bool) {
+	if row == nil {
+		return managerserverk8s.ActionAuditRecord{}, false
+	}
+	args, argsJSON, ok := sanitizedK8sActionArgs(row.ArgsJSON)
+	if !ok || args.ClusterID != clusterID {
+		return managerserverk8s.ActionAuditRecord{}, false
+	}
+	status := "pending"
+	switch row.Decision {
+	case manageraiopsmodel.DecisionApprove:
+		status = "approved"
+		if row.ExecutedAt != nil {
+			status = "executed"
+		}
+	case manageraiopsmodel.DecisionReject:
+		status = "rejected"
+	}
+	return managerserverk8s.ActionAuditRecord{
+		ID: row.ID, ClusterID: args.ClusterID, SessionID: row.SessionID,
+		MessageID: row.MessageID, ToolCallID: row.ToolCallID,
+		ToolName: row.ToolName, ArgsJSON: argsJSON, ToolClass: row.ToolClass,
+		ApprovalMode: "review_gate", ReviewerAgent: row.ReviewerAgent,
+		ReviewerTaskID: row.ReviewerTaskID, Decision: row.Decision, Status: status,
+		DecisionReason: stringValue(row.DecisionReason), OperatorUserID: row.OperatorUserID,
+		ApproverUserID: row.ApproverUserID, CreatedAt: row.CreatedAt,
+		DecidedAt: row.DecidedAt, ExecutedAt: row.ExecutedAt,
+	}, true
+}
+
+func k8sActionAuditFromApproval(row *managerapprovalmodel.Approval, clusterID uint64) (managerserverk8s.ActionAuditRecord, bool) {
+	if row == nil {
+		return managerserverk8s.ActionAuditRecord{}, false
+	}
+	var payload k8sActionPayload
+	if err := json.Unmarshal([]byte(row.PayloadJSON), &payload); err != nil || payload.Args.ClusterID != clusterID {
+		return managerserverk8s.ActionAuditRecord{}, false
+	}
+	payload.Args.PreflightToken = ""
+	argsJSON, err := json.Marshal(payload.Args)
+	if err != nil {
+		return managerserverk8s.ActionAuditRecord{}, false
+	}
+	decision := manageraiopsmodel.DecisionPending
+	switch row.Status {
+	case managerapprovalmodel.StatusRejected:
+		decision = manageraiopsmodel.DecisionReject
+	case managerapprovalmodel.StatusApproved, managerapprovalmodel.StatusExecuted, managerapprovalmodel.StatusFailed:
+		decision = manageraiopsmodel.DecisionApprove
+	}
+	return managerserverk8s.ActionAuditRecord{
+		ID: row.ID, ClusterID: payload.Args.ClusterID, SessionID: row.SessionID,
+		ToolName: aiopstools.ToolNameExecuteK8sAction, ArgsJSON: string(argsJSON), ToolClass: "write",
+		ApprovalMode: "human", Decision: decision, Status: row.Status,
+		DecisionReason: stringValue(row.Reason), OperatorUserID: row.ProposedBy,
+		ApproverUserID: row.ApprovedBy, CreatedAt: row.CreatedAt,
+		DecidedAt: row.DecidedAt, ExecutedAt: row.ExecutedAt,
+	}, true
+}
+
+func sanitizedK8sActionArgs(raw string) (aiopstools.ExecuteK8sActionArgs, string, bool) {
+	var args aiopstools.ExecuteK8sActionArgs
+	if err := json.Unmarshal([]byte(raw), &args); err != nil || args.ClusterID == 0 {
+		return aiopstools.ExecuteK8sActionArgs{}, "", false
+	}
+	args.PreflightToken = ""
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return aiopstools.ExecuteK8sActionArgs{}, "", false
+	}
+	return args, string(encoded), true
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 // approvalWaitTimeout bounds how long a synchronous-blocking tool (HLD-021,
 // cloud_bash) waits for a human decision before giving up and returning a
 // terminal timeout blob. The decorator timeout that wraps the tool is set a
@@ -4068,6 +4261,78 @@ func (s hostBashProposerShim) ProposeAndAwait(ctx context.Context, deviceIDs []u
 		})
 	}
 	return cloudBashProposerShim{uc: s.uc}.awaitDecision(ctx, a.ID)
+}
+
+// k8sActionProposerShim gives the default legacy kernel the same synchronous
+// propose-confirm UX used by host_bash. The tool has already consumed a
+// matching dry-run token before this method is called; no Kubernetes write is
+// dispatched until the approval executor runs.
+type k8sActionProposerShim struct{ uc *managerbizapproval.Usecase }
+
+func (s k8sActionProposerShim) ProposeAndAwait(ctx context.Context, args aiopstools.ExecuteK8sActionArgs, sessionID, toolCallID string, userID uint64) (string, error) {
+	command := formatK8sActionApproval(args)
+	title := aiopstools.ToolNameExecuteK8sAction + " " + command
+	if len(title) > 120 {
+		title = title[:120] + "…"
+	}
+	summary := command
+	if reason := strings.TrimSpace(args.Reason); reason != "" {
+		summary += " reason=" + reason
+	}
+	a, err := s.uc.Propose(ctx, managerbizapproval.ProposeInput{
+		Kind:       aiopstools.ToolNameExecuteK8sAction,
+		Title:      title,
+		Summary:    summary,
+		Payload:    k8sActionPayload{Args: args, UserID: userID, SessionID: sessionID},
+		Source:     "agent",
+		SessionID:  sessionID,
+		ProposedBy: userID,
+	})
+	if err != nil {
+		return "", err
+	}
+	if emit := aiopschatruntime.EmitFromContext(ctx); emit != nil {
+		emit(aiopschatruntime.Event{
+			Type: aiopschatruntime.EventApprovalPending,
+			Approval: &aiopschatruntime.ApprovalPending{
+				ApprovalID: a.ID,
+				ToolCallID: toolCallID,
+				Kind:       aiopstools.ToolNameExecuteK8sAction,
+				Command:    command,
+			},
+		})
+	} else if emit := aiopsagent.EmitFromContext(ctx); emit != nil {
+		emit(aiopsagent.Event{
+			Type: aiopsagent.EventApprovalPending,
+			Approval: &aiopsagent.ApprovalPendingEvent{
+				ApprovalID: a.ID,
+				ToolCallID: toolCallID,
+				Kind:       aiopstools.ToolNameExecuteK8sAction,
+				Command:    command,
+			},
+		})
+	}
+	return cloudBashProposerShim{uc: s.uc}.awaitDecision(ctx, a.ID)
+}
+
+func formatK8sActionApproval(args aiopstools.ExecuteK8sActionArgs) string {
+	target := strings.TrimSpace(args.Name)
+	if namespace := strings.TrimSpace(args.Namespace); namespace != "" {
+		target = namespace + "/" + target
+	}
+	parts := []string{fmt.Sprintf("cluster_id=%d", args.ClusterID)}
+	for _, value := range []string{args.Action, args.Kind, target} {
+		if value = strings.TrimSpace(value); value != "" {
+			parts = append(parts, value)
+		}
+	}
+	if args.Replicas != nil {
+		parts = append(parts, fmt.Sprintf("replicas=%d", *args.Replicas))
+	}
+	if rv := strings.TrimSpace(args.ExpectedResourceVersion); rv != "" {
+		parts = append(parts, "resource_version="+rv)
+	}
+	return strings.Join(parts, " ")
 }
 
 // awaitDecision blocks until the approval row reaches a terminal state, then
