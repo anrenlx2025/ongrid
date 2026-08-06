@@ -14,7 +14,7 @@ test.describe('live frontend interaction', () => {
     const page = await context.newPage();
     await login(page);
     await expect(page.getByRole('link', { name: /仪表盘|Dashboard/ })).toBeVisible();
-    await expect(page.getByRole('link', { name: /设备|Devices/ })).toBeVisible();
+    await expect(page.locator('a[href="/devices"]')).toBeVisible();
     await context.close();
   });
 
