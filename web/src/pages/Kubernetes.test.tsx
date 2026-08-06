@@ -227,11 +227,7 @@ describe('KubernetesPage', () => {
           offset: 0,
         });
       }),
-      http.get('/api/v1/aiops/mutating-proposals', ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.get('tool_name') !== 'execute_k8s_action') {
-          return HttpResponse.json({ items: [], total: 0, limit: 100, offset: 0 });
-        }
+      http.get('/api/v1/k8s/clusters/:id/actions', () => {
         return HttpResponse.json({
           items: [
             {
@@ -249,9 +245,11 @@ describe('KubernetesPage', () => {
                 reason: '修复异常 Pod',
               }),
               tool_class: 'write',
+              approval_mode: 'review_gate',
               reviewer_agent: 'reviewer',
               reviewer_task_id: 'agent-1',
               decision: 'approve',
+              status: 'executed',
               decision_reason: '目标资源清晰，风险可控',
               operator_user_id: 7,
               created_at: '2026-06-29T10:02:00Z',
@@ -259,23 +257,26 @@ describe('KubernetesPage', () => {
               executed_at: '2026-06-29T10:03:10Z',
             },
             {
-              id: 'proposal-2',
+              id: 'approval-1',
               session_id: 'session-k8s-2',
               tool_name: 'execute_k8s_action',
               args_json: JSON.stringify({
-                cluster_id: 2,
+                cluster_id: 1,
                 action: 'scale',
                 kind: 'Deployment',
                 namespace: 'default',
-                name: 'other',
+                name: 'worker',
                 replicas: 2,
               }),
               tool_class: 'write',
-              reviewer_agent: 'reviewer',
-              reviewer_task_id: 'agent-2',
-              decision: 'pending',
+              approval_mode: 'human',
+              decision: 'approve',
+              status: 'executed',
               operator_user_id: 7,
-              created_at: '2026-06-29T10:02:00Z',
+              approver_user_id: 1,
+              created_at: '2026-06-29T10:04:00Z',
+              decided_at: '2026-06-29T10:04:10Z',
+              executed_at: '2026-06-29T10:04:12Z',
             },
           ],
           total: 2,
@@ -1690,7 +1691,7 @@ describe('KubernetesPage', () => {
       http.get('/api/v1/k8s/clusters/:id/workloads', () => HttpResponse.json({ items: [], total: 0, limit: 100, offset: 0 })),
       http.get('/api/v1/k8s/clusters/:id/pods', () => HttpResponse.json({ items: [], total: 0, limit: 100, offset: 0 })),
       http.get('/api/v1/k8s/clusters/:id/events', () => HttpResponse.json({ items: [], total: 0, limit: 100, offset: 0 })),
-      http.get('/api/v1/aiops/mutating-proposals', () => HttpResponse.json({ items: [], total: 0 })),
+      http.get('/api/v1/k8s/clusters/:id/actions', () => HttpResponse.json({ items: [], total: 0 })),
     );
 
     renderKubernetesDetail('/kubernetes/99');
@@ -1863,29 +1864,26 @@ describe('KubernetesPage', () => {
     expect(await screen.findByText('K8S 写动作审计')).toBeInTheDocument();
     expect(screen.getByText('rollout_restart · default · Deployment/api')).toBeInTheDocument();
     expect(screen.getAllByText('已执行').length).toBeGreaterThan(0);
-    expect(screen.getByText('请求已记录')).toBeInTheDocument();
-    expect(screen.getByText('Dry run 要求')).toBeInTheDocument();
-    expect(screen.getByText('审批通过')).toBeInTheDocument();
-    expect(screen.getByText('执行完成')).toBeInTheDocument();
+    expect(screen.getAllByText('请求已记录').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Dry run 已验证').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('审批通过').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('执行完成').length).toBeGreaterThan(0);
     expect(screen.getByText(/回滚到上一 revision/)).toBeInTheDocument();
     expect(screen.getAllByText(/请求/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/审批/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/工具已返回/)).toBeInTheDocument();
+    expect(screen.getAllByText(/工具已返回/).length).toBeGreaterThan(0);
     expect(screen.getByText('会话 session-k8s-1')).toBeInTheDocument();
     expect(screen.getByText('消息 message-k8')).toBeInTheDocument();
     expect(screen.getByText('调用 call-k8s-1')).toBeInTheDocument();
     expect(screen.getByText('agent-1')).toBeInTheDocument();
+    expect(screen.getByText('人工审批')).toBeInTheDocument();
     expect(screen.getByText('目标资源清晰，风险可控')).toBeInTheDocument();
-    expect(screen.queryByText('scale · default · Deployment/other → 2')).not.toBeInTheDocument();
+    expect(screen.getByText('scale · default · Deployment/worker → 2')).toBeInTheDocument();
   });
 
   it('Actions 资源支持按审批状态和动作类型筛选', async () => {
     server.use(
-      http.get('/api/v1/aiops/mutating-proposals', ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.get('tool_name') !== 'execute_k8s_action') {
-          return HttpResponse.json({ items: [], total: 0, limit: 100, offset: 0 });
-        }
+      http.get('/api/v1/k8s/clusters/:id/actions', () => {
         return HttpResponse.json({
           items: [
             {
@@ -1900,8 +1898,10 @@ describe('KubernetesPage', () => {
                 name: 'api',
               }),
               tool_class: 'write',
+              approval_mode: 'review_gate',
               reviewer_agent: 'reviewer',
               decision: 'approve',
+              status: 'executed',
               decision_reason: '已完成 rollout restart',
               operator_user_id: 7,
               created_at: '2026-06-29T10:02:00Z',
@@ -1920,8 +1920,9 @@ describe('KubernetesPage', () => {
                 name: 'api-crash-abc',
               }),
               tool_class: 'write',
-              reviewer_agent: 'reviewer',
+              approval_mode: 'human',
               decision: 'pending',
+              status: 'pending',
               operator_user_id: 7,
               created_at: '2026-06-29T10:04:00Z',
             },
@@ -1938,8 +1939,10 @@ describe('KubernetesPage', () => {
                 replicas: 2,
               }),
               tool_class: 'write',
+              approval_mode: 'review_gate',
               reviewer_agent: 'reviewer',
               decision: 'reject',
+              status: 'rejected',
               decision_reason: '副本风险未确认',
               operator_user_id: 7,
               created_at: '2026-06-29T10:05:00Z',

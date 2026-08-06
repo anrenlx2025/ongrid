@@ -23,6 +23,7 @@ type Repo interface {
 	Create(ctx context.Context, a *model.Approval) error
 	Get(ctx context.Context, id string) (*model.Approval, error)
 	List(ctx context.Context, status string, limit int) ([]*model.Approval, error)
+	ListKind(ctx context.Context, kind string, limit, offset int) ([]*model.Approval, error)
 	CountPending(ctx context.Context) (int64, error)
 	Decide(ctx context.Context, id string, fields map[string]any) error
 	SetResult(ctx context.Context, id, status, resultJSON string, executedAt time.Time) error
@@ -95,6 +96,9 @@ func (u *Usecase) Propose(ctx context.Context, in ProposeInput) (*model.Approval
 // List / Get / CountPending — inbox reads.
 func (u *Usecase) List(ctx context.Context, status string, limit int) ([]*model.Approval, error) {
 	return u.repo.List(ctx, status, limit)
+}
+func (u *Usecase) ListKind(ctx context.Context, kind string, limit, offset int) ([]*model.Approval, error) {
+	return u.repo.ListKind(ctx, kind, limit, offset)
 }
 func (u *Usecase) Get(ctx context.Context, id string) (*model.Approval, error) {
 	return u.repo.Get(ctx, id)

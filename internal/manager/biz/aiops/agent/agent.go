@@ -26,9 +26,11 @@ import (
 	biz "github.com/ongridio/ongrid/internal/manager/biz/aiops"
 	"github.com/ongridio/ongrid/internal/manager/biz/aiops/toolreplay"
 	"github.com/ongridio/ongrid/internal/manager/biz/aiops/tools"
+	"github.com/ongridio/ongrid/internal/manager/biz/aiops/tools/basetool"
 	model "github.com/ongridio/ongrid/internal/manager/model/aiops"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/llm"
+	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
 )
 
 // ErrMaxIterationsReached is returned from Run when cfg.MaxIterations elapse
@@ -83,11 +85,9 @@ const (
 	// through the same eventName / eventPayload translation as the rest.
 	EventTaskNotification EventType = "task_notification"
 	// EventApprovalPending fires when a synchronous-blocking tool
-	// (HLD-021, e.g. cloud_bash) queues a human-approval proposal and is
+	// (HLD-021, e.g. execute_k8s_action) queues a human-approval proposal and is
 	// about to block on the decision. Carries the live approve/reject card
-	// payload; the legacy agent never emits it, but the constant exists so
-	// the SSE layer carries the chatruntime kernel's approval_pending frame
-	// through the same eventName / eventPayload translation as the rest.
+	// payload. Both kernels translate this shape through the same SSE frame.
 	EventApprovalPending EventType = "approval_pending"
 )
 
@@ -159,6 +159,25 @@ type ToolEvent struct {
 // over SSE/etc.
 type Emit func(Event)
 
+type emitCtxKeyT struct{}
+
+var emitCtxKey = emitCtxKeyT{}
+
+func withEmit(ctx context.Context, emit Emit) context.Context {
+	if emit == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, emitCtxKey, emit)
+}
+
+// EmitFromContext returns the active legacy-kernel streaming callback. The
+// cmd-layer approval adapter uses it to surface the same inline confirmation
+// card that the graph kernel emits through chatruntime.EmitFromContext.
+func EmitFromContext(ctx context.Context) Emit {
+	v, _ := ctx.Value(emitCtxKey).(Emit)
+	return v
+}
+
 // MentionResolver hydrates a list of @-mention references into one
 // string per mention, formatted as a markdown bullet. The agent inlines
 // these into the user message prelude so the LLM has structured context
@@ -224,19 +243,33 @@ var legacyKernelMutatingTools = map[string]struct{}{
 	"host_restart_service": {},
 }
 
+const (
+	legacyApprovalToolTimeout          = 31 * time.Minute
+	legacyK8sDryRunTimeout             = 45 * time.Second
+	legacyK8sDefaultDrainTimeout       = 120 * time.Second
+	legacyK8sDryRunDrainTimeoutPadding = 30 * time.Second
+)
+
 // Agent wires the LLM client, tool registry, and session repo.
 type Agent struct {
-	llm      llm.Client
-	tools    *tools.Registry
-	sessions biz.SessionRepo
-	cfg      Config
-	log      *slog.Logger
-	resolver MentionResolver
+	llm          llm.Client
+	tools        *tools.Registry
+	sessions     biz.SessionRepo
+	cfg          Config
+	log          *slog.Logger
+	resolver     MentionResolver
+	writeEnabled func(ctx context.Context) bool
 }
 
 // SetMentionResolver wires the @-mention hydrator. Optional — when
 // unset the agent runs with no mention inlining (back-compat).
 func (a *Agent) SetMentionResolver(r MentionResolver) { a.resolver = r }
+
+// SetAgentWriteEnabledProvider wires the live admin setting used by the
+// default legacy kernel. A nil provider fails closed for write-tool exposure.
+func (a *Agent) SetAgentWriteEnabledProvider(fn func(ctx context.Context) bool) {
+	a.writeEnabled = fn
+}
 
 // New builds an Agent. Defaults are filled in here so callers can pass a
 // zero-value Config and get sane behaviour.
@@ -300,6 +333,7 @@ func (a *Agent) runInternal(ctx context.Context, sessionID string, userID uint64
 	if emit == nil {
 		emit = func(Event) {}
 	}
+	ctx = withEmit(ctx, emit)
 
 	sess, err := a.sessions.GetSession(ctx, sessionID)
 	if err != nil {
@@ -312,6 +346,14 @@ func (a *Agent) runInternal(ctx context.Context, sessionID string, userID uint64
 		// layer wants 404 not 403 per spec).
 		return nil, errs.ErrNotFound
 	}
+	ctx = basetool.WithSessionID(ctx, sess.ID)
+	writeEnabled := false
+	if a.writeEnabled != nil {
+		writeEnabled = a.writeEnabled(ctx)
+	}
+	ctx = basetool.WithAgentWriteAllowed(ctx, writeEnabled)
+	caller, hasCaller := tenantctx.From(ctx)
+	canExecuteK8sAction := writeEnabled && hasCaller && (caller.Role == "admin" || caller.IsSuperuser)
 
 	// Persist the new user turn first so it survives a downstream crash.
 	// When the SPA chat input attached @-mentions, hydrate them into
@@ -367,6 +409,9 @@ func (a *Agent) runInternal(ctx context.Context, sessionID string, userID uint64
 	exposedSchemas := a.tools.Schemas()
 	if !opts.WebSearchEnabled {
 		exposedSchemas = filterToolSchemas(exposedSchemas, ToolWebSearch)
+	}
+	if !canExecuteK8sAction {
+		exposedSchemas = filterToolSchemas(exposedSchemas, tools.ToolNameExecuteK8sAction)
 	}
 
 	for i := 0; i < a.cfg.MaxIterations; i++ {
@@ -582,7 +627,8 @@ func (a *Agent) runInternal(ctx context.Context, sessionID string, userID uint64
 				continue
 			}
 
-			toolCtx, cancel := context.WithTimeout(ctx, a.cfg.ToolTimeout)
+			toolCtx := basetool.WithToolCallID(ctx, tcRow.ID)
+			toolCtx, cancel := context.WithTimeout(toolCtx, legacyToolTimeout(a.cfg.ToolTimeout, tc.Name, tc.Args))
 			execResult, execErr := a.tools.Invoke(toolCtx, tc.Name, tc.Args)
 			cancel()
 
@@ -869,6 +915,31 @@ func filterToolSchemas(schemas []llm.ToolSchema, excludeNames ...string) []llm.T
 		out = append(out, s)
 	}
 	return out
+}
+
+func legacyToolTimeout(defaultTimeout time.Duration, name string, args json.RawMessage) time.Duration {
+	if name != tools.ToolNameExecuteK8sAction {
+		return defaultTimeout
+	}
+	var in struct {
+		Action              string `json:"action"`
+		DryRun              bool   `json:"dry_run"`
+		DrainTimeoutSeconds int    `json:"drain_timeout_seconds"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return defaultTimeout
+	}
+	if in.DryRun {
+		if strings.EqualFold(strings.TrimSpace(in.Action), "drain") {
+			drainTimeout := time.Duration(in.DrainTimeoutSeconds) * time.Second
+			if drainTimeout <= 0 {
+				drainTimeout = legacyK8sDefaultDrainTimeout
+			}
+			return drainTimeout + legacyK8sDryRunDrainTimeoutPadding
+		}
+		return legacyK8sDryRunTimeout
+	}
+	return legacyApprovalToolTimeout
 }
 
 // stringPtrIfSet returns &s when s is non-empty, otherwise nil. Used to

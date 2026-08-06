@@ -44,13 +44,50 @@ type Service interface {
 	RefreshTelemetryConfig(ctx context.Context, controllerEdgeID uint64, proof biz.TelemetryCredentialProof) (*biz.TelemetryConfig, error)
 }
 
+// ActionAuditRecord is the sanitized cross-kernel read model consumed by the
+// Kubernetes Actions page. ArgsJSON must not contain one-time credentials such
+// as execute_k8s_action.preflight_token.
+type ActionAuditRecord struct {
+	ID             string     `json:"id"`
+	ClusterID      uint64     `json:"cluster_id"`
+	SessionID      string     `json:"session_id,omitempty"`
+	MessageID      *string    `json:"message_id,omitempty"`
+	ToolCallID     *string    `json:"tool_call_id,omitempty"`
+	ToolName       string     `json:"tool_name"`
+	ArgsJSON       string     `json:"args_json"`
+	ToolClass      string     `json:"tool_class"`
+	ApprovalMode   string     `json:"approval_mode"`
+	ReviewerAgent  string     `json:"reviewer_agent,omitempty"`
+	ReviewerTaskID string     `json:"reviewer_task_id,omitempty"`
+	Decision       string     `json:"decision"`
+	Status         string     `json:"status"`
+	DecisionReason string     `json:"decision_reason,omitempty"`
+	OperatorUserID uint64     `json:"operator_user_id"`
+	ApproverUserID *uint64    `json:"approver_user_id,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	DecidedAt      *time.Time `json:"decided_at,omitempty"`
+	ExecutedAt     *time.Time `json:"executed_at,omitempty"`
+}
+
+// ActionAuditReader merges the graph ReviewGate and legacy human-approval
+// stores. The interface lives at the HTTP consumer boundary so the k8s domain
+// does not import either producer domain.
+type ActionAuditReader interface {
+	ListK8sActionAudits(ctx context.Context, clusterID uint64, limit, offset int) ([]ActionAuditRecord, int, error)
+}
+
 type Handler struct {
 	svc         Service
+	actionAudit ActionAuditReader
 	enrollSlots chan struct{}
 }
 
-func NewHandler(s Service) *Handler {
-	return &Handler{svc: s, enrollSlots: make(chan struct{}, 64)}
+func NewHandler(s Service, actionAudits ...ActionAuditReader) *Handler {
+	h := &Handler{svc: s, enrollSlots: make(chan struct{}, 64)}
+	if len(actionAudits) > 0 {
+		h.actionAudit = actionAudits[0]
+	}
+	return h
 }
 
 func (h *Handler) RegisterProtected(r chi.Router) {
@@ -63,8 +100,34 @@ func (h *Handler) RegisterProtected(r chi.Router) {
 	r.Get("/v1/k8s/clusters/{cluster_id}/workloads", h.listWorkloads)
 	r.Get("/v1/k8s/clusters/{cluster_id}/pods", h.listPods)
 	r.Get("/v1/k8s/clusters/{cluster_id}/events", h.listEvents)
+	r.With(h.requireAdmin).Get("/v1/k8s/clusters/{cluster_id}/actions", h.listActionAudits)
 	r.With(h.requireAdmin).Post("/v1/k8s/clusters/{cluster_id}/rotate-token", h.rotateToken)
 	r.With(h.requireAdmin).Delete("/v1/k8s/clusters/{cluster_id}", h.deleteCluster)
+}
+
+// @Summary List sanitized Kubernetes write-action audit records
+// @Router /api/v1/k8s/clusters/{cluster_id}/actions [get]
+// @Success 200 {object} listActionAuditsResponse
+func (h *Handler) listActionAudits(w http.ResponseWriter, r *http.Request) {
+	if h.actionAudit == nil {
+		writeErr(w, errors.Join(errs.ErrNotWiredYet, errors.New("kubernetes action audit is not configured")))
+		return
+	}
+	clusterID, err := parseClusterID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	limit := parseListLimit(r.URL.Query().Get("limit"), 100)
+	offset := parseListOffset(r.URL.Query().Get("offset"))
+	items, total, err := h.actionAudit.ListK8sActionAudits(r.Context(), clusterID, limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, listActionAuditsResponse{
+		Items: items, Total: total, Limit: limit, Offset: offset,
+	})
 }
 
 // @Summary List Kubernetes-managed Edge attachments
@@ -642,6 +705,13 @@ type edgeAttachmentDTO struct {
 type listEdgeAttachmentsResponse struct {
 	Items []edgeAttachmentDTO `json:"items"`
 	Total int                 `json:"total"`
+}
+
+type listActionAuditsResponse struct {
+	Items  []ActionAuditRecord `json:"items"`
+	Total  int                 `json:"total"`
+	Limit  int                 `json:"limit"`
+	Offset int                 `json:"offset"`
 }
 
 type nodeDTO struct {

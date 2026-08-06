@@ -51,6 +51,24 @@ func (r *Repo) List(ctx context.Context, status string, limit int) ([]*model.App
 	return out, nil
 }
 
+// ListKind returns one approval category newest first. Offset support lets
+// consumers build a bounded cross-source audit view without loading unrelated
+// approval payloads into memory.
+func (r *Repo) ListKind(ctx context.Context, kind string, limit, offset int) ([]*model.Approval, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	q := r.db.WithContext(ctx).Where("kind = ?", kind).Order("created_at DESC").Limit(limit)
+	if offset > 0 {
+		q = q.Offset(offset)
+	}
+	var out []*model.Approval
+	if err := q.Find(&out).Error; err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CountPending returns the number of pending proposals (nav badge).
 func (r *Repo) CountPending(ctx context.Context) (int64, error) {
 	var n int64
