@@ -259,6 +259,7 @@ html.light .ring-fuchsia-500\/30     { --tw-ring-color: rgb(240 171 252); }    /
 
 html.light .bg-emerald-500\/10       { background-color: rgb(209 250 229); }   /* emerald-100 */
 html.light .bg-emerald-500\/15       { background-color: rgb(209 250 229); }
+html.light .text-emerald-100,
 html.light .text-emerald-200,
 html.light .text-emerald-300         { color: rgb(4 120 87); }                 /* emerald-700 */
 html.light .border-emerald-500\/30,
