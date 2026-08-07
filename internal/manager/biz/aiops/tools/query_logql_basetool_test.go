@@ -60,6 +60,17 @@ func TestQueryLogQLTool_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestQueryLogQLTool_DeviceIDScopesQuery(t *testing.T) {
+	lq := &fakeLogQuerier{resp: &logquery.QueryRangeResult{ResultType: "streams", Result: json.RawMessage("[]")}}
+	tool := NewQueryLogQLTool(lq, nil)
+	if _, err := tool.InvokableRun(context.Background(), `{"query":"{} |= \"error\"","device_id":24}`); err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	if got, want := lq.got.Query, `{device_id="24"} |= "error"`; got != want {
+		t.Errorf("Query = %q, want %q", got, want)
+	}
+}
+
 func TestQueryLogQLTool_BadArgs(t *testing.T) {
 	tool := NewQueryLogQLTool(&fakeLogQuerier{}, nil)
 	if _, err := tool.InvokableRun(context.Background(), `not json`); err == nil {

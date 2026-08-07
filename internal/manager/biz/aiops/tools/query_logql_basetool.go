@@ -59,6 +59,17 @@ func (t *QueryLogQLTool) InvokableRun(ctx context.Context, argsJSON string, _ ..
 	if strings.TrimSpace(in.Query) == "" {
 		return "", fmt.Errorf("query_logql: query required")
 	}
+	query := in.Query
+	if in.DeviceID != nil {
+		if *in.DeviceID == 0 {
+			return "", fmt.Errorf("query_logql: device_id must be greater than zero")
+		}
+		var err error
+		query, err = scopeLogQLToDevice(in.Query, *in.DeviceID)
+		if err != nil {
+			return "", err
+		}
+	}
 
 	end := time.Now()
 	start := end.Add(-time.Hour)
@@ -92,7 +103,7 @@ func (t *QueryLogQLTool) InvokableRun(ctx context.Context, argsJSON string, _ ..
 	defer cancel()
 
 	res, err := t.logQuery.QueryRange(callCtx, logquery.QueryRangeOptions{
-		Query:     in.Query,
+		Query:     query,
 		Start:     start,
 		End:       end,
 		Limit:     limit,

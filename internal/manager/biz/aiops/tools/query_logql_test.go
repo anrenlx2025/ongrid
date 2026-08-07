@@ -89,6 +89,59 @@ func TestQueryLogQL_DefaultsLimitAndDirection(t *testing.T) {
 	}
 }
 
+func TestQueryLogQL_DeviceIDScopesStreamSelector(t *testing.T) {
+	lq := &fakeLogQuerier{resp: &logquery.QueryRangeResult{ResultType: "streams", Result: json.RawMessage("[]")}}
+	uc := edgebiz.NewUsecase(newFakeEdgeRepo(), nil, nil, slog.Default())
+	reg := NewRegistry(&fakeCaller{}, uc, nil, nil, lq, nil, nil, slog.Default())
+
+	if _, err := reg.Invoke(context.Background(), ToolNameQueryLogQL,
+		json.RawMessage(`{"query":"{unit=\"nginx.service\"} |= \"error\"","device_id":24}`)); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if got, want := lq.got.Query, `{device_id="24",unit="nginx.service"} |= "error"`; got != want {
+		t.Errorf("Query = %q, want %q", got, want)
+	}
+}
+
+func TestQueryLogQL_DeviceIDScopesEmptyAndExistingSelectors(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{name: "empty selector", query: `{}`, want: `{device_id="24"}`},
+		{name: "matching selector", query: `{device_id="24",unit="nginx.service"} |= "error"`, want: `{device_id="24",unit="nginx.service"} |= "error"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := scopeLogQLToDevice(tc.query, 24)
+			if err != nil {
+				t.Fatalf("scopeLogQLToDevice: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("query = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestQueryLogQL_DeviceIDRejectsConflictingOrUnscopableQuery(t *testing.T) {
+	lq := &fakeLogQuerier{resp: &logquery.QueryRangeResult{ResultType: "streams", Result: json.RawMessage("[]")}}
+	uc := edgebiz.NewUsecase(newFakeEdgeRepo(), nil, nil, slog.Default())
+	reg := NewRegistry(&fakeCaller{}, uc, nil, nil, lq, nil, nil, slog.Default())
+
+	for _, args := range []json.RawMessage{
+		json.RawMessage(`{"query":"{device_id=\"7\"} |= \"error\"","device_id":24}`),
+		json.RawMessage(`{"query":"{device_id=~\"2.*\"} |= \"error\"","device_id":24}`),
+		json.RawMessage(`{"query":"sum(count_over_time({job=\"syslog\"}[5m]))","device_id":24}`),
+		json.RawMessage(`{"query":"{}","device_id":0}`),
+	} {
+		if _, err := reg.Invoke(context.Background(), ToolNameQueryLogQL, args); err == nil {
+			t.Errorf("Invoke(%s) succeeded, want scope error", args)
+		}
+	}
+}
+
 func TestQueryLogQL_ExplicitTimeWindow(t *testing.T) {
 	lq := &fakeLogQuerier{resp: &logquery.QueryRangeResult{ResultType: "streams", Result: json.RawMessage("[]")}}
 	uc := edgebiz.NewUsecase(newFakeEdgeRepo(), nil, nil, slog.Default())
