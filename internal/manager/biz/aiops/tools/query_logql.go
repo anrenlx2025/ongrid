@@ -19,6 +19,8 @@ const ToolNameQueryLogQL = "query_logql"
 // is needed beyond what the metric-side tools can express.
 const QueryLogQLDescription = "Run a LogQL range query against Loki. " +
 	"Use this to investigate log patterns, error counts, or filter a specific device. " +
+	"When device_id is set, start with {} plus a line filter because the backend injects the device selector; do not guess job/hostname/instance labels. " +
+	"Once a scoped query returns matching lines, summarize them unless the user asks for a narrower follow-up. " +
 	"Returns the raw Loki response (streams or matrix)."
 
 var logQLDeviceIDMatcher = regexp.MustCompile(`(?:^|,)\s*device_id\s*(=|!=|=~|!~)\s*"([^"]*)"`)

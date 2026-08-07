@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -70,6 +71,12 @@ func TestQueryLogQL_RoundTrip(t *testing.T) {
 	}
 	if qr.ResultType != "streams" {
 		t.Errorf("resultType = %q", qr.ResultType)
+	}
+}
+
+func TestQueryLogQL_DescriptionGuidesScopedQueries(t *testing.T) {
+	if !strings.Contains(QueryLogQLDescription, "{}") || !strings.Contains(QueryLogQLDescription, "device_id") {
+		t.Fatalf("description must guide device-scoped LogQL calls: %q", QueryLogQLDescription)
 	}
 }
 
