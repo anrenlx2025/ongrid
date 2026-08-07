@@ -185,6 +185,49 @@ func TestUsecase_UpdateAndDeleteNotifyRuntimeCatalog(t *testing.T) {
 	}
 }
 
+func TestUsecase_UpdateChangedConnectionClearsUnverifiedToolCache(t *testing.T) {
+	ctx := context.Background()
+	repo := newFakeRepo()
+	u := NewUsecase(repo, fakeSecrets{}, nil)
+	server, err := u.Create(ctx, &model.Server{
+		Name:     "github",
+		Endpoint: "https://old.example.test/mcp",
+		Enabled:  true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := repo.SetToolsCache(ctx, server.ID, `[{"name":"old_search"}]`); err != nil {
+		t.Fatalf("SetToolsCache: %v", err)
+	}
+	if err := repo.SetStatus(ctx, server.ID, "ok", ""); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+
+	var events int
+	u.SetToolChangeHook(func(_ context.Context, _ string, _ *model.Server, _ []mcpclient.Tool) {
+		events++
+	})
+	if err := u.Update(ctx, server.ID, &model.Server{
+		Name:     server.Name,
+		Endpoint: "https://new.example.test/mcp",
+		Enabled:  true,
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	updated, err := repo.Get(ctx, server.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if updated.ToolsCacheJSON != "" || updated.Status != "" || updated.LastError != "" {
+		t.Fatalf("changed connection retained probe state: %#v", updated)
+	}
+	if events != 1 {
+		t.Fatalf("events = %d, want only stale-prefix removal", events)
+	}
+}
+
 func TestUsecase_TestConnectionPublishesVerifiedTools(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)

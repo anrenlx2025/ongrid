@@ -110,10 +110,20 @@ func (u *Usecase) Update(ctx context.Context, id uint64, patch *model.Server) er
 	if err != nil {
 		return err
 	}
+	connectionChanged := !sameToolEndpoint(previous, updated)
 	// Remove the old wire-name prefix first. A changed endpoint or credential
 	// must be verified again before the assistant can call its stale tools.
 	u.notifyToolsChanged(ctx, previous.Name, nil, nil)
-	if updated.Enabled && sameToolEndpoint(previous, updated) {
+	if connectionChanged {
+		if err := u.repo.SetToolsCache(ctx, id, ""); err != nil {
+			return fmt.Errorf("clear mcp tools cache: %w", err)
+		}
+		if err := u.repo.SetStatus(ctx, id, "", ""); err != nil {
+			return fmt.Errorf("clear mcp probe status: %w", err)
+		}
+		return nil
+	}
+	if updated.Enabled {
 		tools, err := cachedTools(updated.ToolsCacheJSON)
 		if err == nil && len(tools) > 0 {
 			u.notifyToolsChanged(ctx, updated.Name, updated, tools)
