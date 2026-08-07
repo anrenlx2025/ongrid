@@ -439,6 +439,12 @@ func main() {
 	if err := settingSvc.SetIfAbsent(rootCtx, settingmodel.CategoryLLM, settingmodel.KeyOpenAIBaseURL, cfg.OpenAI.BaseURL, false); err != nil {
 		log.Warn("seed llm base url", slog.Any("err", err))
 	}
+	// Seed the platform default once so discovery ingestion reads the cached
+	// setting instead of querying for an absent row on every Edge report.
+	// SetIfAbsent preserves an administrator's explicit global opt-out.
+	if err := settingSvc.SetIfAbsent(rootCtx, settingmodel.CategoryPlatform, settingmodel.KeyNetworkDiscoveryEnabled, "true", false); err != nil {
+		log.Warn("seed network discovery setting", slog.Any("err", err))
+	}
 	// Prom seeds. URLs are first-boot only — admin edits in UI persist;
 	// auth fields are blank by default (env can override at boot).
 	for _, seed := range []struct {

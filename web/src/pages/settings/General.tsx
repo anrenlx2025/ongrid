@@ -7,6 +7,12 @@ import { cn } from '@/lib/cn';
 const CATEGORY = 'platform';
 const KEY = 'network_discovery_enabled';
 
+// Match the manager's fail-open default: only an explicit false disables
+// admission. This keeps the displayed state correct for old or malformed rows.
+function isDiscoveryEnabled(value?: string): boolean {
+  return value?.trim().toLowerCase() !== 'false';
+}
+
 export default function SettingsGeneral() {
   const { tr } = useI18n();
   const [enabled, setEnabled] = useState(true);
@@ -19,7 +25,7 @@ export default function SettingsGeneral() {
       const response = await listSettings(CATEGORY);
       const row = response.items.find((item) => item.key === KEY);
       // Missing row follows the Manager default: enabled for new installs.
-      setEnabled(row ? row.value === 'true' : true);
+      setEnabled(isDiscoveryEnabled(row?.value));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
