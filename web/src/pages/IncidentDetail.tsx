@@ -1280,7 +1280,7 @@ function useTempoExploreUrl(incident: Incident | null): string | null {
     const parts: string[] = [];
     if (service) parts.push(`resource.service.name="${service}"`);
     if (labels.operation) parts.push(`name="${labels.operation}"`);
-    if (labels.device_id && !service) parts.push(`resource.device_id="${labels.device_id}"`);
+    if (labels.device_id) parts.push(`resource.device_id="${labels.device_id}"`);
     const expr = `{${parts.join(' && ') || 'true'}}`;
     return buildGrafanaExploreUrl({
       base,

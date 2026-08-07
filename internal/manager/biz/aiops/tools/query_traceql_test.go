@@ -125,6 +125,22 @@ func TestQueryTraceQL_DeviceScopeRejectsConflict(t *testing.T) {
 	}
 }
 
+func TestRegistry_QueryTracePanelScopesToDevice(t *testing.T) {
+	tq := &fakeTraceQuerier{resp: &tracequery.SearchResult{Traces: json.RawMessage("[]")}}
+	reg := &Registry{traceQuery: tq}
+	deviceID := uint64(24)
+
+	if _, err := reg.queryTracePanel(context.Background(), "web", &deviceID, time.Now().Add(-time.Hour), time.Now()); err != nil {
+		t.Fatalf("queryTracePanel: %v", err)
+	}
+	if got, want := tq.got.Query, `{ resource.device_id = "24" && resource.service.name = "web" }`; got != want {
+		t.Errorf("Query = %q, want %q", got, want)
+	}
+	if tq.got.Tags != nil {
+		t.Errorf("Tags = %#v, want nil for device-scoped TraceQL", tq.got.Tags)
+	}
+}
+
 func TestQueryTraceQL_RequiresAFilter(t *testing.T) {
 	tq := &fakeTraceQuerier{}
 	uc := edgebiz.NewUsecase(newFakeEdgeRepo(), nil, nil, slog.Default())

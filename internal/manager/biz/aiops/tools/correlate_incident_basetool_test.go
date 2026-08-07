@@ -10,6 +10,7 @@ import (
 	"time"
 
 	alertmodel "github.com/ongridio/ongrid/internal/manager/model/alert"
+	"github.com/ongridio/ongrid/internal/pkg/tracequery"
 )
 
 func TestCorrelateIncidentTool_Info(t *testing.T) {
@@ -114,6 +115,22 @@ func TestCorrelateIncidentTool_NilAlert(t *testing.T) {
 	tool := NewCorrelateIncidentTool(nil, nil, nil, nil, nil, nil, nil)
 	if _, err := tool.InvokableRun(context.Background(), `{"incident_ids":[1]}`); err == nil {
 		t.Errorf("expected early error when alertUC nil")
+	}
+}
+
+func TestCorrelateIncidentTool_QueryTracePanelScopesToDevice(t *testing.T) {
+	tq := &fakeTraceQuerier{resp: &tracequery.SearchResult{Traces: json.RawMessage("[]")}}
+	tool := NewCorrelateIncidentTool(nil, nil, nil, tq, nil, nil, nil)
+	deviceID := uint64(24)
+
+	if _, err := tool.queryTracePanel(context.Background(), "web", &deviceID, time.Now().Add(-time.Hour), time.Now()); err != nil {
+		t.Fatalf("queryTracePanel: %v", err)
+	}
+	if got, want := tq.got.Query, `{ resource.device_id = "24" && resource.service.name = "web" }`; got != want {
+		t.Errorf("Query = %q, want %q", got, want)
+	}
+	if tq.got.Tags != nil {
+		t.Errorf("Tags = %#v, want nil for device-scoped TraceQL", tq.got.Tags)
 	}
 }
 
