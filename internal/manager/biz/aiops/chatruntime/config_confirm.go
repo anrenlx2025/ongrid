@@ -36,7 +36,7 @@ func (rt *Runtime) tryApplyConfirmedConfigDraft(ctx context.Context, req *Reques
 	if parseErr != nil {
 		return rt.persistAndEmitDirectAssistant(ctx, sess.ID, emit, fmt.Sprintf("确认应用失败：%s", parseErr.Error())), true
 	}
-	tool, err := findToolByName(ctx, rt.cfg.ToolBag, applyConfigChangeToolName)
+	tool, err := findToolByName(ctx, rt.toolBagSnapshot(), applyConfigChangeToolName)
 	if err != nil {
 		return rt.persistAndEmitDirectAssistant(ctx, sess.ID, emit, fmt.Sprintf("确认应用失败：%s", err.Error())), true
 	}

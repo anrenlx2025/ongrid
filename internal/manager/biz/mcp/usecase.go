@@ -41,11 +41,32 @@ type SecretResolver interface {
 	ResolveFields(ctx context.Context, name string) (map[string]string, error)
 }
 
+// ToolChangeHook updates the in-memory chat tool catalog after an MCP server
+// changes. It receives one server only: the caller must not reconnect every
+// configured MCP server while handling an admin CRUD request. A nil server
+// removes the tools whose wire names belong to serverName.
+type ToolChangeHook func(ctx context.Context, serverName string, server *model.Server, tools []mcpclient.Tool)
+
 // Usecase is the MCP-server-registration facade.
 type Usecase struct {
-	repo    Repo
-	secrets SecretResolver
-	log     *slog.Logger
+	repo          Repo
+	secrets       SecretResolver
+	log           *slog.Logger
+	onToolsChange ToolChangeHook
+}
+
+// SetToolChangeHook wires the optional runtime catalog updater. It is set
+// once during manager startup before HTTP requests are served.
+func (u *Usecase) SetToolChangeHook(h ToolChangeHook) {
+	if u != nil {
+		u.onToolsChange = h
+	}
+}
+
+func (u *Usecase) notifyToolsChanged(ctx context.Context, serverName string, server *model.Server, tools []mcpclient.Tool) {
+	if u != nil && u.onToolsChange != nil {
+		u.onToolsChange(ctx, serverName, server, tools)
+	}
 }
 
 // NewUsecase wires the repo, credential resolver, and logger.
@@ -78,11 +99,41 @@ func (u *Usecase) Update(ctx context.Context, id uint64, patch *model.Server) er
 	if err := normalizeAndValidate(patch); err != nil {
 		return err
 	}
-	return u.repo.Update(ctx, id, patch)
+	previous, err := u.repo.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := u.repo.Update(ctx, id, patch); err != nil {
+		return err
+	}
+	updated, err := u.repo.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	// Remove the old wire-name prefix first. A changed endpoint or credential
+	// must be verified again before the assistant can call its stale tools.
+	u.notifyToolsChanged(ctx, previous.Name, nil, nil)
+	if updated.Enabled && sameToolEndpoint(previous, updated) {
+		tools, err := cachedTools(updated.ToolsCacheJSON)
+		if err == nil && len(tools) > 0 {
+			u.notifyToolsChanged(ctx, updated.Name, updated, tools)
+		}
+	}
+	return nil
 }
 
 // Delete removes a server registration.
-func (u *Usecase) Delete(ctx context.Context, id uint64) error { return u.repo.Delete(ctx, id) }
+func (u *Usecase) Delete(ctx context.Context, id uint64) error {
+	server, err := u.repo.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := u.repo.Delete(ctx, id); err != nil {
+		return err
+	}
+	u.notifyToolsChanged(ctx, server.Name, nil, nil)
+	return nil
+}
 
 // Get returns one server by id.
 func (u *Usecase) Get(ctx context.Context, id uint64) (*model.Server, error) {
@@ -179,23 +230,57 @@ func (u *Usecase) TestConnection(ctx context.Context, id uint64) ([]mcpclient.To
 	}
 	cli, err := u.BuildClient(ctx, s)
 	if err != nil {
-		_ = u.repo.SetStatus(ctx, id, "error", err.Error())
+		if setErr := u.repo.SetStatus(ctx, id, "error", err.Error()); setErr != nil {
+			u.log.Warn("set mcp error status", slog.Uint64("server_id", id), slog.Any("err", setErr))
+		}
 		return nil, err
 	}
 	if err := cli.Initialize(ctx); err != nil {
-		_ = u.repo.SetStatus(ctx, id, "error", err.Error())
+		if setErr := u.repo.SetStatus(ctx, id, "error", err.Error()); setErr != nil {
+			u.log.Warn("set mcp error status", slog.Uint64("server_id", id), slog.Any("err", setErr))
+		}
 		return nil, err
 	}
 	tools, err := cli.ListTools(ctx)
 	if err != nil {
-		_ = u.repo.SetStatus(ctx, id, "error", err.Error())
+		if setErr := u.repo.SetStatus(ctx, id, "error", err.Error()); setErr != nil {
+			u.log.Warn("set mcp error status", slog.Uint64("server_id", id), slog.Any("err", setErr))
+		}
 		return nil, err
 	}
 	if b, mErr := json.Marshal(tools); mErr == nil {
-		_ = u.repo.SetToolsCache(ctx, id, string(b))
+		if setErr := u.repo.SetToolsCache(ctx, id, string(b)); setErr != nil {
+			u.log.Warn("cache mcp tools", slog.Uint64("server_id", id), slog.Any("err", setErr))
+		}
+	} else {
+		u.log.Warn("marshal mcp tools", slog.Uint64("server_id", id), slog.Any("err", mErr))
 	}
-	_ = u.repo.SetStatus(ctx, id, "ok", "")
+	if setErr := u.repo.SetStatus(ctx, id, "ok", ""); setErr != nil {
+		u.log.Warn("set mcp ok status", slog.Uint64("server_id", id), slog.Any("err", setErr))
+	}
+	if s.Enabled {
+		u.notifyToolsChanged(ctx, s.Name, s, tools)
+	}
 	return tools, nil
+}
+
+func cachedTools(raw string) ([]mcpclient.Tool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var tools []mcpclient.Tool
+	if err := json.Unmarshal([]byte(raw), &tools); err != nil {
+		return nil, fmt.Errorf("decode cached MCP tools: %w", err)
+	}
+	return tools, nil
+}
+
+func sameToolEndpoint(a, b *model.Server) bool {
+	return a != nil && b != nil &&
+		a.Endpoint == b.Endpoint &&
+		a.Transport == b.Transport &&
+		a.Credential == b.Credential &&
+		a.HeaderTemplateJSON == b.HeaderTemplateJSON
 }
 
 // --- helpers ---

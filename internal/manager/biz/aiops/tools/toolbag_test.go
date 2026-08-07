@@ -273,6 +273,35 @@ func TestToolBag_AppendBucketsByTier(t *testing.T) {
 	}
 }
 
+func TestToolBag_ReplaceToolsByNamePrefix(t *testing.T) {
+	bag := NewToolBag([]basetool.BaseTool{
+		newStub("query_promql", ""),
+		newStub("mcp__github__old_search", ""),
+		newStub("mcp__grafana__query", ""),
+	}, 30)
+
+	bag.ReplaceToolsByNamePrefix("mcp__github__", []basetool.BaseTool{
+		newStub("mcp__github__code_search", ""),
+	})
+
+	names := map[string]bool{}
+	for _, tool := range bag.AllTools() {
+		info, err := tool.Info(context.Background())
+		if err != nil || info == nil {
+			t.Fatalf("tool info: %v", err)
+		}
+		names[info.Name] = true
+	}
+	for _, want := range []string{"query_promql", "mcp__github__code_search", "mcp__grafana__query"} {
+		if !names[want] {
+			t.Errorf("AllTools missing %q: %v", want, names)
+		}
+	}
+	if names["mcp__github__old_search"] {
+		t.Errorf("stale MCP tool remained in catalog: %v", names)
+	}
+}
+
 func TestCoreToolNames_UsesRegistrationTier(t *testing.T) {
 	in := []basetool.BaseTool{
 		newStub("query_devices", ""),

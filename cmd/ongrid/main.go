@@ -147,6 +147,7 @@ import (
 	managerreportdata "github.com/ongridio/ongrid/internal/manager/data/report/store"
 	manageraiopsmodel "github.com/ongridio/ongrid/internal/manager/model/aiops"
 	managerapprovalmodel "github.com/ongridio/ongrid/internal/manager/model/approval"
+	managermodelmcp "github.com/ongridio/ongrid/internal/manager/model/mcp"
 	managerserveraiops "github.com/ongridio/ongrid/internal/manager/server/aiops"
 	managerserveralert "github.com/ongridio/ongrid/internal/manager/server/alert"
 	managerserverapproval "github.com/ongridio/ongrid/internal/manager/server/approval"
@@ -2170,12 +2171,34 @@ func main() {
 		}
 		mcpCaller := mcpCallerShim{uc: mcpUC}
 		mcpProposer := mcpProposerShim{uc: approvalUC}
-		// Chat path: bolt enabled servers' tools onto the chat toolbag (boot
-		// snapshot; agent-initiated calls respect each server's trusted flag /
-		// approval). The FLOW path uses the LIVE flowMCPSource wired above, so
-		// it isn't touched here.
+		// Keep the graph-facing decorators and ToolSearch's unredacted catalog
+		// in sync. Registration changes call this with one server's fresh test
+		// result, so an admin save never reconnects every MCP endpoint.
+		refreshMCPServerTools := func(ctx context.Context, serverName string, srv *managermodelmcp.Server, discovered []mcpclient.Tool) {
+			prefix := aiopstools.MCPToolName(serverName, "")
+			var rawTools []aiopstoolsbase.BaseTool
+			var graphTools []aiopstoolsbase.BaseTool
+			if srv != nil && srv.Enabled {
+				rawTools = make([]aiopstoolsbase.BaseTool, 0, len(discovered))
+				graphTools = make([]aiopstoolsbase.BaseTool, 0, len(discovered))
+				for _, mt := range discovered {
+					raw := aiopstools.NewMCPTool(srv.Name, mt.Name, mt.Description, mt.InputSchema, srv.Trusted, mcpCaller, mcpProposer, log)
+					rawTools = append(rawTools, raw)
+					graphTools = append(graphTools, aiopstoolsdec.Wrap(raw, mcpDeps))
+				}
+			}
+			chatRT.ReplaceCatalogToolsByNamePrefix(prefix, rawTools)
+			chatRT.ReplaceToolsByNamePrefix(prefix, graphTools)
+			log.Info("mcp tools refreshed in chat runtime",
+				slog.String("server", serverName),
+				slog.Int("tools", len(graphTools)),
+				slog.Int("tool_count", chatRT.ToolCount()))
+		}
+		mcpUC.SetToolChangeHook(refreshMCPServerTools)
+
+		// Chat path: load enabled servers at boot; later changes use the same
+		// per-server refresh hook. The FLOW path uses LIVE flowMCPSource.
 		if servers, err := mcpUC.ListEnabled(rootCtx); err == nil {
-			var mcpTools []aiopstoolsbase.BaseTool
 			for _, srv := range servers {
 				connCtx, cancel := context.WithTimeout(rootCtx, 15*time.Second)
 				cli, berr := mcpUC.BuildClient(connCtx, srv)
@@ -2191,17 +2214,11 @@ func main() {
 					log.Warn("mcp: connect failed, skipping server", slog.String("server", srv.Name), slog.Any("err", berr))
 					continue
 				}
-				for _, mt := range mtools {
-					mcpTools = append(mcpTools, aiopstoolsdec.Wrap(
-						aiopstools.NewMCPTool(srv.Name, mt.Name, mt.Description, mt.InputSchema, srv.Trusted, mcpCaller, mcpProposer, log),
-						mcpDeps))
-				}
+				refreshMCPServerTools(rootCtx, srv.Name, srv, mtools)
 				log.Info("mcp: server connected", slog.String("server", srv.Name), slog.Int("tools", len(mtools)), slog.Bool("trusted", srv.Trusted))
 			}
-			if len(mcpTools) > 0 {
-				chatRT.AppendToolBag(mcpTools)
-				log.Info("mcp tools bolted onto chat runtime bag", slog.Int("mcp_tool_count", len(mcpTools)), slog.Int("tool_count", chatRT.ToolCount()))
-			}
+		} else {
+			log.Warn("mcp: list enabled servers failed", slog.Any("err", err))
 		}
 	}
 	if secretbox.KeyIsWeak() {

@@ -550,6 +550,39 @@ func TestRuntime_ToolCountAndNames(t *testing.T) {
 	}
 }
 
+func TestRuntime_ReplaceToolsByNamePrefix(t *testing.T) {
+	sess := &model.Session{ID: "s1", UserID: 7}
+	rt, err := NewRuntime(Config{
+		Sessions:  newMemSessions(sess),
+		ChatModel: newScriptedChatModel(),
+		ToolBag: []basetool.BaseTool{
+			&fakeTool{name: "query_promql", schema: `{"type":"object"}`},
+			&fakeTool{name: "mcp__github__old_search", schema: `{"type":"object"}`},
+			&fakeTool{name: "mcp__grafana__query", schema: `{"type":"object"}`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+
+	rt.ReplaceToolsByNamePrefix("mcp__github__", []basetool.BaseTool{
+		&fakeTool{name: "mcp__github__code_search", schema: `{"type":"object"}`},
+	})
+	names := rt.ToolNames(context.Background())
+	got := map[string]bool{}
+	for _, name := range names {
+		got[name] = true
+	}
+	for _, want := range []string{"query_promql", "mcp__github__code_search", "mcp__grafana__query"} {
+		if !got[want] {
+			t.Errorf("ToolNames missing %q: %v", want, names)
+		}
+	}
+	if got["mcp__github__old_search"] {
+		t.Errorf("stale MCP tool remained in runtime: %v", names)
+	}
+}
+
 // strPtr is a small helper for tool-message content/name pointer
 // fields in the test fixtures below. Inline helpers everywhere bloats
 // the test fixture noise and obscures the assertions.

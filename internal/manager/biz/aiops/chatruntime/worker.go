@@ -558,7 +558,7 @@ func (rt *Runtime) GetWorker(workerID string) (*Worker, bool) {
 // matching Handle()'s "user message lands on disk before the LLM call"
 // invariant — same survival semantics on a graph crash.
 func (rt *Runtime) runWorker(ctx context.Context, agentDef *Agent, sessID, userText, locale string, parentEmit Emit, workerID string) (string, error) {
-	workerTools := filterToolsForAgent(rt.cfg.ToolBag, agentDef, false)
+	workerTools := filterToolsForAgent(rt.toolBagSnapshot(), agentDef, false)
 
 	// Thread the persona-filtered tool view onto ctx so ToolSearch
 	// (which runs inside the worker graph) only returns tools the
