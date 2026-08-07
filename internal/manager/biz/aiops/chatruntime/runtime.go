@@ -273,6 +273,14 @@ type ToolBagProvider interface {
 	AllTools() []basetool.BaseTool
 }
 
+// mutableToolBagProvider is intentionally optional so lightweight test
+// providers remain read-only. The concrete tools.ToolBag implements it and
+// keeps ToolSearch aligned with runtime-discovered MCP tools.
+type mutableToolBagProvider interface {
+	ToolBagProvider
+	ReplaceToolsByNamePrefix(prefix string, replacements []basetool.BaseTool)
+}
+
 // CredentialBinder resolves the vault credential NAMES bound to whichever
 // installed packs ship the given active skills (HLD-017). The marketplace
 // usecase satisfies this structurally. Returns nil when nothing is bound.
@@ -295,6 +303,10 @@ type Runtime struct {
 
 	workersMu sync.Mutex
 	workers   map[string]*Worker
+
+	// toolMu protects cfg.ToolBag, which is updated when an MCP server is
+	// verified, edited, disabled, or deleted while chats are in flight.
+	toolMu sync.RWMutex
 
 	// bag is the unredacted ToolBag handle wired by SetToolBag. nil
 	// when the caller wires the runtime without calling SetToolBag —
@@ -386,6 +398,8 @@ func (rt *Runtime) AppendToolBag(tools []basetool.BaseTool) {
 	if rt == nil || len(tools) == 0 {
 		return
 	}
+	rt.toolMu.Lock()
+	defer rt.toolMu.Unlock()
 	index := map[string]int{}
 	for i, t := range rt.cfg.ToolBag {
 		if t == nil {
@@ -409,6 +423,54 @@ func (rt *Runtime) AppendToolBag(tools []basetool.BaseTool) {
 		}
 		rt.cfg.ToolBag = append(rt.cfg.ToolBag, t)
 	}
+}
+
+// ReplaceToolsByNamePrefix replaces tools in the graph-facing bag whose wire
+// names share prefix. MCP uses one prefix per server, preventing a refresh of
+// one registration from removing tools offered by other servers.
+func (rt *Runtime) ReplaceToolsByNamePrefix(prefix string, replacements []basetool.BaseTool) {
+	if rt == nil || strings.TrimSpace(prefix) == "" {
+		return
+	}
+	rt.toolMu.Lock()
+	defer rt.toolMu.Unlock()
+	next := make([]basetool.BaseTool, 0, len(rt.cfg.ToolBag)+len(replacements))
+	for _, tool := range rt.cfg.ToolBag {
+		if toolNameHasPrefix(tool, prefix) {
+			continue
+		}
+		next = append(next, tool)
+	}
+	rt.cfg.ToolBag = append(next, replacements...)
+}
+
+// ReplaceCatalogToolsByNamePrefix updates the unredacted catalog used by
+// ToolSearch. It is separate from ReplaceToolsByNamePrefix because the graph
+// sees decorated tools while ToolSearch must retain raw schemas.
+func (rt *Runtime) ReplaceCatalogToolsByNamePrefix(prefix string, replacements []basetool.BaseTool) {
+	if rt == nil || strings.TrimSpace(prefix) == "" {
+		return
+	}
+	if bag, ok := rt.bag.(mutableToolBagProvider); ok {
+		bag.ReplaceToolsByNamePrefix(prefix, replacements)
+	}
+}
+
+func (rt *Runtime) toolBagSnapshot() []basetool.BaseTool {
+	if rt == nil {
+		return nil
+	}
+	rt.toolMu.RLock()
+	defer rt.toolMu.RUnlock()
+	return append([]basetool.BaseTool(nil), rt.cfg.ToolBag...)
+}
+
+func toolNameHasPrefix(tool basetool.BaseTool, prefix string) bool {
+	if tool == nil {
+		return false
+	}
+	info, err := tool.Info(context.Background())
+	return err == nil && info != nil && strings.HasPrefix(info.Name, prefix)
 }
 
 // AgentRegistry exposes the registry for narrow read-only callers
@@ -438,7 +500,7 @@ func (rt *Runtime) ToolCount() int {
 	if rt == nil {
 		return 0
 	}
-	return len(rt.cfg.ToolBag)
+	return len(rt.toolBagSnapshot())
 }
 
 // ToolNames returns the resolved tool names (best-effort — Info()
@@ -448,8 +510,9 @@ func (rt *Runtime) ToolNames(ctx context.Context) []string {
 	if rt == nil {
 		return nil
 	}
-	out := make([]string, 0, len(rt.cfg.ToolBag))
-	for _, t := range rt.cfg.ToolBag {
+	tools := rt.toolBagSnapshot()
+	out := make([]string, 0, len(tools))
+	for _, t := range tools {
 		if t == nil {
 			continue
 		}
@@ -555,7 +618,8 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	// the coordinator path now honors it too. Stale agent ids fall back
 	// to the global default with a log line — never crash a session.
 	basePrompt := rt.cfg.BasePrompt
-	sessionToolBag := rt.cfg.ToolBag
+	runtimeToolBag := rt.toolBagSnapshot()
+	sessionToolBag := runtimeToolBag
 	agentReminderForPersona := ""
 	// Coordinator iff session is pinned to "default" or has no
 	// AgentID at all. Specialist personas (= anything else in the
@@ -578,7 +642,7 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	}
 	readOnly := viewerOnly || !writeEnabled
 	if readOnly {
-		sessionToolBag = filterToolsForAgentRole(rt.cfg.ToolBag, nil, isCoordinator, true)
+		sessionToolBag = filterToolsForAgentRole(runtimeToolBag, nil, isCoordinator, true)
 	}
 	// Resolve the active persona. Sessions with no AgentID still
 	// route through the "default" persona — that's where the curated
@@ -601,7 +665,7 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 			// reach for every deep-dive tool itself. The
 			// coordinatorOnlyTools (AgentTool/SendMessage/TaskStop)
 			// survive the strip via isCoordinator=true.
-			sessionToolBag = filterToolsForAgentRole(rt.cfg.ToolBag, persona, isCoordinator, readOnly)
+			sessionToolBag = filterToolsForAgentRole(runtimeToolBag, persona, isCoordinator, readOnly)
 			agentReminderForPersona = persona.CriticalReminder
 		} else if rt.log != nil && personaName != "default" {
 			rt.log.Info("chatruntime: session agent_id not in registry — using default",

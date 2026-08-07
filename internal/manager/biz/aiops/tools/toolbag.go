@@ -36,6 +36,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/ongridio/ongrid/internal/manager/biz/aiops/tools/basetool"
 )
@@ -164,6 +166,7 @@ func CoreToolNames(all []basetool.BaseTool) []string {
 // deferral is off (the bag is already flat) so callers can chain
 // WithExtra without triggering accidental dual-listing.
 type ToolBag struct {
+	mu        sync.RWMutex
 	core      []basetool.BaseTool
 	deferred  []basetool.BaseTool
 	extras    []basetool.BaseTool
@@ -214,6 +217,8 @@ func (b *ToolBag) SchemasForLLM() []basetool.BaseTool {
 	if b == nil {
 		return nil
 	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	if !b.deferring {
 		// Flat: extras may still hold ToolSearch (registered
 		// unconditionally by BuildBaseTools — harmless when
@@ -240,6 +245,8 @@ func (b *ToolBag) AllTools() []basetool.BaseTool {
 	if b == nil {
 		return nil
 	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	out := make([]basetool.BaseTool, 0, len(b.core)+len(b.extras)+len(b.deferred))
 	out = append(out, b.core...)
 	out = append(out, b.extras...)
@@ -255,6 +262,8 @@ func (b *ToolBag) DeferredTools() []basetool.BaseTool {
 	if b == nil {
 		return nil
 	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	out := make([]basetool.BaseTool, 0, len(b.deferred))
 	out = append(out, b.deferred...)
 	return out
@@ -267,6 +276,8 @@ func (b *ToolBag) IsDeferring() bool {
 	if b == nil {
 		return false
 	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	return b.deferring
 }
 
@@ -275,6 +286,8 @@ func (b *ToolBag) Threshold() int {
 	if b == nil {
 		return 0
 	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	return b.threshold
 }
 
@@ -287,6 +300,8 @@ func (b *ToolBag) WithExtra(t basetool.BaseTool) *ToolBag {
 	if b == nil || t == nil {
 		return b
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.extras = append(b.extras, t)
 	return b
 }
@@ -306,6 +321,8 @@ func (b *ToolBag) Append(t basetool.BaseTool) *ToolBag {
 	if b == nil || t == nil {
 		return b
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if !b.deferring {
 		b.core = append(b.core, t)
 		return b
@@ -316,6 +333,40 @@ func (b *ToolBag) Append(t basetool.BaseTool) *ToolBag {
 		b.deferred = append(b.deferred, t)
 	}
 	return b
+}
+
+// ReplaceToolsByNamePrefix replaces the dynamic tools whose wire name begins
+// with prefix. MCP uses one prefix per server, so updating or deleting one
+// registration cannot remove another server's tools. The caller provides the
+// unwrapped tools; this bag remains ToolSearch's authoritative catalog.
+func (b *ToolBag) ReplaceToolsByNamePrefix(prefix string, replacements []basetool.BaseTool) {
+	if b == nil || strings.TrimSpace(prefix) == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	all := make([]basetool.BaseTool, 0, len(b.core)+len(b.deferred)+len(replacements))
+	for _, tool := range append(append([]basetool.BaseTool{}, b.core...), b.deferred...) {
+		if toolNameHasPrefix(tool, prefix) {
+			continue
+		}
+		all = append(all, tool)
+	}
+	all = append(all, replacements...)
+
+	updated := NewToolBag(all, b.threshold)
+	b.core = updated.core
+	b.deferred = updated.deferred
+	b.deferring = updated.deferring
+}
+
+func toolNameHasPrefix(tool basetool.BaseTool, prefix string) bool {
+	if tool == nil {
+		return false
+	}
+	info, err := tool.Info(context.Background())
+	return err == nil && info != nil && strings.HasPrefix(info.Name, prefix)
 }
 
 // ----- redactedTool wrapper -----

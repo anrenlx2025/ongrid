@@ -2,11 +2,16 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	model "github.com/ongridio/ongrid/internal/manager/model/mcp"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
+	"github.com/ongridio/ongrid/internal/pkg/mcpclient"
 )
 
 // fakeRepo is an in-memory Repo for tests (no DB, no network).
@@ -132,6 +137,154 @@ func TestBuildClient_HeaderTemplateExpansion(t *testing.T) {
 	}
 	if got := headers["Authorization"]; got != "Bearer abc" {
 		t.Errorf("Authorization = %q, want %q", got, "Bearer abc")
+	}
+}
+
+func TestUsecase_UpdateAndDeleteNotifyRuntimeCatalog(t *testing.T) {
+	ctx := context.Background()
+	repo := newFakeRepo()
+	u := NewUsecase(repo, fakeSecrets{}, nil)
+	server, err := u.Create(ctx, &model.Server{
+		Name:     "github",
+		Endpoint: "https://example.test/mcp",
+		Enabled:  true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache, err := json.Marshal([]mcpclient.Tool{{Name: "search", InputSchema: json.RawMessage(`{"type":"object"}`)}})
+	if err != nil {
+		t.Fatalf("marshal cache: %v", err)
+	}
+	if err := repo.SetToolsCache(ctx, server.ID, string(cache)); err != nil {
+		t.Fatalf("SetToolsCache: %v", err)
+	}
+
+	type event struct {
+		name    string
+		server  *model.Server
+		toolLen int
+	}
+	var events []event
+	u.SetToolChangeHook(func(_ context.Context, name string, current *model.Server, tools []mcpclient.Tool) {
+		events = append(events, event{name: name, server: current, toolLen: len(tools)})
+	})
+
+	if err := u.Update(ctx, server.ID, &model.Server{Name: server.Name, Endpoint: server.Endpoint, Enabled: true}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(events) != 2 || events[0].server != nil || events[1].server == nil || events[1].toolLen != 1 {
+		t.Fatalf("update events = %#v, want remove then cached replacement", events)
+	}
+
+	if err := u.Delete(ctx, server.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if len(events) != 3 || events[2].name != "github" || events[2].server != nil {
+		t.Fatalf("delete event = %#v, want removal", events)
+	}
+}
+
+func TestUsecase_UpdateChangedConnectionClearsUnverifiedToolCache(t *testing.T) {
+	ctx := context.Background()
+	repo := newFakeRepo()
+	u := NewUsecase(repo, fakeSecrets{}, nil)
+	server, err := u.Create(ctx, &model.Server{
+		Name:     "github",
+		Endpoint: "https://old.example.test/mcp",
+		Enabled:  true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := repo.SetToolsCache(ctx, server.ID, `[{"name":"old_search"}]`); err != nil {
+		t.Fatalf("SetToolsCache: %v", err)
+	}
+	if err := repo.SetStatus(ctx, server.ID, "ok", ""); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+
+	var events int
+	u.SetToolChangeHook(func(_ context.Context, _ string, _ *model.Server, _ []mcpclient.Tool) {
+		events++
+	})
+	if err := u.Update(ctx, server.ID, &model.Server{
+		Name:     server.Name,
+		Endpoint: "https://new.example.test/mcp",
+		Enabled:  true,
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	updated, err := repo.Get(ctx, server.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if updated.ToolsCacheJSON != "" || updated.Status != "" || updated.LastError != "" {
+		t.Fatalf("changed connection retained probe state: %#v", updated)
+	}
+	if events != 1 {
+		t.Fatalf("events = %d, want only stale-prefix removal", events)
+	}
+}
+
+func TestUsecase_TestConnectionPublishesVerifiedTools(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		var request struct {
+			ID     int    `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.Method == "notifications/initialized" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		var result any
+		switch request.Method {
+		case "initialize":
+			result = map[string]any{"protocolVersion": mcpclient.ProtocolVersion}
+		case "tools/list":
+			result = map[string]any{"tools": []map[string]any{{
+				"name": "search", "description": "search docs", "inputSchema": map[string]any{"type": "object"},
+			}}}
+		default:
+			http.Error(w, "unexpected method", http.StatusBadRequest)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result}); err != nil {
+			t.Fatalf("write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	repo := newFakeRepo()
+	u := NewUsecase(repo, fakeSecrets{}, nil)
+	registered, err := u.Create(ctx, &model.Server{Name: "docs", Endpoint: server.URL, Enabled: true})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var published []mcpclient.Tool
+	u.SetToolChangeHook(func(_ context.Context, name string, current *model.Server, tools []mcpclient.Tool) {
+		if name != "docs" || current == nil {
+			t.Fatalf("unexpected hook target: name=%q server=%#v", name, current)
+		}
+		published = tools
+	})
+
+	tools, err := u.TestConnection(ctx, registered.ID)
+	if err != nil {
+		t.Fatalf("TestConnection: %v", err)
+	}
+	if len(tools) != 1 || len(published) != 1 || published[0].Name != "search" {
+		t.Fatalf("verified=%v published=%v, want one search tool", tools, published)
 	}
 }
 
