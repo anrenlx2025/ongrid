@@ -44,6 +44,18 @@ func TestQueryTraceQLTool_TagMode(t *testing.T) {
 	}
 }
 
+func TestQueryTraceQLTool_DeviceScope(t *testing.T) {
+	tq := &fakeTraceQuerier{resp: &tracequery.SearchResult{Traces: json.RawMessage("[]")}}
+	tool := NewQueryTraceQLTool(tq, nil)
+
+	if _, err := tool.InvokableRun(context.Background(), `{"device_id":24,"query":"{ resource.service.name = \"web\" }"}`); err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	if got, want := tq.got.Query, `{ resource.device_id = "24" && resource.service.name = "web" }`; got != want {
+		t.Errorf("Query = %q, want %q", got, want)
+	}
+}
+
 func TestQueryTraceQLTool_RequiresAFilter(t *testing.T) {
 	tool := NewQueryTraceQLTool(&fakeTraceQuerier{}, nil)
 	if _, err := tool.InvokableRun(context.Background(), `{}`); err == nil {

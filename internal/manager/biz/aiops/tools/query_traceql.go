@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,7 +21,10 @@ const ToolNameQueryTraceQL = "query_traceql"
 // don't pin down which request is slow.
 const QueryTraceQLDescription = "Run a TraceQL search against Tempo. " +
 	"Use this to find traces by service / operation / latency / status. " +
+	"When a named device has no numeric ID, call query_devices once first; then pass its stable device_id instead of guessing trace attributes. " +
 	"Returns trace summaries (id, service, root span name, duration, span count)."
+
+var traceQLDeviceIDMatcher = regexp.MustCompile(`(?i)\bresource\.device_id\s*(=|!=|=~|!~)\s*"([^"]*)"`)
 
 // QueryTraceQLSchema is the JSON Schema of the tool's argument object.
 // query may be empty when service/operation/duration filters are supplied —
@@ -30,6 +35,11 @@ var QueryTraceQLSchema = json.RawMessage(`{
     "query": {
       "type": "string",
       "description": "TraceQL expression. May be empty if service/operation/duration filters are given."
+    },
+    "device_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional stable Device ID. The backend injects resource.device_id into TraceQL and rejects a conflicting selector."
     },
     "service": {
       "type": "string",
@@ -66,14 +76,106 @@ var QueryTraceQLSchema = json.RawMessage(`{
 
 // QueryTraceQLArgs is the typed form of QueryTraceQLSchema.
 type QueryTraceQLArgs struct {
-	Query       string `json:"query,omitempty"`
-	Service     string `json:"service,omitempty"`
-	Operation   string `json:"operation,omitempty"`
-	Start       string `json:"start,omitempty"`
-	End         string `json:"end,omitempty"`
-	Limit       int    `json:"limit,omitempty"`
-	MinDuration string `json:"min_duration,omitempty"`
-	MaxDuration string `json:"max_duration,omitempty"`
+	Query       string  `json:"query,omitempty"`
+	DeviceID    *uint64 `json:"device_id,omitempty"`
+	Service     string  `json:"service,omitempty"`
+	Operation   string  `json:"operation,omitempty"`
+	Start       string  `json:"start,omitempty"`
+	End         string  `json:"end,omitempty"`
+	Limit       int     `json:"limit,omitempty"`
+	MinDuration string  `json:"min_duration,omitempty"`
+	MaxDuration string  `json:"max_duration,omitempty"`
+}
+
+// scopeTraceQLToDevice injects the stable host identity into the first
+// TraceQL spanset. device_id is an OTLP resource attribute, not a span
+// attribute, so keeping this at resource scope avoids cross-host matches.
+func scopeTraceQLToDevice(query string, deviceID uint64) (string, error) {
+	if deviceID == 0 {
+		return query, nil
+	}
+	trimmed := strings.TrimSpace(query)
+	if !strings.HasPrefix(trimmed, "{") {
+		return "", fmt.Errorf("query_traceql: device_id requires a TraceQL spanset")
+	}
+	selectorEnd, ok := traceQLSpanSetEnd(trimmed)
+	if !ok {
+		return "", fmt.Errorf("query_traceql: device_id requires a valid TraceQL spanset")
+	}
+	selector := trimmed[1:selectorEnd]
+	matches := traceQLDeviceIDMatcher.FindAllStringSubmatch(selector, -1)
+	if len(matches) > 0 {
+		want := strconv.FormatUint(deviceID, 10)
+		for _, match := range matches {
+			if match[1] != "=" || match[2] != want {
+				return "", fmt.Errorf("query_traceql: device_id conflicts with the TraceQL selector")
+			}
+		}
+		return trimmed, nil
+	}
+	predicate := `resource.device_id = "` + strconv.FormatUint(deviceID, 10) + `"`
+	if strings.TrimSpace(selector) == "" {
+		return "{ " + predicate + " }" + trimmed[selectorEnd+1:], nil
+	}
+	return "{ " + predicate + " && " + strings.TrimSpace(selector) + " }" + trimmed[selectorEnd+1:], nil
+}
+
+func traceQLSpanSetEnd(query string) (int, bool) {
+	inQuote := false
+	escaped := false
+	for i := 1; i < len(query); i++ {
+		switch query[i] {
+		case '\\':
+			if inQuote {
+				escaped = !escaped
+			}
+		case '"':
+			if !escaped {
+				inQuote = !inQuote
+			}
+			escaped = false
+		case '}':
+			if !inQuote {
+				return i, true
+			}
+		default:
+			escaped = false
+		}
+	}
+	return 0, false
+}
+
+func traceQLSearchFilters(in QueryTraceQLArgs) (string, map[string]string, error) {
+	if in.DeviceID != nil && *in.DeviceID == 0 {
+		return "", nil, fmt.Errorf("query_traceql: device_id must be greater than zero")
+	}
+	if in.DeviceID == nil {
+		tags := map[string]string{}
+		if in.Service != "" {
+			tags["service.name"] = in.Service
+		}
+		if in.Operation != "" {
+			tags["name"] = in.Operation
+		}
+		if len(tags) == 0 {
+			tags = nil
+		}
+		return in.Query, tags, nil
+	}
+
+	if strings.TrimSpace(in.Query) != "" {
+		query, err := scopeTraceQLToDevice(in.Query, *in.DeviceID)
+		return query, nil, err
+	}
+
+	predicates := []string{`resource.device_id = "` + strconv.FormatUint(*in.DeviceID, 10) + `"`}
+	if in.Service != "" {
+		predicates = append(predicates, "resource.service.name = "+strconv.Quote(in.Service))
+	}
+	if in.Operation != "" {
+		predicates = append(predicates, "name = "+strconv.Quote(in.Operation))
+	}
+	return "{ " + strings.Join(predicates, " && ") + " }", nil, nil
 }
 
 // queryTraceqlCallTimeout caps how long a single dispatch may wait. Mirrors
@@ -97,6 +199,7 @@ func (r *Registry) executeQueryTraceQL(ctx context.Context, args json.RawMessage
 	// operation), or a duration bound. An unfiltered Tempo search is too
 	// expensive to dump on the LLM by accident.
 	if strings.TrimSpace(in.Query) == "" &&
+		in.DeviceID == nil &&
 		strings.TrimSpace(in.Service) == "" &&
 		strings.TrimSpace(in.Operation) == "" &&
 		strings.TrimSpace(in.MinDuration) == "" &&
@@ -144,24 +247,16 @@ func (r *Registry) executeQueryTraceQL(ctx context.Context, args json.RawMessage
 		maxDur = d
 	}
 
-	tags := map[string]string{}
-	if in.Service != "" {
-		tags["service.name"] = in.Service
-	}
-	if in.Operation != "" {
-		tags["name"] = in.Operation
-	}
-	// Tempo's SearchTraces ignores Tags when Query is set — that's the
-	// desired precedence. We forward both and let the client choose.
-	if len(tags) == 0 {
-		tags = nil
+	query, tags, err := traceQLSearchFilters(in)
+	if err != nil {
+		return ExecuteResult{}, err
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, queryTraceqlCallTimeout)
 	defer cancel()
 
 	res, err := r.traceQuery.SearchTraces(callCtx, tracequery.SearchOptions{
-		Query:       in.Query,
+		Query:       query,
 		Tags:        tags,
 		Limit:       limit,
 		Start:       start,

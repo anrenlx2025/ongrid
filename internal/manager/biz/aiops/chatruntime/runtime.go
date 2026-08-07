@@ -1319,13 +1319,13 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 			continue
 		}
 		if logIntent && !traceIntent && !topologyIntent && !hostIntent {
-			if info.Name == "query_logql" {
+			if info.Name == "query_logql" || info.Name == "query_devices" {
 				out = append(out, t)
 			}
 			continue
 		}
 		if traceIntent && !logIntent && !topologyIntent && !hostIntent {
-			if info.Name == "query_traceql" {
+			if info.Name == "query_traceql" || info.Name == "query_devices" {
 				out = append(out, t)
 			}
 			continue
@@ -1338,7 +1338,7 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 		}
 		if logIntent && !hostIntent {
 			switch info.Name {
-			case "query_devices", "query_edges", "get_edge_summary", "get_host_load", "get_host_processes", "rank_edges", "find_outlier_edges":
+			case "query_edges", "get_edge_summary", "get_host_load", "get_host_processes", "rank_edges", "find_outlier_edges":
 				continue
 			}
 		}

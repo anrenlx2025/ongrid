@@ -260,14 +260,16 @@ func (r *Registry) executeCorrelateIncident(ctx context.Context, args json.RawMe
 		bundle.Skipped["log_panel"] = "log query client not configured"
 	}
 
-	// Trace panel — needs Tempo + a service label on the incident.
+	// Trace panel — needs Tempo + a service label on the incident. Keep a
+	// device-scoped incident on that device: service names are commonly shared
+	// by workloads across hosts.
 	if r.traceQuery != nil {
 		service := strings.TrimSpace(labels["service"])
 		if service == "" {
 			service = strings.TrimSpace(annotations["service"])
 		}
 		if service != "" {
-			entries, err := r.queryTracePanel(callCtx, service, wStart, wEnd)
+			entries, err := r.queryTracePanel(callCtx, service, inc.DeviceID, wStart, wEnd)
 			if err != nil {
 				bundle.Skipped["trace_panel"] = "tempo query failed: " + err.Error()
 			} else {
@@ -487,13 +489,21 @@ func truncateLine(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// queryTracePanel runs a Tempo search filtered by service.name plus a
-// status / latency hint so we surface the kind of traces the LLM cares
+// queryTracePanel runs a Tempo search filtered by service.name and, when the
+// incident has one, its stable device ID. This prevents a shared service name
+// from pulling traces from another host into the incident bundle.
+//
+// The status / latency hint helps surface the kind of traces the LLM cares
 // about. Tempo's response is OTLP-shaped; we lift the few fields that
 // matter and drop the rest to keep the bundle tight.
-func (r *Registry) queryTracePanel(ctx context.Context, service string, start, end time.Time) ([]traceEntry, error) {
+func (r *Registry) queryTracePanel(ctx context.Context, service string, deviceID *uint64, start, end time.Time) ([]traceEntry, error) {
+	query, tags, err := traceQLSearchFilters(QueryTraceQLArgs{DeviceID: deviceID, Service: service})
+	if err != nil {
+		return nil, fmt.Errorf("build incident trace filter: %w", err)
+	}
 	res, err := r.traceQuery.SearchTraces(ctx, tracequery.SearchOptions{
-		Tags:  map[string]string{"service.name": service},
+		Query: query,
+		Tags:  tags,
 		Limit: 20,
 		Start: start,
 		End:   end,

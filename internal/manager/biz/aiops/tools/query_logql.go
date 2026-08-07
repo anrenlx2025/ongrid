@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,8 +18,12 @@ const ToolNameQueryLogQL = "query_logql"
 // Phrased to push the model toward this tool whenever raw log inspection
 // is needed beyond what the metric-side tools can express.
 const QueryLogQLDescription = "Run a LogQL range query against Loki. " +
-	"Use this to investigate log patterns, error counts, or pipe into per-edge filters. " +
+	"Use this to investigate log patterns, error counts, or filter a specific device. " +
+	"When device_id is set, start with {} plus a line filter because the backend injects the device selector; do not guess job/hostname/instance labels. " +
+	"Once a scoped query returns matching lines, summarize them unless the user asks for a narrower follow-up. " +
 	"Returns the raw Loki response (streams or matrix)."
+
+var logQLDeviceIDMatcher = regexp.MustCompile(`(?:^|,)\s*device_id\s*(=|!=|=~|!~)\s*"([^"]*)"`)
 
 func parseLogQLTime(value string, fallback time.Time) (time.Time, error) {
 	value = strings.TrimSpace(value)
@@ -48,7 +53,12 @@ var QueryLogQLSchema = json.RawMessage(`{
   "properties": {
     "query": {
       "type": "string",
-      "description": "LogQL expression. Example: \"{edge_id=\\\"1\\\"} |= \\\"error\\\"\"."
+      "description": "LogQL expression. Example: \"{unit=\\\"nginx.service\\\"} |= \\\"error\\\"\"."
+    },
+    "device_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional stable Device ID. The backend injects device_id into the LogQL stream selector and rejects a conflicting selector."
     },
     "start": {
       "type": "string",
@@ -75,11 +85,69 @@ var QueryLogQLSchema = json.RawMessage(`{
 
 // QueryLogQLArgs is the typed form of QueryLogQLSchema.
 type QueryLogQLArgs struct {
-	Query     string `json:"query"`
-	Start     string `json:"start,omitempty"`
-	End       string `json:"end,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
-	Direction string `json:"direction,omitempty"`
+	Query     string  `json:"query"`
+	DeviceID  *uint64 `json:"device_id,omitempty"`
+	Start     string  `json:"start,omitempty"`
+	End       string  `json:"end,omitempty"`
+	Limit     int     `json:"limit,omitempty"`
+	Direction string  `json:"direction,omitempty"`
+}
+
+// scopeLogQLToDevice injects a stable device label into the leading stream
+// selector. LogQL's stream selector is the only safe place for this scope.
+func scopeLogQLToDevice(query string, deviceID uint64) (string, error) {
+	if deviceID == 0 {
+		return query, nil
+	}
+	trimmed := strings.TrimSpace(query)
+	if !strings.HasPrefix(trimmed, "{") {
+		return "", fmt.Errorf("query_logql: device_id requires a LogQL stream selector")
+	}
+	selectorEnd, ok := logQLStreamSelectorEnd(trimmed)
+	if !ok {
+		return "", fmt.Errorf("query_logql: device_id requires a valid LogQL stream selector")
+	}
+	selector := trimmed[1:selectorEnd]
+	matches := logQLDeviceIDMatcher.FindAllStringSubmatch(selector, -1)
+	if len(matches) > 0 {
+		want := fmt.Sprintf("%d", deviceID)
+		for _, match := range matches {
+			if match[1] != "=" || match[2] != want {
+				return "", fmt.Errorf("query_logql: device_id conflicts with the LogQL selector")
+			}
+		}
+		return trimmed, nil
+	}
+	prefix := `{device_id="` + fmt.Sprintf("%d", deviceID) + `"`
+	if strings.TrimSpace(selector) != "" {
+		prefix += `,` + selector
+	}
+	return prefix + `}` + trimmed[selectorEnd+1:], nil
+}
+
+func logQLStreamSelectorEnd(query string) (int, bool) {
+	inQuote := false
+	escaped := false
+	for i := 1; i < len(query); i++ {
+		switch query[i] {
+		case '\\':
+			if inQuote {
+				escaped = !escaped
+			}
+		case '"':
+			if !escaped {
+				inQuote = !inQuote
+			}
+			escaped = false
+		case '}':
+			if !inQuote {
+				return i, true
+			}
+		default:
+			escaped = false
+		}
+	}
+	return 0, false
 }
 
 // queryLogqlCallTimeout caps how long a single dispatch may wait. Mirrors
@@ -100,6 +168,17 @@ func (r *Registry) executeQueryLogQL(ctx context.Context, args json.RawMessage) 
 	}
 	if strings.TrimSpace(in.Query) == "" {
 		return ExecuteResult{}, fmt.Errorf("query_logql: query required")
+	}
+	query := in.Query
+	if in.DeviceID != nil {
+		if *in.DeviceID == 0 {
+			return ExecuteResult{}, fmt.Errorf("query_logql: device_id must be greater than zero")
+		}
+		var err error
+		query, err = scopeLogQLToDevice(in.Query, *in.DeviceID)
+		if err != nil {
+			return ExecuteResult{}, err
+		}
 	}
 
 	end := time.Now()
@@ -136,7 +215,7 @@ func (r *Registry) executeQueryLogQL(ctx context.Context, args json.RawMessage) 
 	defer cancel()
 
 	res, err := r.logQuery.QueryRange(callCtx, logquery.QueryRangeOptions{
-		Query:     in.Query,
+		Query:     query,
 		Start:     start,
 		End:       end,
 		Limit:     limit,

@@ -213,7 +213,7 @@ func (t *CorrelateIncidentTool) singleCorrelate(ctx context.Context, incidentID 
 			service = strings.TrimSpace(annotations["service"])
 		}
 		if service != "" {
-			entries, err := t.queryTracePanel(callCtx, service, wStart, wEnd)
+			entries, err := t.queryTracePanel(callCtx, service, inc.DeviceID, wStart, wEnd)
 			if err != nil {
 				bundle.Skipped["trace_panel"] = "tempo query failed: " + err.Error()
 			} else {
@@ -350,10 +350,16 @@ func (t *CorrelateIncidentTool) queryLogPanel(ctx context.Context, edgeID uint64
 	return entries, nil
 }
 
-// queryTracePanel mirrors Registry.queryTracePanel.
-func (t *CorrelateIncidentTool) queryTracePanel(ctx context.Context, service string, start, end time.Time) ([]traceEntry, error) {
+// queryTracePanel mirrors Registry.queryTracePanel, including device scope
+// for incidents whose service names are shared across hosts.
+func (t *CorrelateIncidentTool) queryTracePanel(ctx context.Context, service string, deviceID *uint64, start, end time.Time) ([]traceEntry, error) {
+	query, tags, err := traceQLSearchFilters(QueryTraceQLArgs{DeviceID: deviceID, Service: service})
+	if err != nil {
+		return nil, fmt.Errorf("build incident trace filter: %w", err)
+	}
 	res, err := t.traceQuery.SearchTraces(ctx, tracequery.SearchOptions{
-		Tags:  map[string]string{"service.name": service},
+		Query: query,
+		Tags:  tags,
 		Limit: 20,
 		Start: start,
 		End:   end,

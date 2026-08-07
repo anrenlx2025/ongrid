@@ -440,8 +440,24 @@ func TestFilterCoordinatorToolsForIntent_HidesTopologyAndHostForPureLogs(t *test
 	if !containsName(names, "query_logql") {
 		t.Fatalf("query_logql should remain visible: %v", names)
 	}
-	if containsName(names, "query_traceql") || containsName(names, "get_topology") || containsName(names, "host_bash") || containsName(names, "query_devices") {
-		t.Fatalf("pure log intent should hide detours, got %v", names)
+	if containsName(names, "query_traceql") || containsName(names, "get_topology") || containsName(names, "host_bash") || !containsName(names, "query_devices") {
+		t.Fatalf("pure log intent should keep device resolution but hide unrelated detours, got %v", names)
+	}
+}
+
+func TestFilterCoordinatorToolsForIntent_KeepsDeviceResolutionForPureTraces(t *testing.T) {
+	bag := []basetool.BaseTool{
+		&fakeTool{name: "query_logql", schema: `{"type":"object"}`},
+		&fakeTool{name: "query_traceql", schema: `{"type":"object"}`},
+		&fakeTool{name: "query_devices", schema: `{"type":"object"}`},
+		&fakeTool{name: "get_topology", schema: `{"type":"object"}`},
+	}
+	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "查询 VM-4-17-ubuntu 最近 1 小时的慢链路", true))
+	if !containsName(names, "query_traceql") || !containsName(names, "query_devices") {
+		t.Fatalf("trace intent should keep trace query and device resolution, got %v", names)
+	}
+	if containsName(names, "query_logql") || containsName(names, "get_topology") {
+		t.Fatalf("trace intent should hide unrelated tools, got %v", names)
 	}
 }
 

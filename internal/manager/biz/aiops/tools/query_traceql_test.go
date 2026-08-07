@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -92,6 +93,51 @@ func TestQueryTraceQL_TagMode(t *testing.T) {
 	}
 	if tq.got.Limit != 50 {
 		t.Errorf("default limit = %d, want 50", tq.got.Limit)
+	}
+}
+
+func TestQueryTraceQL_DeviceScope(t *testing.T) {
+	tq := &fakeTraceQuerier{resp: &tracequery.SearchResult{Traces: json.RawMessage("[]")}}
+	uc := edgebiz.NewUsecase(newFakeEdgeRepo(), nil, nil, slog.Default())
+	reg := NewRegistry(&fakeCaller{}, uc, nil, nil, nil, tq, nil, slog.Default())
+
+	args := json.RawMessage(`{"device_id":24,"service":"web","operation":"GET /api"}`)
+	if _, err := reg.Invoke(context.Background(), ToolNameQueryTraceQL, args); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if got, want := tq.got.Query, `{ resource.device_id = "24" && resource.service.name = "web" && name = "GET /api" }`; got != want {
+		t.Errorf("Query = %q, want %q", got, want)
+	}
+	if tq.got.Tags != nil {
+		t.Errorf("Tags = %#v, want nil when device scope builds TraceQL", tq.got.Tags)
+	}
+}
+
+func TestQueryTraceQL_DeviceScopeRejectsConflict(t *testing.T) {
+	tq := &fakeTraceQuerier{resp: &tracequery.SearchResult{Traces: json.RawMessage("[]")}}
+	uc := edgebiz.NewUsecase(newFakeEdgeRepo(), nil, nil, slog.Default())
+	reg := NewRegistry(&fakeCaller{}, uc, nil, nil, nil, tq, nil, slog.Default())
+
+	_, err := reg.Invoke(context.Background(), ToolNameQueryTraceQL,
+		json.RawMessage(`{"device_id":24,"query":"{ resource.device_id = \"7\" }"}`))
+	if err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("Invoke error = %v, want device scope conflict", err)
+	}
+}
+
+func TestRegistry_QueryTracePanelScopesToDevice(t *testing.T) {
+	tq := &fakeTraceQuerier{resp: &tracequery.SearchResult{Traces: json.RawMessage("[]")}}
+	reg := &Registry{traceQuery: tq}
+	deviceID := uint64(24)
+
+	if _, err := reg.queryTracePanel(context.Background(), "web", &deviceID, time.Now().Add(-time.Hour), time.Now()); err != nil {
+		t.Fatalf("queryTracePanel: %v", err)
+	}
+	if got, want := tq.got.Query, `{ resource.device_id = "24" && resource.service.name = "web" }`; got != want {
+		t.Errorf("Query = %q, want %q", got, want)
+	}
+	if tq.got.Tags != nil {
+		t.Errorf("Tags = %#v, want nil for device-scoped TraceQL", tq.got.Tags)
 	}
 }
 

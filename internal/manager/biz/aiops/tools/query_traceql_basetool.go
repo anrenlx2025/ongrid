@@ -57,6 +57,7 @@ func (t *QueryTraceQLTool) InvokableRun(ctx context.Context, argsJSON string, _ 
 	}
 
 	if strings.TrimSpace(in.Query) == "" &&
+		in.DeviceID == nil &&
 		strings.TrimSpace(in.Service) == "" &&
 		strings.TrimSpace(in.Operation) == "" &&
 		strings.TrimSpace(in.MinDuration) == "" &&
@@ -104,22 +105,16 @@ func (t *QueryTraceQLTool) InvokableRun(ctx context.Context, argsJSON string, _ 
 		maxDur = d
 	}
 
-	tags := map[string]string{}
-	if in.Service != "" {
-		tags["service.name"] = in.Service
-	}
-	if in.Operation != "" {
-		tags["name"] = in.Operation
-	}
-	if len(tags) == 0 {
-		tags = nil
+	query, tags, err := traceQLSearchFilters(in)
+	if err != nil {
+		return "", err
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, queryTraceqlCallTimeout)
 	defer cancel()
 
 	res, err := t.traceQuery.SearchTraces(callCtx, tracequery.SearchOptions{
-		Query:       in.Query,
+		Query:       query,
 		Tags:        tags,
 		Limit:       limit,
 		Start:       start,
