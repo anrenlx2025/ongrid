@@ -37,6 +37,7 @@ const userAgent = {
 };
 
 const listURL = '/api/v1/skills';
+const mcpListURL = '/api/v1/mcp/servers';
 
 describe('AgentsPage', () => {
   beforeEach(() => {
@@ -47,6 +48,7 @@ describe('AgentsPage', () => {
       ),
       // AgentEditor 打开时拉工具列表
       http.get(listURL, () => HttpResponse.json({ items: [], total: 0 })),
+      http.get(mcpListURL, () => HttpResponse.json({ items: [], total: 0 })),
     );
   });
 
@@ -82,5 +84,29 @@ describe('AgentsPage', () => {
     expect(within(dialog).getByText(/你是数据库专家/)).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: /编辑/ })).toBeInTheDocument();
     expect(within(dialog).queryByRole('button', { name: /复制为自定义助理/ })).not.toBeInTheDocument();
+  });
+
+  it('新建助理可选择已测试且启用的 MCP 工具', async () => {
+    server.use(
+      http.get(listURL, () => HttpResponse.json({ items: [{ key: 'query_promql' }], total: 1 })),
+      http.get(mcpListURL, () => HttpResponse.json({
+        items: [{
+          ID: 1,
+          Name: 'demo-operations',
+          Enabled: true,
+          ToolsCacheJSON: JSON.stringify([{ name: 'get_service_health', description: 'Read health.' }]),
+        }],
+        total: 1,
+      })),
+    );
+
+    render(
+      <MemoryRouter>
+        <AgentsPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /新建助理/ }));
+    expect(await screen.findByText('mcp__demo_operations__get_service_health')).toBeInTheDocument();
   });
 });

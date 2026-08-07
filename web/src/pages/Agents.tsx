@@ -43,7 +43,8 @@ import {
   type AgentSummary,
   type UserAgentInput,
 } from '@/api/agents';
-import { listSkills, type SkillSummary } from '@/api/skills';
+import { listSkills } from '@/api/skills';
+import { listMcpServers, parseToolsCache } from '@/api/mcp';
 import { createSession } from '@/api/chat';
 import { ApiError } from '@/api/client';
 import { tr as trInline, useI18n } from '@/i18n/locale';
@@ -609,12 +610,36 @@ function AgentEditor({
   const [allowedTools, setAllowedTools] = useState<string[]>(base?.tools ?? []);
   const [model, setModel] = useState(base?.model ?? '');
   const [maxTurns, setMaxTurns] = useState<number>(base?.max_turns ?? 0);
-  const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [toolOptions, setToolOptions] = useState<ToolOption[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    void listSkills().then((r) => setSkills(r.items ?? [])).catch(() => setSkills([]));
+    let cancelled = false;
+    void Promise.allSettled([listSkills(), listMcpServers()])
+      .then(([skillsResult, serversResult]) => {
+        if (cancelled) return;
+        const skills = skillsResult.status === 'fulfilled' ? skillsResult.value.items ?? [] : [];
+        const servers = serversResult.status === 'fulfilled' ? serversResult.value : [];
+        const builtin = skills.map((skill) => ({
+          key: skill.key,
+          source: 'skill' as const,
+        }));
+        const mcp = servers
+          .filter((server) => server.enabled)
+          .flatMap((server) =>
+            parseToolsCache(server.tools_cache).map((tool) => ({
+              key: mcpToolWireName(server.name, tool.name),
+              source: 'mcp' as const,
+              server: server.name,
+              description: tool.description,
+            })),
+          );
+        setToolOptions([...builtin, ...mcp]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const submit = async () => {
@@ -740,30 +765,31 @@ function AgentEditor({
           <div className="text-[11px] text-zinc-500 mb-1">
             {tr('留空 = 继承 coordinator 的全部工具', 'Empty = inherit all coordinator tools')}
           </div>
-          {skills.length === 0 ? (
+          {toolOptions.length === 0 ? (
             <div className="text-[11px] text-zinc-500">{tr('加载工具列表中…', 'Loading tool list…')}</div>
           ) : (
             <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-950/40 p-2">
               <div className="grid grid-cols-2 gap-1">
-                {skills.map((s) => (
+                {toolOptions.map((tool) => (
                   <label
-                    key={s.key}
-                    className="flex items-center gap-1.5 rounded px-1.5 py-1 text-[11px] hover:bg-zinc-900/60"
+                    key={tool.key}
+                    title={tool.description}
+                    className="flex min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-[11px] hover:bg-zinc-900/60"
                   >
                     <input
                       type="checkbox"
-                      checked={allowedTools.includes(s.key)}
-                      onChange={() => toggleTool(s.key)}
+                      checked={allowedTools.includes(tool.key)}
+                      onChange={() => toggleTool(tool.key)}
                       className="h-3 w-3 accent-indigo-500"
                     />
-                    <span className="font-mono">{s.key}</span>
+                    <span className="truncate font-mono">{tool.key}</span>
                   </label>
                 ))}
               </div>
             </div>
           )}
           <div className="mt-1 text-[11px] text-zinc-500">
-            {tr(`已选 ${allowedTools.length} / ${skills.length}`, `Selected ${allowedTools.length} / ${skills.length}`)}
+            {tr(`已选 ${allowedTools.length} / ${toolOptions.length}`, `Selected ${allowedTools.length} / ${toolOptions.length}`)}
           </div>
         </Field>
 
@@ -792,6 +818,29 @@ function AgentEditor({
       </div>
     </Modal>
   );
+}
+
+type ToolOption = {
+  key: string;
+  source: 'skill' | 'mcp';
+  server?: string;
+  description?: string;
+};
+
+// Must mirror tools.MCPToolName: persisted server and MCP tool names do not
+// have an API-level wire-name field, while agent allowlists use that name.
+function mcpToolWireName(server: string, tool: string): string {
+  return `mcp__${sanitizeMcpSegment(server)}__${sanitizeMcpSegment(tool)}`;
+}
+
+function sanitizeMcpSegment(value: string): string {
+  let out = '';
+  for (const char of value.trim()) {
+    if (/^[a-z0-9]$/.test(char)) out += char;
+    else if (/^[A-Z]$/.test(char)) out += char.toLowerCase();
+    else out += '_';
+  }
+  return out;
 }
 
 function Field({
