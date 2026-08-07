@@ -294,23 +294,22 @@ function Header({
             <RefreshCw size={12} className={cn(refreshing && 'animate-spin')} />
             {tr('刷新', 'Refresh')}
           </button>
-          <a
-            href={grafanaUrl ?? '#'}
-            target="_blank"
-            rel="noopener noreferrer"
+          <button
+            type="button"
+            disabled={!grafanaUrl}
             aria-disabled={!grafanaUrl}
+            onClick={() => {
+              if (grafanaUrl) void openObservabilityUrl(grafanaUrl);
+            }}
             className={cn(
               'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs',
               grafanaUrl
                 ? 'border-indigo-500/40 bg-indigo-500/10 text-indigo-200 hover:bg-indigo-500/20'
-                : 'pointer-events-none border-zinc-800 bg-zinc-900/50 text-zinc-600'
+                : 'cursor-not-allowed border-zinc-800 bg-zinc-900/50 text-zinc-600'
             )}
-            onClick={(e) => {
-              if (!grafanaUrl) e.preventDefault();
-            }}
           >
             <ExternalLink size={12} /> {tr('在 Grafana 查看相关指标', 'View related metrics in Grafana')}
-          </a>
+          </button>
           {lokiUrl && (
             <button
               type="button"
