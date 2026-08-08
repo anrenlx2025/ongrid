@@ -86,11 +86,15 @@ export function Sidebar() {
 	const [upgradeHiddenResources, setUpgradeHiddenResources] = useState<string[]>([]);
 	useEffect(() => {
 		if (localStorage.getItem('sidebar.infrastructure.upgrade.v0_10')) return;
-		void listSettings('ui').then((out) => {
-			const row = out.items.find((item) => item.key === 'infrastructure_menu_upgrade_v0_10');
-			if (!row) return;
-			try { const parsed = JSON.parse(row.value) as { hidden?: string[] }; setUpgradeHiddenResources(parsed.hidden ?? []); } catch { /* ignore malformed upgrade seed */ }
-		});
+		void listSettings('ui')
+			.then((out) => {
+				const row = out.items.find((item) => item.key === 'infrastructure_menu_upgrade_v0_10');
+				if (!row) return;
+				try { const parsed = JSON.parse(row.value) as { hidden?: string[] }; setUpgradeHiddenResources(parsed.hidden ?? []); } catch { /* ignore malformed upgrade seed */ }
+			})
+			.catch(() => {
+				// This upgrade seed is optional. Keep the default navigation when it is unavailable.
+			});
 	}, []);
   // Version + upgrade check moved to Settings → About / Upgrade (the brand mark
   // stays clean), so the sidebar no longer fetches version here.

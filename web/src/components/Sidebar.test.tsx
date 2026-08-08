@@ -22,6 +22,7 @@ describe('Sidebar configurable sections', () => {
     useUi.getState().setSidebarCollapsed(false);
     server.use(
       http.get('/api/v1/chat/sessions', () => HttpResponse.json({ items: [], total: 0 })),
+      http.get('/api/v1/system-settings', () => HttpResponse.json({ items: [], total: 0 })),
     );
   });
 
@@ -68,5 +69,19 @@ describe('Sidebar configurable sections', () => {
     expect(screen.getByRole('button', { name: '管理基础设施菜单' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '管理监控告警菜单' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '管理日常菜单' })).toBeInTheDocument();
+  });
+
+  it('可选升级菜单设置读取失败时仍保持默认导航', async () => {
+    server.use(
+      http.get('/api/v1/system-settings', () => HttpResponse.error()),
+    );
+
+    render(
+      <MemoryRouter>
+        <Sidebar />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole('link', { name: '网络设备' })).toBeInTheDocument();
   });
 });
