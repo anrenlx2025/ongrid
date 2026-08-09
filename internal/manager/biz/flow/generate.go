@@ -99,7 +99,7 @@ func genSystemPrompt(tools []ToolMeta) string {
 - llm: 一次 LLM，config {"system":"...","prompt":"...支持{{}}"}；输出 {{nodes.<id>.output.answer}}。要结构化加 "output_schema":<JSONSchema>，则可引 output.structured.<字段>
 - agent: 自主 agent，config {"persona":"default","instruction":"...支持{{}}"}；输出 output.answer
 - condition: 分支，config {"expr":"{{nodes.x.output.structured.severity}} == \"critical\""}；两个出口端口 true/false，对应边写 "sourcePort":"true" 或 "false"
-- notify: 发送单向通知，使用“设置 → 通知”中配置的通知渠道（飞书 / 钉钉 / 企业微信 / Slack / Telegram / Webhook），config {"channel_ids":[1],"title":"...","message":"...支持{{}}"}。告警、巡检结果和工作流输出需要投递时一律使用此节点；不要创建 send_im_message 工具节点。双向 IM 机器人只用于接收并回复会话，不是工作流投递目标。
+- notify: 发送单向通知，使用“设置 → 通知”中配置的通知渠道（飞书 / 钉钉 / 企业微信 / Slack / Telegram / Webhook），config {"channel_ids":[1],"title":"...","message":"...支持{{}}"}。告警、巡检结果和工作流输出需要投递时一律使用此节点；不要创建 send_notification 或 send_im_message 工具节点。双向 IM 机器人只用于接收并回复会话，不是工作流投递目标。
 - http_request: HTTP，config {"method":"GET","url":"...","headers":{},"body":""}；输出 output.status / output.body
 - transform: 字段映射，config {"fields":{"<新名>":"{{...}}"}}
 - set: 变量，config {"name":"...","value":"{{...}}"}
@@ -135,12 +135,12 @@ func genSystemPrompt(tools []ToolMeta) string {
 	return b.String()
 }
 
-// allowedWorkflowTool keeps chat-only tools out of AI-generated graphs even
-// when a catalog implementation accidentally exposes one. send_im_message is
-// a legacy chat tool backed by notification channels; workflow alert delivery
-// must use the dedicated notify node so its target is explicit and editable.
+// allowedWorkflowTool keeps notification tools out of AI-generated graphs even
+// when a catalog implementation accidentally exposes one. Workflow alert
+// delivery must use the dedicated notify node so its target is explicit and
+// editable.
 func allowedWorkflowTool(name string) bool {
-	return name != "send_im_message"
+	return name != "send_notification" && name != "send_im_message"
 }
 
 func requiredParams(schema json.RawMessage) []string {

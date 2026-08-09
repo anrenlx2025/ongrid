@@ -10,43 +10,48 @@ import (
 	"github.com/ongridio/ongrid/internal/manager/biz/aiops/tools/basetool"
 )
 
-// ToolNameSendIMMessage is the wire name.
+// ToolNameSendNotification is the assistant-facing wire name. It sends a
+// one-way notification through a configured notification channel.
+const ToolNameSendNotification = "send_notification"
+
+// ToolNameSendIMMessage is the former wire name. It is accepted only when
+// executing a workflow saved by an older release; new assistants and new
+// workflow definitions must use the notification semantics instead.
 const ToolNameSendIMMessage = "send_im_message"
 
-// IMChannel is one configured outbound notification channel (设置→通知),
-// narrowed to what the tool needs to resolve + report it. The name remains
-// for wire compatibility with the legacy send_im_message tool.
-type IMChannel struct {
+// NotificationChannel is one configured outbound notification channel,
+// narrowed to what the tool needs to resolve + report it.
+type NotificationChannel struct {
 	ID   uint64
 	Name string
 	Kind string
 }
 
-// IMSender is the seam to the notification-channel store + notify router. Implemented in
+// NotificationSender is the seam to the notification-channel store + notify router. Implemented in
 // cmd/main.go over the alert channel repo + notify.Router (same
 // BuildSenderFromChannel path the alert notifier / flow notify node use), so
 // this package stays decoupled from the data layer.
-type IMSender interface {
-	ListIMChannels(ctx context.Context) ([]IMChannel, error)
-	SendIM(ctx context.Context, channelID uint64, title, text string) error
+type NotificationSender interface {
+	ListNotificationChannels(ctx context.Context) ([]NotificationChannel, error)
+	SendNotification(ctx context.Context, channelID uint64, title, text string) error
 }
 
-// SendIMMessageTool lets the assistant proactively push a message through a
-// configured notification channel. It does not target a two-way IM session.
-type SendIMMessageTool struct {
-	sender IMSender
+// SendNotificationTool lets the assistant proactively push a message through
+// a configured notification channel. It does not target a two-way IM session.
+type SendNotificationTool struct {
+	sender NotificationSender
 	log    *slog.Logger
 }
 
-// NewSendIMMessageTool builds the tool.
-func NewSendIMMessageTool(s IMSender, log *slog.Logger) *SendIMMessageTool {
+// NewSendNotificationTool builds the assistant-facing notification tool.
+func NewSendNotificationTool(s NotificationSender, log *slog.Logger) *SendNotificationTool {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &SendIMMessageTool{sender: s, log: log}
+	return &SendNotificationTool{sender: s, log: log}
 }
 
-var sendIMMessageSchema = json.RawMessage(`{
+var sendNotificationSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "channel": { "type": "string", "description": "目标通知渠道名——设置→通知中配置的飞书 / 钉钉 / Slack / Telegram 等渠道名称；不是双向 IM 机器人。" },
@@ -56,22 +61,22 @@ var sendIMMessageSchema = json.RawMessage(`{
   "required": ["channel", "text"]
 }`)
 
-const sendIMMessageWhenToUse = "用户要把某个结论 / 通知主动推送到飞书、钉钉等群里时用（比如\"把这段诊断发到运维群\"）。" +
+const sendNotificationWhenToUse = "用户要把某个结论 / 通知主动推送到飞书、钉钉等群里时用（比如\"把这段诊断发到运维群\"）。" +
 	"channel 传“设置→通知”中配置的通知渠道名；它不是双向 IM 机器人。"
 
 // Info — Class=write: it sends a real message (side-effecting, viewers can't
 // use it) but it is not destructive.
-func (t *SendIMMessageTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
+func (t *SendNotificationTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 	return &basetool.ToolInfo{
-		Name:        ToolNameSendIMMessage,
+		Name:        ToolNameSendNotification,
 		Description: "Send a message through a configured notification channel (Feishu / DingTalk / Slack / Telegram / WeCom). Pass the channel name from Settings → Notifications; this does not target a two-way IM bot.",
-		WhenToUse:   sendIMMessageWhenToUse,
-		Parameters:  sendIMMessageSchema,
+		WhenToUse:   sendNotificationWhenToUse,
+		Parameters:  sendNotificationSchema,
 		Class:       "write",
 	}, nil
 }
 
-type sendIMMessageArgs struct {
+type sendNotificationArgs struct {
 	Channel string `json:"channel"`
 	Text    string `json:"text"`
 	Title   string `json:"title"`
@@ -79,23 +84,23 @@ type sendIMMessageArgs struct {
 
 // InvokableRun resolves the channel by name (case-insensitive) and sends.
 // A miss returns the available channel names so the LLM can self-correct.
-func (t *SendIMMessageTool) InvokableRun(ctx context.Context, argsJSON string, _ ...basetool.InvokeOption) (string, error) {
+func (t *SendNotificationTool) InvokableRun(ctx context.Context, argsJSON string, _ ...basetool.InvokeOption) (string, error) {
 	if t.sender == nil {
-		return "", fmt.Errorf("send_im_message: channels not wired")
+		return "", fmt.Errorf("send_notification: channels not wired")
 	}
-	var in sendIMMessageArgs
+	var in sendNotificationArgs
 	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil {
-		return "", fmt.Errorf("send_im_message: bad args: %w", err)
+		return "", fmt.Errorf("send_notification: bad args: %w", err)
 	}
 	in.Channel = strings.TrimSpace(in.Channel)
 	if in.Channel == "" || strings.TrimSpace(in.Text) == "" {
-		return "", fmt.Errorf("send_im_message: channel and text are required")
+		return "", fmt.Errorf("send_notification: channel and text are required")
 	}
-	chans, err := t.sender.ListIMChannels(ctx)
+	chans, err := t.sender.ListNotificationChannels(ctx)
 	if err != nil {
-		return "", fmt.Errorf("send_im_message: list channels: %w", err)
+		return "", fmt.Errorf("send_notification: list channels: %w", err)
 	}
-	var target *IMChannel
+	var target *NotificationChannel
 	for i := range chans {
 		if strings.EqualFold(chans[i].Name, in.Channel) {
 			target = &chans[i]
@@ -108,14 +113,14 @@ func (t *SendIMMessageTool) InvokableRun(ctx context.Context, argsJSON string, _
 			names = append(names, c.Name)
 		}
 		if len(names) == 0 {
-			return "", fmt.Errorf("send_im_message: no notification channels configured. Add one under Settings → Notifications first")
+			return "", fmt.Errorf("send_notification: no notification channels configured. Add one under Settings → Notifications first")
 		}
-		return "", fmt.Errorf("send_im_message: channel %q not found. Available channels: %s", in.Channel, strings.Join(names, ", "))
+		return "", fmt.Errorf("send_notification: channel %q not found. Available channels: %s", in.Channel, strings.Join(names, ", "))
 	}
-	if err := t.sender.SendIM(ctx, target.ID, in.Title, in.Text); err != nil {
-		return "", fmt.Errorf("send_im_message: send to %q: %w", target.Name, err)
+	if err := t.sender.SendNotification(ctx, target.ID, in.Title, in.Text); err != nil {
+		return "", fmt.Errorf("send_notification: send to %q: %w", target.Name, err)
 	}
-	t.log.Info("send_im_message: sent", slog.String("channel", target.Name), slog.String("kind", target.Kind))
+	t.log.Info("send_notification: sent", slog.String("channel", target.Name), slog.String("kind", target.Kind))
 	out, _ := json.Marshal(map[string]any{"sent": true, "channel": target.Name, "kind": target.Kind})
 	return string(out), nil
 }

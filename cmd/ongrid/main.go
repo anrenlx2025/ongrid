@@ -2093,10 +2093,10 @@ func main() {
 		proposals: mutatingProposalRepo,
 		approvals: approvalUC,
 	})
-	// send_im_message: the assistant can proactively push to a configured
+	// send_notification: the assistant can proactively push to a configured
 	// channel (飞书/钉钉/…), reusing the same BuildSenderFromChannel path the
 	// alert notifier + flow notify node use.
-	toolsReg.SetIMSender(imSenderShim{channels: alertRepo, router: notifyRouter})
+	toolsReg.SetNotificationSender(notificationSenderShim{channels: alertRepo, router: notifyRouter})
 	// serve_page: the assistant can host a generated HTML report at an
 	// internal /pages/<token> URL. Pages live on the persistent volume; the
 	// route is registered on the mux below.
@@ -2132,8 +2132,8 @@ func main() {
 			Limiter:    aiopstoolsdec.NewTokenBucketLimiter(0),
 			Registerer: reg,
 		}
-		// serve_page + send_im_message are registered AFTER buildAIOpsRuntime
-		// (SetPageStore / SetIMSender above), so like cloud_bash they're absent
+		// serve_page + send_notification are registered AFTER buildAIOpsRuntime
+		// (SetPageStore / SetNotificationSender above), so like cloud_bash they're absent
 		// from the startup chat bag and the LLM can't call them in chat — the
 		// exact reason the agent "never triggered serve_page". They're instant
 		// (no human-approval gate), so a short timeout, not cbDeps' 31m ceiling.
@@ -2149,9 +2149,9 @@ func main() {
 			aiopstoolsdec.Wrap(aiopstools.NewCloudBashTool(cloudBashProposerShim{uc: approvalUC}, log), cbDeps),
 			aiopstoolsdec.Wrap(aiopstools.NewInstallSkillTool(installSkillProposerShim{uc: approvalUC}, log), cbDeps),
 			aiopstoolsdec.Wrap(aiopstools.NewServePageTool(pageStore, log), quickDeps),
-			aiopstoolsdec.Wrap(aiopstools.NewSendIMMessageTool(imSenderShim{channels: alertRepo, router: notifyRouter}, log), quickDeps),
+			aiopstoolsdec.Wrap(aiopstools.NewSendNotificationTool(notificationSenderShim{channels: alertRepo, router: notifyRouter}, log), quickDeps),
 		})
-		log.Info("host_bash + cloud_bash + install_skill + serve_page + send_im_message bolted onto chat runtime bag", slog.Int("tool_count", chatRT.ToolCount()))
+		log.Info("host_bash + cloud_bash + install_skill + serve_page + send_notification bolted onto chat runtime bag", slog.Int("tool_count", chatRT.ToolCount()))
 		// HLD-017: wire the active-skill → bound-credentials resolver so
 		// cloud_bash auto-injects the credentials an active skill was bound
 		// to at install time (design-time binding, no run-time choice).
@@ -3481,7 +3481,7 @@ var coordinatorExtraToolNames = []string{
 	"cloud_bash",
 	"install_skill",
 	"serve_page",
-	"send_im_message",
+	aiopstools.ToolNameSendNotification,
 	// Network inventory remains specialty/schema-redacted. These entries only
 	// let explicit network-asset requests discover it through ToolSearch.
 	aiopstools.ToolSearchToolName,
@@ -4533,6 +4533,10 @@ func (s *flowToolInvoker) mergeBag(bag *aiopstools.ToolBag) {
 }
 
 func (s *flowToolInvoker) InvokeTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+	// v0.12 and older saved generic workflow nodes under send_im_message. The
+	// assistant-facing name is now send_notification; preserve old graphs while
+	// keeping both notification tool names out of the workflow palette.
+	name = canonicalWorkflowToolName(name)
 	// Tag any artifact a tool node produces (serve_page) as workflow-sourced so
 	// the operations UI's 生成来源 column distinguishes it from chat-generated pages.
 	ctx = aiopstoolsbase.WithArtifactSource(ctx, aiopstoolsbase.ArtifactSourceWorkflow)
@@ -4564,6 +4568,13 @@ func (s *flowToolInvoker) InvokeTool(ctx context.Context, name string, args json
 		return nil, err
 	}
 	return json.RawMessage(out), nil
+}
+
+func canonicalWorkflowToolName(name string) string {
+	if name == aiopstools.ToolNameSendIMMessage {
+		return aiopstools.ToolNameSendNotification
+	}
+	return name
 }
 
 // coerceArgsToSchema nudges resolved tool args toward the types their JSON
@@ -4835,30 +4846,31 @@ func (s flowLLMRunner) RunLLM(ctx context.Context, system, user string) (string,
 	return resp.Assistant.Content, nil
 }
 
-// imSenderShim implements aiopstools.IMSender (the send_im_message tool seam)
+// notificationSenderShim implements aiopstools.NotificationSender (the
+// send_notification tool seam)
 // over the alert channel store + notify router — same BuildSenderFromChannel
 // path the alert notifier / flow notify node use.
-type imSenderShim struct {
+type notificationSenderShim struct {
 	channels *manageralertdata.Repo
 	router   *notify.Router
 }
 
-func (s imSenderShim) ListIMChannels(ctx context.Context) ([]aiopstools.IMChannel, error) {
+func (s notificationSenderShim) ListNotificationChannels(ctx context.Context) ([]aiopstools.NotificationChannel, error) {
 	chs, err := s.channels.ListChannels(ctx, managerbizalert.ChannelFilter{})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]aiopstools.IMChannel, 0, len(chs))
+	out := make([]aiopstools.NotificationChannel, 0, len(chs))
 	for _, ch := range chs {
 		if !ch.Enabled {
 			continue
 		}
-		out = append(out, aiopstools.IMChannel{ID: ch.ID, Name: ch.Name, Kind: ch.ChannelType})
+		out = append(out, aiopstools.NotificationChannel{ID: ch.ID, Name: ch.Name, Kind: ch.ChannelType})
 	}
 	return out, nil
 }
 
-func (s imSenderShim) SendIM(ctx context.Context, channelID uint64, title, text string) error {
+func (s notificationSenderShim) SendNotification(ctx context.Context, channelID uint64, title, text string) error {
 	ch, err := s.channels.GetChannelByID(ctx, channelID)
 	if err != nil {
 		return fmt.Errorf("channel %d: not found", channelID)
@@ -5215,10 +5227,11 @@ func isFlowRuntimeUnsupportedTool(name string) bool {
 }
 
 // isWorkflowPaletteExcludedTool identifies tools that must not be offered as
-// new generic workflow nodes. The legacy send_im_message tool remains runtime
-// compatible for saved graphs, but new alert workflows must use notify.
+// new generic workflow nodes. Notification delivery belongs to the dedicated
+// notify node; the legacy send_im_message name remains runtime-compatible for
+// saved graphs only.
 func isWorkflowPaletteExcludedTool(name string) bool {
-	return isFlowRuntimeUnsupportedTool(name) || name == aiopstools.ToolNameSendIMMessage
+	return isFlowRuntimeUnsupportedTool(name) || name == aiopstools.ToolNameSendNotification || name == aiopstools.ToolNameSendIMMessage
 }
 
 // categorizeFlowTool buckets a tool name into a palette group. Explicit

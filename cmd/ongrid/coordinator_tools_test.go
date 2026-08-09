@@ -123,12 +123,27 @@ func TestExecuteK8sActionIsExcludedFromWorkflowToolPalette(t *testing.T) {
 	}
 }
 
-func TestSendIMMessageIsExcludedFromWorkflowToolPalette(t *testing.T) {
-	if !isWorkflowPaletteExcludedTool(aiopstools.ToolNameSendIMMessage) {
-		t.Fatalf("%q must be excluded from workflow paths; workflows use the dedicated notify node", aiopstools.ToolNameSendIMMessage)
+func TestNotificationToolsAreExcludedFromWorkflowToolPalette(t *testing.T) {
+	for _, name := range []string{aiopstools.ToolNameSendNotification, aiopstools.ToolNameSendIMMessage} {
+		if !isWorkflowPaletteExcludedTool(name) {
+			t.Fatalf("%q must be excluded from workflow paths; workflows use the dedicated notify node", name)
+		}
+		if isFlowRuntimeUnsupportedTool(name) {
+			t.Fatalf("%q must remain runnable for saved workflows", name)
+		}
 	}
-	if isFlowRuntimeUnsupportedTool(aiopstools.ToolNameSendIMMessage) {
-		t.Fatalf("%q must remain runnable for saved workflows", aiopstools.ToolNameSendIMMessage)
+	if got := canonicalWorkflowToolName(aiopstools.ToolNameSendIMMessage); got != aiopstools.ToolNameSendNotification {
+		t.Fatalf("legacy workflow tool name = %q, want %q", got, aiopstools.ToolNameSendNotification)
+	}
+	if got := canonicalWorkflowToolName("query_promql"); got != "query_promql" {
+		t.Fatalf("unrelated workflow tool name = %q, want unchanged", got)
+	}
+	coordinator := buildCoordinatorToolNames(nil)
+	if !containsString(coordinator, aiopstools.ToolNameSendNotification) {
+		t.Fatalf("coordinator roster missing %q", aiopstools.ToolNameSendNotification)
+	}
+	if containsString(coordinator, aiopstools.ToolNameSendIMMessage) {
+		t.Fatalf("coordinator roster must not expose legacy %q", aiopstools.ToolNameSendIMMessage)
 	}
 }
 
