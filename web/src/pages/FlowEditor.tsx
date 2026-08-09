@@ -88,7 +88,7 @@ const NODE_META: Record<FlowNodeType, { icon: typeof Bot; color: string; zh: str
 // Core nodes the user hand-places. `tool` is excluded here — tool nodes
 // come from the searchable catalog (every registered BaseTool), added via
 // addNode('tool', {config:{tool}}).
-const BASE_NODE_TYPES: FlowNodeType[] = ['trigger.manual', 'trigger.alert_fired', 'trigger.cron', 'agent', 'llm', 'condition', 'notify', 'set', 'transform', 'http_request'];
+const BASE_NODE_TYPES: FlowNodeType[] = ['trigger.manual', 'trigger.alert_fired', 'trigger.cron', 'agent', 'llm', 'condition', 'set', 'transform', 'http_request'];
 
 
 type CanvasData = {
@@ -308,7 +308,7 @@ function configFieldsFor(type: FlowNodeType, nodeTypes: Record<string, NodeType>
 // (every registered type except `tool`, which has its own catalog),
 // grouped by kind. Falls back to the static BASE_NODE_TYPES list.
 function baseNodeTypesFrom(nodeTypes: Record<string, NodeType>): FlowNodeType[] {
-  const all = Object.values(nodeTypes).filter((nt) => nt.type !== 'tool');
+  const all = Object.values(nodeTypes).filter((nt) => nt.type !== 'tool' && !nt.palette_hidden);
   if (all.length === 0) return BASE_NODE_TYPES;
   const kindOrder = ['trigger', 'ai', 'action', 'control', 'flow', 'data'];
   return all

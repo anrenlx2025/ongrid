@@ -233,6 +233,9 @@ func (r *Registry) BuildBaseTools() *ToolBag {
 	if r.notificationSender != nil {
 		out = append(out, NewSendNotificationTool(r.notificationSender, r.log))
 	}
+	if r.imMessageSender != nil {
+		out = append(out, NewSendIMMessageTool(r.imMessageSender, r.log))
+	}
 	if r.pageStore != nil {
 		out = append(out, NewServePageTool(r.pageStore, r.log))
 	}

@@ -48,15 +48,16 @@ type ConfigFieldSpec struct {
 // engine, validator, AND frontend all derive from it (the frontend keeps
 // only a type→icon/color visual map).
 type NodeSpec struct {
-	Type         string            // wire type ("tool" / "llm" / "transform")
-	Kind         NodeKind          // structural behaviour
-	Category     string            // palette grouping (intent-based)
-	LabelZh      string            // display name (zh)
-	LabelEn      string            // display name (en)
-	Ports        []string          // control output ports (default [next]; condition=[true,false])
-	ConfigFields []ConfigFieldSpec // config form fields (empty for tool: args come from BaseTool schema)
-	OutputShape  []string          // static output field paths ([] when dynamic, e.g. transform/agent)
-	Execute      ExecuteFunc       // executor
+	Type          string            // wire type ("tool" / "llm" / "transform")
+	Kind          NodeKind          // structural behaviour
+	Category      string            // palette grouping (intent-based)
+	LabelZh       string            // display name (zh)
+	LabelEn       string            // display name (en)
+	Ports         []string          // control output ports (default [next]; condition=[true,false])
+	ConfigFields  []ConfigFieldSpec // config form fields (empty for tool: args come from BaseTool schema)
+	OutputShape   []string          // static output field paths ([] when dynamic, e.g. transform/agent)
+	PaletteHidden bool              // legacy executor kept for saved graphs, but not offered for new flows
+	Execute       ExecuteFunc       // executor
 }
 
 var nodeRegistry = map[string]*NodeSpec{}
@@ -151,7 +152,7 @@ func registerBuiltins() {
 		Execute:     execCondition,
 	})
 	RegisterNode(&NodeSpec{
-		Type: NodeNotify, Kind: KindAction, Category: "action",
+		Type: NodeNotify, Kind: KindAction, Category: "action", PaletteHidden: true,
 		LabelZh: "通知", LabelEn: "Notification",
 		ConfigFields: []ConfigFieldSpec{
 			{Key: "channel_ids", LabelZh: "通知渠道 ID（JSON 数组；设置 → 通知）", LabelEn: "Notification channel IDs (JSON array; Settings → Notifications)", Kind: "json", Placeholder: "[1]"},

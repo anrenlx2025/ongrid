@@ -13,7 +13,7 @@
 // Everything maps to a real group. "other" is reserved for cross-cutting write
 // or specialty tools that do not belong to a read-oriented built-in group.
 
-export const SKILL_ORDER = ['observe', 'device', 'fleet', 'incident', 'knowledge', 'cloud', 'other'] as const;
+export const SKILL_ORDER = ['observe', 'device', 'fleet', 'incident', 'knowledge', 'messaging', 'cloud', 'other'] as const;
 
 const SKILL_LABEL: Record<string, { zh: string; en: string }> = {
   observe: { zh: '观测', en: 'Observability' },
@@ -21,6 +21,7 @@ const SKILL_LABEL: Record<string, { zh: string; en: string }> = {
   fleet: { zh: '集群与拓扑', en: 'Fleet & topology' },
   incident: { zh: '告警与事件', en: 'Incidents & alerts' },
   knowledge: { zh: '知识', en: 'Knowledge' },
+  messaging: { zh: '消息', en: 'Messaging' },
   cloud: { zh: '云端管理', en: 'Cloud' },
   other: { zh: '其他', en: 'Other' },
 };
@@ -48,6 +49,7 @@ export function toolGroupKey(wire: string, source?: string, category?: string): 
   if (wire.includes('topology') || wire === 'query_devices' || wire === 'query_edges' || wire === 'rank_edges' || wire === 'find_outlier_edges' || wire === 'get_edge_summary') return 'fleet';
   if (wire.includes('incident') || wire.includes('alert') || wire === 'query_change_events') return 'incident';
   if (wire === 'query_knowledge' || wire === 'web_search' || wire.includes('source')) return 'knowledge';
+  if (wire === 'send_notification' || wire === 'send_im_message') return 'messaging';
   if (wire === 'cloud_bash' || wire.includes('config_change')) return 'cloud';
   return 'other';
 }

@@ -122,6 +122,9 @@ type Registry struct {
 	// notificationSender wires send_notification to the channel store + notify
 	// router. Set post-construction; nil → the tool is not registered.
 	notificationSender NotificationSender
+	// imMessageSender wires send_im_message to the IM Bridge's direct group
+	// sender. It is separate from notificationSender by design.
+	imMessageSender IMMessageSender
 
 	// pageStore wires serve_page to the hosted-pages store + static route.
 	// Set post-construction (cmd/main.go); nil → serve_page NOT registered.
@@ -155,6 +158,9 @@ func (r *Registry) SetK8sActionProposer(p K8sActionProposer) {
 
 // SetNotificationSender wires send_notification → channel store + notify router.
 func (r *Registry) SetNotificationSender(s NotificationSender) { r.notificationSender = s }
+
+// SetIMMessageSender wires send_im_message to an IM Bridge group sender.
+func (r *Registry) SetIMMessageSender(s IMMessageSender) { r.imMessageSender = s }
 
 // SetPageStore wires serve_page → hosted-pages store.
 func (r *Registry) SetPageStore(p PageStore) { r.pageStore = p }

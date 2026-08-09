@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,23 @@ func TestSendNotificationTool_InfoUsesNotificationWireName(t *testing.T) {
 	}
 }
 
+func TestSendIMMessageTool_WhenGroupIDMissing_ReturnsValidationError(t *testing.T) {
+	tool := NewSendIMMessageTool(fakeIMMessageSender{}, nil)
+	_, err := tool.InvokableRun(context.Background(), `{"im_app_id":1,"text":"hello"}`)
+	if err == nil || !strings.Contains(err.Error(), "group_id") {
+		t.Fatalf("error = %v, want group_id validation", err)
+	}
+}
+
+func TestSendIMMessageTool_WhenSenderFails_WrapsError(t *testing.T) {
+	want := errors.New("app disabled")
+	tool := NewSendIMMessageTool(fakeIMMessageSender{err: want}, nil)
+	_, err := tool.InvokableRun(context.Background(), `{"im_app_id":1,"group_id":"oc_123","text":"hello"}`)
+	if !errors.Is(err, want) {
+		t.Fatalf("error = %v, want wrapped %v", err, want)
+	}
+}
+
 type fakeNotificationSender struct{}
 
 func (fakeNotificationSender) ListNotificationChannels(context.Context) ([]NotificationChannel, error) {
@@ -34,4 +52,10 @@ func (fakeNotificationSender) ListNotificationChannels(context.Context) ([]Notif
 }
 func (fakeNotificationSender) SendNotification(context.Context, uint64, string, string) error {
 	return nil
+}
+
+type fakeIMMessageSender struct{ err error }
+
+func (f fakeIMMessageSender) SendIMGroupMessage(context.Context, uint64, string, string) error {
+	return f.err
 }
