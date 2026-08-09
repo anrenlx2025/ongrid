@@ -79,7 +79,7 @@ const NODE_META: Record<FlowNodeType, { icon: typeof Bot; color: string; zh: str
   llm: { icon: Sparkles, color: 'text-violet-400', zh: 'LLM（单次）', en: 'LLM' },
   tool: { icon: Wrench, color: 'text-sky-400', zh: '工具', en: 'Tool' },
   condition: { icon: GitBranch, color: 'text-amber-400', zh: '条件', en: 'Condition' },
-  notify: { icon: Bell, color: 'text-rose-400', zh: '发送通知', en: 'Send notification' },
+  notify: { icon: Bell, color: 'text-rose-400', zh: '通知', en: 'Notification' },
   set: { icon: Variable, color: 'text-zinc-400', zh: '变量', en: 'Set var' },
   transform: { icon: Shuffle, color: 'text-teal-400', zh: '字段映射', en: 'Edit Fields' },
   http_request: { icon: Globe, color: 'text-cyan-400', zh: 'HTTP 请求', en: 'HTTP Request' },
