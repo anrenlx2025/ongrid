@@ -31,6 +31,14 @@ fi
 # shellcheck source=public-url.sh
 source "$PUBLIC_URL_LIB"
 
+DATA_PERMISSIONS_LIB="$SCRIPT_DIR/data-permissions.sh"
+if [[ ! -r "$DATA_PERMISSIONS_LIB" ]]; then
+    log_error "install package is missing data-permissions.sh"
+    exit 1
+fi
+# shellcheck source=data-permissions.sh
+source "$DATA_PERMISSIONS_LIB"
+
 generate_self_signed_tls_cert() {
     local cert_dir="$1"
     local cert_file="$cert_dir/tls.crt"
@@ -183,6 +191,19 @@ on_error() {
     log_error "check output above; fix and re-run sudo ./install.sh"
 }
 trap 'on_error $LINENO' ERR
+
+# The ERR trap above does not fire on `exit 1` or on SIGINT / SIGTERM, so those
+# paths used to leak the Edge staging tree. On the success path EDGE_STAGE_DIR is
+# already cleared after the atomic swap, which makes this a no-op.
+cleanup_edge_stage() {
+    if [[ -n "${EDGE_STAGE_DIR:-}" && -d "${EDGE_STAGE_DIR:-}" ]]; then
+        rm -rf "$EDGE_STAGE_DIR"
+    fi
+    return 0
+}
+trap cleanup_edge_stage EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Prompt for a value with a 30s countdown; on timeout or empty Enter return
 # the default ($2). Mirrors liaison's read_with_countdown: all UI goes to
@@ -362,6 +383,12 @@ docker compose version >/dev/null 2>&1 || { log_error "docker compose v2 not fou
 INSTALL_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
 log_info "install dir: $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
+# A restrictive root umask makes mkdir produce 0750 or 0700 here. Containers are
+# unaffected (bind-mount sources are resolved by the daemon, not through this
+# directory), but non-root tooling on the host needs to be able to enter it, and
+# install / upgrade must agree on the mode.
+chmod 755 "$INSTALL_DIR"
+ongrid_prune_stale_edge_staging "$INSTALL_DIR"
 
 EDGE_ASSET_VERSION=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION" 2>/dev/null || true)
 if [[ -z "$EDGE_ASSET_VERSION" ]]; then
@@ -386,7 +413,11 @@ prepare_edge_assets() {
         log_error "could not make the prepared Edge directory readable by Manager and nginx containers"
         return 1
     fi
-    cp -rf "$source_dir/." "$EDGE_STAGE_DIR/"
+    ongrid_with_shared_asset_umask cp -rf "$source_dir/." "$EDGE_STAGE_DIR/"
+    # This only reaches the *.sh that exist right now. The tarball, its .sha256
+    # and the .ref files are written further below by fetch-edge-assets.sh and
+    # build-edge-bundle.sh, which is why those need the relaxed umask rather
+    # than a chmod here.
     find "$EDGE_STAGE_DIR" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
     [[ -r "$EDGE_STAGE_DIR/edge-assets-lib.sh" ]] || {
         log_error "package is missing edge/edge-assets-lib.sh"
@@ -412,8 +443,8 @@ prepare_edge_assets() {
             return 1
         }
         log_info "prefetching checksum-verified Edge assets from CNB for $resolved_targets"
-        "$EDGE_STAGE_DIR/fetch-edge-assets.sh" "$EDGE_STAGE_DIR" "$EDGE_ASSET_VERSION" \
-            "${edge_targets[@]}"
+        ongrid_with_shared_asset_umask "$EDGE_STAGE_DIR/fetch-edge-assets.sh" \
+            "$EDGE_STAGE_DIR" "$EDGE_ASSET_VERSION" "${edge_targets[@]}"
     else
         log_info "using complete Edge binaries embedded for $resolved_targets"
         ongrid_validate_embedded_edge_assets "$EDGE_STAGE_DIR" "$resolved_targets" || return 1
@@ -424,7 +455,8 @@ prepare_edge_assets() {
     ongrid_write_edge_artifact_config "$EDGE_STAGE_DIR/edge-artifacts.env" \
         "$deps_tag" "$resolved_targets"
     for target in "${edge_targets[@]}"; do
-        "$EDGE_STAGE_DIR/build-edge-bundle.sh" "$EDGE_STAGE_DIR" "$EDGE_ASSET_VERSION" "$target"
+        ongrid_with_shared_asset_umask "$EDGE_STAGE_DIR/build-edge-bundle.sh" \
+            "$EDGE_STAGE_DIR" "$EDGE_ASSET_VERSION" "$target"
     done
 }
 
@@ -822,6 +854,12 @@ while IFS= read -r image; do
         exit 1
     fi
 done <<<"$RUNTIME_IMAGES"
+
+# Everything the installer writes is in place by now (config files, edge/,
+# searxng/, grafana/, nginx.conf). Normalize before the containers start: the
+# consumers run as non-root with a non-zero gid, so they read these files
+# through the other-permission bits.
+ongrid_normalize_shared_asset_modes "$INSTALL_DIR"
 
 log_info "starting stack: docker compose ${COMPOSE_ARGS[*]} up -d"
 (
