@@ -80,5 +80,9 @@ fi
 tarball="$EDGE_DIR/edge-bundle-$ARCH-$VERSION.tar.gz"
 tar -C "$work" -czf "$tarball" .
 sha256sum "$tarball" | awk '{print $1}' > "$tarball.sha256"
+# Both are created subject to the caller's umask, which lands them at 0640 on a
+# hardened host. nginx workers and the Manager container read them as non-root
+# with a non-zero gid, so they must stay world-readable regardless of caller.
+chmod 0644 "$tarball" "$tarball.sha256"
 
 echo "build-edge-bundle(host): wrote $tarball ($staged file(s))"

@@ -133,5 +133,8 @@ for target in "${TARGETS[@]}"; do
         "$BASE_URL" "$DEPS_TAG" "$deps_name" "$deps_sha" \
         "$BASE_URL" "$VERSION" "$edge_name" "$edge_sha" \
         > "$DEST_DIR/edge-assets-${target}.ref"
+    # Redirection applies the caller's umask, unlike the `install -m 0755` above.
+    # The Manager container reads this file as non-root, so pin it explicitly.
+    chmod 0644 "$DEST_DIR/edge-assets-${target}.ref"
     log "verified and staged $target"
 done
