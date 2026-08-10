@@ -218,7 +218,11 @@ prepare_edge_assets() {
         log_error "could not make the prepared Edge directory readable by Manager and nginx containers"
         return 1
     fi
-    cp -rf "$source_dir/." "$EDGE_STAGE_DIR/"
+    ongrid_with_shared_asset_umask cp -rf "$source_dir/." "$EDGE_STAGE_DIR/"
+    # This only reaches the *.sh that exist right now. The tarball, its .sha256
+    # and the .ref files are written further below by fetch-edge-assets.sh and
+    # build-edge-bundle.sh, which is why those need the relaxed umask rather
+    # than a chmod here.
     find "$EDGE_STAGE_DIR" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
     [[ -r "$EDGE_STAGE_DIR/edge-assets-lib.sh" ]] || {
         log_error "package is missing edge/edge-assets-lib.sh"
@@ -244,8 +248,8 @@ prepare_edge_assets() {
             return 1
         }
         log_info "prefetching checksum-verified Edge assets for $resolved_targets before stopping the old stack"
-        "$EDGE_STAGE_DIR/fetch-edge-assets.sh" "$EDGE_STAGE_DIR" "$NEW_VERSION" \
-            "${edge_targets[@]}"
+        ongrid_with_shared_asset_umask "$EDGE_STAGE_DIR/fetch-edge-assets.sh" \
+            "$EDGE_STAGE_DIR" "$NEW_VERSION" "${edge_targets[@]}"
     else
         log_info "using complete Edge binaries embedded for $resolved_targets"
         ongrid_validate_embedded_edge_assets "$EDGE_STAGE_DIR" "$resolved_targets" || return 1
@@ -256,7 +260,8 @@ prepare_edge_assets() {
     ongrid_write_edge_artifact_config "$EDGE_STAGE_DIR/edge-artifacts.env" \
         "$deps_tag" "$resolved_targets"
     for target in "${edge_targets[@]}"; do
-        "$EDGE_STAGE_DIR/build-edge-bundle.sh" "$EDGE_STAGE_DIR" "$NEW_VERSION" "$target"
+        ongrid_with_shared_asset_umask "$EDGE_STAGE_DIR/build-edge-bundle.sh" \
+            "$EDGE_STAGE_DIR" "$NEW_VERSION" "$target"
     done
 }
 
@@ -276,6 +281,21 @@ on_upgrade_error() {
     log_error "upgrade failed at line $line (exit $exit_code)"
 }
 trap 'on_upgrade_error $LINENO' ERR
+
+# The ERR trap above does not fire on `exit 1` or on SIGINT / SIGTERM. There are
+# five explicit `exit 1` paths between staging the Edge assets and the atomic
+# swap, all of them after the full bundle has been downloaded, so those leaked a
+# ~178 MB tree per attempt. The later `trap - ERR` only clears ERR, leaving this
+# EXIT trap in place; by then EDGE_STAGE_DIR is empty and this is a no-op.
+cleanup_edge_stage() {
+    if [[ -n "${EDGE_STAGE_DIR:-}" && -d "${EDGE_STAGE_DIR:-}" ]]; then
+        rm -rf "$EDGE_STAGE_DIR"
+    fi
+    return 0
+}
+trap cleanup_edge_stage EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 UPGRADE_ARGS=("$@")
 MIGRATE_VOLUMES="${MIGRATE_VOLUMES:-}"
@@ -320,6 +340,12 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 
 log_info "upgrading ongrid at $INSTALL_DIR"
+# Symmetry with install.sh: an install created under a restrictive umask keeps a
+# 0750/0700 install dir, which blocks non-root tooling on the host. Doing it here
+# means the old stack is still running if it fails. The stale-staging prune
+# reclaims trees left by earlier interrupted upgrades.
+chmod 755 "$INSTALL_DIR"
+ongrid_prune_stale_edge_staging "$INSTALL_DIR"
 
 # Determine new version from tarball.
 NEW_VERSION=""
@@ -617,6 +643,11 @@ ensure_tunnel_addr_env
 ensure_host_gateway_env
 
 chmod 600 "$ENV_FILE"
+
+# Refreshed assets are all in place. This is the step that actually repairs an
+# existing install: `cp -f` leaves the mode of an existing destination alone, so
+# config files created under a restrictive umask stay 0640 until chmod'd here.
+ongrid_normalize_shared_asset_modes "$INSTALL_DIR"
 
 # Bring stack back up; gorm AutoMigrate handles schema diff.
 log_info "starting stack with new version"
