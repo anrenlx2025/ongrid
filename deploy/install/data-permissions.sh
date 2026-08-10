@@ -232,3 +232,69 @@ ongrid_repair_data_permissions_or_restore() {
     fi
     return 1
 }
+
+# Run one command with a relaxed umask. Shared assets (config files, the nginx
+# static Edge directory, bundle tarballs and checksums) enter non-root
+# containers as root-owned read-only bind mounts, so they cannot be chown'd and
+# must stay group/other readable. Child processes inherit the umask, so this
+# also covers the tarball and .sha256 that build-edge-bundle.sh writes.
+# Saving and restoring instead of using a subshell keeps the caller's `set -e`
+# and ERR trap semantics intact for the wrapped command.
+ongrid_with_shared_asset_umask() {
+    local previous rc=0
+
+    previous=$(umask)
+    umask 022
+    "$@" || rc=$?
+    umask "$previous"
+    return "$rc"
+}
+
+# Normalize shared-asset modes inside an existing install directory.
+# This is not a belt-and-braces extra: `cp` leaves the mode of an existing
+# destination untouched, so an install created under a restrictive umask keeps
+# its 0640 config files forever, even once the installers relax their own umask.
+# `a+rX` only adds read bits, never write bits, and is idempotent on 0755.
+# The list is enumerated on purpose — recursing over the whole install dir would
+# turn .env (0600, database passwords) and certs/ (0700, TLS key) world-readable.
+ongrid_normalize_shared_asset_modes() {
+    local install_dir="$1" path
+
+    [[ -d "$install_dir" ]] || return 0
+
+    chmod 755 "$install_dir" 2>/dev/null || true
+    for path in \
+        "$install_dir/docker-compose.yml" \
+        "$install_dir"/prometheus*.yml \
+        "$install_dir/loki-config.yaml" \
+        "$install_dir/tempo-config.yaml" \
+        "$install_dir/frontier.yaml" \
+        "$install_dir/nginx.conf" \
+        "$install_dir/VERSION"; do
+        [[ -f "$path" ]] && { chmod 644 "$path" 2>/dev/null || true; }
+    done
+    for path in \
+        "$install_dir/edge" \
+        "$install_dir/searxng" \
+        "$install_dir/grafana" \
+        "$install_dir/prometheus"; do
+        [[ -d "$path" ]] && { chmod -R a+rX "$path" 2>/dev/null || true; }
+    done
+    return 0
+}
+
+# Remove Edge staging / backup directories left behind by an interrupted run.
+# The installers only ever cleaned up on ERR, so `exit 1` paths and SIGINT /
+# SIGTERM leaked a full bundle tree (~178 MB each) into the install directory.
+# Three guards keep this from touching anything else: depth 1 only, an anchored
+# name prefix, and an age floor so a concurrently running installer's staging
+# directory is never removed.
+ongrid_prune_stale_edge_staging() {
+    local install_dir="$1"
+
+    [[ -d "$install_dir" ]] || return 0
+    find "$install_dir" -maxdepth 1 -type d \
+        \( -name '.edge-stage.*' -o -name '.edge-backup.*' \) \
+        -mmin +120 -exec rm -rf {} + 2>/dev/null || true
+    return 0
+}
