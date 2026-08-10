@@ -112,7 +112,7 @@ export default function FlowsPage() {
         title={tr('工作流', 'Workflows')}
         subtitle={tr(
           `可视化工作流：触发 → Agent / 工具 / 条件 / 通知 节点连成自动化流程 · 共 ${items.length} 个`,
-          `Wire trigger → agent / tool / condition / notify nodes into automations · ${items.length} total`,
+          `Wire trigger → agent / tool / condition / notification nodes into automations · ${items.length} total`,
         )}
         actions={
           canWrite ? (

@@ -230,8 +230,11 @@ func (r *Registry) BuildBaseTools() *ToolBag {
 	if r.cloudBashProposer != nil {
 		out = append(out, NewCloudBashTool(r.cloudBashProposer, r.log))
 	}
-	if r.imSender != nil {
-		out = append(out, NewSendIMMessageTool(r.imSender, r.log))
+	if r.notificationSender != nil {
+		out = append(out, NewSendNotificationTool(r.notificationSender, r.log))
+	}
+	if r.imMessageSender != nil {
+		out = append(out, NewSendIMMessageTool(r.imMessageSender, r.log))
 	}
 	if r.pageStore != nil {
 		out = append(out, NewServePageTool(r.pageStore, r.log))

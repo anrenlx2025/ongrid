@@ -48,15 +48,16 @@ type ConfigFieldSpec struct {
 // engine, validator, AND frontend all derive from it (the frontend keeps
 // only a type→icon/color visual map).
 type NodeSpec struct {
-	Type         string            // wire type ("tool" / "llm" / "transform")
-	Kind         NodeKind          // structural behaviour
-	Category     string            // palette grouping (intent-based)
-	LabelZh      string            // display name (zh)
-	LabelEn      string            // display name (en)
-	Ports        []string          // control output ports (default [next]; condition=[true,false])
-	ConfigFields []ConfigFieldSpec // config form fields (empty for tool: args come from BaseTool schema)
-	OutputShape  []string          // static output field paths ([] when dynamic, e.g. transform/agent)
-	Execute      ExecuteFunc       // executor
+	Type          string            // wire type ("tool" / "llm" / "transform")
+	Kind          NodeKind          // structural behaviour
+	Category      string            // palette grouping (intent-based)
+	LabelZh       string            // display name (zh)
+	LabelEn       string            // display name (en)
+	Ports         []string          // control output ports (default [next]; condition=[true,false])
+	ConfigFields  []ConfigFieldSpec // config form fields (empty for tool: args come from BaseTool schema)
+	OutputShape   []string          // static output field paths ([] when dynamic, e.g. transform/agent)
+	PaletteHidden bool              // legacy executor kept for saved graphs, but not offered for new flows
+	Execute       ExecuteFunc       // executor
 }
 
 var nodeRegistry = map[string]*NodeSpec{}
@@ -151,12 +152,12 @@ func registerBuiltins() {
 		Execute:     execCondition,
 	})
 	RegisterNode(&NodeSpec{
-		Type: NodeNotify, Kind: KindAction, Category: "action",
-		LabelZh: "通知", LabelEn: "Notify",
+		Type: NodeNotify, Kind: KindAction, Category: "action", PaletteHidden: true,
+		LabelZh: "通知", LabelEn: "Notification",
 		ConfigFields: []ConfigFieldSpec{
-			{Key: "channel_ids", LabelZh: "渠道 ID（JSON 数组）", LabelEn: "Channel ids (JSON array)", Kind: "json", Placeholder: "[1]"},
-			{Key: "title", LabelZh: "标题", LabelEn: "Title", Kind: "text"},
-			{Key: "message", LabelZh: "内容（支持 {{…}}）", LabelEn: "Message ({{…}} templates)", Kind: "textarea"},
+			{Key: "channel_ids", LabelZh: "通知渠道 ID（JSON 数组；设置 → 通知）", LabelEn: "Notification channel IDs (JSON array; Settings → Notifications)", Kind: "json", Placeholder: "[1]"},
+			{Key: "title", LabelZh: "通知标题", LabelEn: "Notification title", Kind: "text"},
+			{Key: "message", LabelZh: "通知内容（支持 {{…}}）", LabelEn: "Notification message ({{…}} templates)", Kind: "textarea"},
 		},
 		OutputShape: []string{"sent", "channels"},
 		Execute:     execNotify,

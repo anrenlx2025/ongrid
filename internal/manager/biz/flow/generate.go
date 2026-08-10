@@ -95,11 +95,10 @@ func genSystemPrompt(tools []ToolMeta) string {
 - trigger.manual: 手动触发，config {}
 - trigger.cron: 定时，config {"schedule":"0 9 * * *"}
 - trigger.alert_fired: 告警触发，config {"rule":"<规则名包含,可空>"}；可引用 {{trigger.incident_id}}
-- tool: 调工具，config {"tool":"<工具名>","args":{...}}；输出 {{nodes.<id>.output.result}}
+- tool: 调工具，config {"tool":"<工具名>","args":{...}}；输出 {{nodes.<id>.output.result}}。发送到“设置 → 通知”配置的目标时使用 send_notification；向真实 IM 群主动发消息时使用 send_im_message（必须提供 im_app_id 和 group_id）。两者都是标准 Tool 节点，不使用旧 notify 节点。
 - llm: 一次 LLM，config {"system":"...","prompt":"...支持{{}}"}；输出 {{nodes.<id>.output.answer}}。要结构化加 "output_schema":<JSONSchema>，则可引 output.structured.<字段>
 - agent: 自主 agent，config {"persona":"default","instruction":"...支持{{}}"}；输出 output.answer
 - condition: 分支，config {"expr":"{{nodes.x.output.structured.severity}} == \"critical\""}；两个出口端口 true/false，对应边写 "sourcePort":"true" 或 "false"
-- notify: 发通知，config {"channel_ids":[1],"title":"...","message":"...支持{{}}"}
 - http_request: HTTP，config {"method":"GET","url":"...","headers":{},"body":""}；输出 output.status / output.body
 - transform: 字段映射，config {"fields":{"<新名>":"{{...}}"}}
 - set: 变量，config {"name":"...","value":"{{...}}"}
@@ -110,6 +109,9 @@ func genSystemPrompt(tools []ToolMeta) string {
 ## 可用工具（tool 节点的 tool 名 + 必填参数；只能用这里的名字）
 `)
 	for _, t := range tools {
+		if !allowedWorkflowTool(t.Name) {
+			continue
+		}
 		desc := t.DescriptionZh
 		if desc == "" {
 			desc = t.Description
@@ -130,6 +132,12 @@ func genSystemPrompt(tools []ToolMeta) string {
 
 只输出 JSON。工具名必须用上面列出的，参数符合其 schema。`)
 	return b.String()
+}
+
+// allowedWorkflowTool exists as a future policy seam. Current registered tools,
+// including both messaging tools, are shared by the assistant and workflows.
+func allowedWorkflowTool(name string) bool {
+	return true
 }
 
 func requiredParams(schema json.RawMessage) []string {

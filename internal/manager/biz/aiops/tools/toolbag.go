@@ -85,7 +85,7 @@ var tierByName = map[string]string{
 	// of a request ("host this report", "send this to the group"). Keep them
 	// full-schema so the LLM picks them instead of falling back to cloud_bash.
 	"serve_page":      "core",
-	"send_im_message": "core",
+	"send_notification": "core",
 
 	// specialty (deferred when over threshold) — host-files trio,
 	// alert detail tools, ranking helpers, mutating restart, generic

@@ -131,6 +131,7 @@ import (
 	managersecretdata "github.com/ongridio/ongrid/internal/manager/data/secret/store"
 	managersettingdata "github.com/ongridio/ongrid/internal/manager/data/setting/store"
 	managerwebshelldata "github.com/ongridio/ongrid/internal/manager/data/webshell/store"
+	managerimbridgemodel "github.com/ongridio/ongrid/internal/manager/model/imbridge"
 	settingmodel "github.com/ongridio/ongrid/internal/manager/model/setting"
 	wsmodel "github.com/ongridio/ongrid/internal/manager/model/webshell"
 	managerserverimbridge "github.com/ongridio/ongrid/internal/manager/server/imbridge"
@@ -278,6 +279,12 @@ func main() {
 	); err != nil {
 		log.Error("run migrations", slog.Any("err", err))
 		os.Exit(1)
+	}
+	if migrated, err := managerflowdata.MigrateLegacyIMNotificationTool(rootCtx, db); err != nil {
+		log.Error("migrate legacy workflow IM notification tools", slog.Any("err", err))
+		os.Exit(1)
+	} else if migrated > 0 {
+		log.Info("migrated legacy workflow IM notification tools", slog.Int("flow_count", migrated))
 	}
 	sqlDB, errDB := db.DB()
 	if errDB != nil {
@@ -2093,10 +2100,13 @@ func main() {
 		proposals: mutatingProposalRepo,
 		approvals: approvalUC,
 	})
-	// send_im_message: the assistant can proactively push to a configured
+	// send_notification: the assistant can proactively push to a configured
 	// channel (飞书/钉钉/…), reusing the same BuildSenderFromChannel path the
 	// alert notifier + flow notify node use.
-	toolsReg.SetIMSender(imSenderShim{channels: alertRepo, router: notifyRouter})
+	toolsReg.SetNotificationSender(notificationSenderShim{channels: alertRepo, router: notifyRouter})
+	// send_im_message targets a real IM Bridge group by app + platform group ID.
+	// It does not reuse notification channels.
+	toolsReg.SetIMMessageSender(imMessageSenderShim{apps: imbridgeRepo})
 	// serve_page: the assistant can host a generated HTML report at an
 	// internal /pages/<token> URL. Pages live on the persistent volume; the
 	// route is registered on the mux below.
@@ -2132,8 +2142,8 @@ func main() {
 			Limiter:    aiopstoolsdec.NewTokenBucketLimiter(0),
 			Registerer: reg,
 		}
-		// serve_page + send_im_message are registered AFTER buildAIOpsRuntime
-		// (SetPageStore / SetIMSender above), so like cloud_bash they're absent
+		// serve_page + messaging tools are registered AFTER buildAIOpsRuntime
+		// (SetPageStore / SetNotificationSender above), so like cloud_bash they're absent
 		// from the startup chat bag and the LLM can't call them in chat — the
 		// exact reason the agent "never triggered serve_page". They're instant
 		// (no human-approval gate), so a short timeout, not cbDeps' 31m ceiling.
@@ -2149,9 +2159,10 @@ func main() {
 			aiopstoolsdec.Wrap(aiopstools.NewCloudBashTool(cloudBashProposerShim{uc: approvalUC}, log), cbDeps),
 			aiopstoolsdec.Wrap(aiopstools.NewInstallSkillTool(installSkillProposerShim{uc: approvalUC}, log), cbDeps),
 			aiopstoolsdec.Wrap(aiopstools.NewServePageTool(pageStore, log), quickDeps),
-			aiopstoolsdec.Wrap(aiopstools.NewSendIMMessageTool(imSenderShim{channels: alertRepo, router: notifyRouter}, log), quickDeps),
+			aiopstoolsdec.Wrap(aiopstools.NewSendNotificationTool(notificationSenderShim{channels: alertRepo, router: notifyRouter}, log), quickDeps),
+			aiopstoolsdec.Wrap(aiopstools.NewSendIMMessageTool(imMessageSenderShim{apps: imbridgeRepo}, log), quickDeps),
 		})
-		log.Info("host_bash + cloud_bash + install_skill + serve_page + send_im_message bolted onto chat runtime bag", slog.Int("tool_count", chatRT.ToolCount()))
+		log.Info("host_bash + cloud_bash + install_skill + serve_page + messaging tools bolted onto chat runtime bag", slog.Int("tool_count", chatRT.ToolCount()))
 		// HLD-017: wire the active-skill → bound-credentials resolver so
 		// cloud_bash auto-injects the credentials an active skill was bound
 		// to at install time (design-time binding, no run-time choice).
@@ -3481,7 +3492,8 @@ var coordinatorExtraToolNames = []string{
 	"cloud_bash",
 	"install_skill",
 	"serve_page",
-	"send_im_message",
+	aiopstools.ToolNameSendNotification,
+	aiopstools.ToolNameSendIMMessage,
 	// Network inventory remains specialty/schema-redacted. These entries only
 	// let explicit network-asset requests discover it through ToolSearch.
 	aiopstools.ToolSearchToolName,
@@ -4522,7 +4534,7 @@ func (s *flowToolInvoker) mergeBag(bag *aiopstools.ToolBag) {
 		if err != nil || info == nil || info.Name == "" {
 			continue
 		}
-		if isChatOnlyReviewTool(info.Name) {
+		if isFlowRuntimeUnsupportedTool(info.Name) {
 			continue
 		}
 		if _, exists := s.tools[info.Name]; exists {
@@ -4835,30 +4847,76 @@ func (s flowLLMRunner) RunLLM(ctx context.Context, system, user string) (string,
 	return resp.Assistant.Content, nil
 }
 
-// imSenderShim implements aiopstools.IMSender (the send_im_message tool seam)
+// notificationSenderShim implements aiopstools.NotificationSender (the
+// send_notification tool seam)
 // over the alert channel store + notify router — same BuildSenderFromChannel
 // path the alert notifier / flow notify node use.
-type imSenderShim struct {
+type notificationSenderShim struct {
 	channels *manageralertdata.Repo
 	router   *notify.Router
 }
 
-func (s imSenderShim) ListIMChannels(ctx context.Context) ([]aiopstools.IMChannel, error) {
+// imMessageSenderShim sends to an explicit group through an IM Bridge app.
+// Direct group sends are available only for providers with a stable outbound
+// group API; DingTalk's current integration can only reply to an inbound
+// session webhook and therefore rejects arbitrary group sends.
+type imMessageSenderShim struct {
+	apps imAppGetter
+}
+
+type imAppGetter interface {
+	GetApp(ctx context.Context, id uint64) (*managerimbridgemodel.ImApp, error)
+}
+
+func (s imMessageSenderShim) SendIMGroupMessage(ctx context.Context, imAppID uint64, groupID, text string) error {
+	app, err := s.apps.GetApp(ctx, imAppID)
+	if err != nil {
+		return fmt.Errorf("get IM app %d: %w", imAppID, err)
+	}
+	if app == nil {
+		return fmt.Errorf("IM app %d: not found", imAppID)
+	}
+	if !app.Enabled {
+		return fmt.Errorf("IM app %q is disabled", app.Name)
+	}
+	switch app.Provider {
+	case managerimbridgemodel.ProviderFeishu:
+		_, err = managerbizimbridgefeishu.NewClient(app.AppID, app.AppSecret).SendText(ctx, groupID, "chat_id", text)
+	case managerimbridgemodel.ProviderTelegram:
+		_, err = managerbizimbridgetelegram.NewClient(app.AppSecret).SendMessage(ctx, groupID, text)
+	case managerimbridgemodel.ProviderSlack:
+		client, clientErr := managerbizimbridgeslack.NewClientFromSecret(app.AppSecret)
+		if clientErr != nil {
+			return fmt.Errorf("build Slack IM client: %w", clientErr)
+		}
+		_, err = client.PostMessage(ctx, groupID, text)
+	case managerimbridgemodel.ProviderDingTalk:
+		return fmt.Errorf("DingTalk does not support direct group sends yet; its current IM Bridge integration only replies to inbound session webhooks")
+	default:
+		return fmt.Errorf("unsupported IM provider %q", app.Provider)
+	}
+	if err != nil {
+		return fmt.Errorf("send through %s app %q: %w", app.Provider, app.Name, err)
+	}
+	return nil
+}
+
+func (s notificationSenderShim) ListNotificationChannels(ctx context.Context) ([]aiopstools.NotificationChannel, error) {
 	chs, err := s.channels.ListChannels(ctx, managerbizalert.ChannelFilter{})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]aiopstools.IMChannel, 0, len(chs))
+	out := make([]aiopstools.NotificationChannel, 0, len(chs))
 	for _, ch := range chs {
 		if !ch.Enabled {
 			continue
 		}
-		out = append(out, aiopstools.IMChannel{ID: ch.ID, Name: ch.Name, Kind: ch.ChannelType})
+		out = append(out, aiopstools.NotificationChannel{ID: ch.ID, Name: ch.Name, Kind: ch.ChannelType})
 	}
 	return out, nil
 }
 
-func (s imSenderShim) SendIM(ctx context.Context, channelID uint64, title, text string) error {
+func (s notificationSenderShim) SendNotification(ctx context.Context, channelID uint64, title, text string) error {
 	ch, err := s.channels.GetChannelByID(ctx, channelID)
 	if err != nil {
 		return fmt.Errorf("channel %d: not found", channelID)
@@ -5150,14 +5208,14 @@ func (c flowToolCatalog) ListTools() []managerbizflow.ToolMeta {
 		if err != nil || info == nil || info.Name == "" {
 			continue
 		}
-		// Control-plane tools don't belong in a workflow tool node:
+		// Control-plane and chat-only tools don't belong in a workflow tool node:
 		// AgentTool overlaps the dedicated `agent` node, SendMessage /
 		// TaskStop steer a live coordinator session, ToolSearch is an
 		// LLM-only schema-fetch affordance. Hide them from the palette.
 		if isControlPlaneTool(info.Name) {
 			continue
 		}
-		if isChatOnlyReviewTool(info.Name) {
+		if isWorkflowPaletteExcludedTool(info.Name) {
 			continue
 		}
 		// cloud_bash blocks on synchronous human approval (HLD-021); an
@@ -5203,7 +5261,9 @@ func isControlPlaneTool(name string) bool {
 	return false
 }
 
-func isChatOnlyReviewTool(name string) bool {
+// isFlowRuntimeUnsupportedTool identifies tools that cannot execute in a
+// workflow because they need an approval model the engine does not have yet.
+func isFlowRuntimeUnsupportedTool(name string) bool {
 	switch name {
 	case aiopstools.ToolNameExecuteK8sAction:
 		return true
@@ -5212,11 +5272,20 @@ func isChatOnlyReviewTool(name string) bool {
 	}
 }
 
+// isWorkflowPaletteExcludedTool identifies tools that must not be offered as
+// new generic workflow nodes. Only tools that cannot execute without a
+// workflow-level approval model are excluded.
+func isWorkflowPaletteExcludedTool(name string) bool {
+	return isFlowRuntimeUnsupportedTool(name)
+}
+
 // categorizeFlowTool buckets a tool name into a palette group. Explicit
 // map for the hand-written tools, prefix rules for the families; unknown
 // names fall to "other" so the palette never drops a tool.
 func categorizeFlowTool(name string) string {
 	switch name {
+	case aiopstools.ToolNameSendNotification, aiopstools.ToolNameSendIMMessage:
+		return "messaging"
 	case "correlate_incident", "get_incident_detail", "query_incidents", "query_alert_rules":
 		return "incident"
 	case "get_edge_summary", "query_devices", "query_edges", "query_change_events", "rank_edges", "find_outlier_edges":
@@ -5257,6 +5326,9 @@ func categorizeFlowTool(name string) string {
 // main.go, so the zh names live next to them rather than drifting in the
 // frontend). Unmapped tools fall back to the wire name.
 var flowToolLabelZhMap = map[string]string{
+	// messaging
+	"send_notification": "发送通知",
+	"send_im_message":   "发送 IM 消息",
 	// observability
 	"query_promql":            "查询指标 (PromQL)",
 	"query_logql":             "查询日志 (LogQL)",
@@ -5306,6 +5378,8 @@ func flowToolLabelZh(name string) string {
 // rationale as flowToolLabelZhMap. Unmapped → empty (frontend falls back
 // to the English Description).
 var flowToolDescZhMap = map[string]string{
+	"send_notification":       "向设置中的通知目标发送消息。",
+	"send_im_message":         "通过指定 IM 应用和群 ID 主动发送消息。",
 	"query_promql":            "用 PromQL 查询指标时序数据。",
 	"query_logql":             "用 LogQL 查询 Loki 日志。",
 	"query_traceql":           "用 TraceQL 查询 Tempo 链路。",

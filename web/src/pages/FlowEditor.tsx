@@ -79,7 +79,7 @@ const NODE_META: Record<FlowNodeType, { icon: typeof Bot; color: string; zh: str
   llm: { icon: Sparkles, color: 'text-violet-400', zh: 'LLM（单次）', en: 'LLM' },
   tool: { icon: Wrench, color: 'text-sky-400', zh: '工具', en: 'Tool' },
   condition: { icon: GitBranch, color: 'text-amber-400', zh: '条件', en: 'Condition' },
-  notify: { icon: Bell, color: 'text-rose-400', zh: '通知', en: 'Notify' },
+  notify: { icon: Bell, color: 'text-rose-400', zh: '通知', en: 'Notification' },
   set: { icon: Variable, color: 'text-zinc-400', zh: '变量', en: 'Set var' },
   transform: { icon: Shuffle, color: 'text-teal-400', zh: '字段映射', en: 'Edit Fields' },
   http_request: { icon: Globe, color: 'text-cyan-400', zh: 'HTTP 请求', en: 'HTTP Request' },
@@ -88,7 +88,7 @@ const NODE_META: Record<FlowNodeType, { icon: typeof Bot; color: string; zh: str
 // Core nodes the user hand-places. `tool` is excluded here — tool nodes
 // come from the searchable catalog (every registered BaseTool), added via
 // addNode('tool', {config:{tool}}).
-const BASE_NODE_TYPES: FlowNodeType[] = ['trigger.manual', 'trigger.alert_fired', 'trigger.cron', 'agent', 'llm', 'condition', 'notify', 'set', 'transform', 'http_request'];
+const BASE_NODE_TYPES: FlowNodeType[] = ['trigger.manual', 'trigger.alert_fired', 'trigger.cron', 'agent', 'llm', 'condition', 'set', 'transform', 'http_request'];
 
 
 type CanvasData = {
@@ -256,9 +256,9 @@ const CONFIG_FIELDS: Record<FlowNodeType, FieldSpec[]> = {
     { key: 'expr', zh: '表达式', en: 'Expression', kind: 'text', placeholder: '{{nodes.diag.output.structured.severity}} == "critical"' },
   ],
   notify: [
-    { key: 'channel_ids', zh: '渠道 ID（JSON 数组）', en: 'Channel ids (JSON array)', kind: 'json', placeholder: '[1]' },
-    { key: 'title', zh: '标题', en: 'Title', kind: 'text' },
-    { key: 'message', zh: '内容（支持 {{…}}）', en: 'Message ({{…}} templates)', kind: 'textarea' },
+    { key: 'channel_ids', zh: '通知渠道 ID（JSON 数组；设置 → 通知）', en: 'Notification channel IDs (JSON array; Settings → Notifications)', kind: 'json', placeholder: '[1]' },
+    { key: 'title', zh: '通知标题', en: 'Notification title', kind: 'text' },
+    { key: 'message', zh: '通知内容（支持 {{…}}）', en: 'Notification message ({{…}} templates)', kind: 'textarea' },
   ],
   set: [
     { key: 'name', zh: '变量名', en: 'Variable name', kind: 'text' },
@@ -308,7 +308,7 @@ function configFieldsFor(type: FlowNodeType, nodeTypes: Record<string, NodeType>
 // (every registered type except `tool`, which has its own catalog),
 // grouped by kind. Falls back to the static BASE_NODE_TYPES list.
 function baseNodeTypesFrom(nodeTypes: Record<string, NodeType>): FlowNodeType[] {
-  const all = Object.values(nodeTypes).filter((nt) => nt.type !== 'tool');
+  const all = Object.values(nodeTypes).filter((nt) => nt.type !== 'tool' && !nt.palette_hidden);
   if (all.length === 0) return BASE_NODE_TYPES;
   const kindOrder = ['trigger', 'ai', 'action', 'control', 'flow', 'data'];
   return all

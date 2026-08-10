@@ -436,14 +436,15 @@ func (h *Handler) listTools(w http.ResponseWriter, r *http.Request) {
 }
 
 type nodeTypeDTO struct {
-	Type         string                    `json:"type"`
-	Kind         string                    `json:"kind"`
-	Category     string                    `json:"category"`
-	LabelZh      string                    `json:"label_zh"`
-	LabelEn      string                    `json:"label_en"`
-	Ports        []string                  `json:"ports"`
-	ConfigFields []bizflow.ConfigFieldSpec `json:"config_fields"`
-	OutputShape  []string                  `json:"output_shape"`
+	Type          string                    `json:"type"`
+	Kind          string                    `json:"kind"`
+	Category      string                    `json:"category"`
+	LabelZh       string                    `json:"label_zh"`
+	LabelEn       string                    `json:"label_en"`
+	Ports         []string                  `json:"ports"`
+	ConfigFields  []bizflow.ConfigFieldSpec `json:"config_fields"`
+	OutputShape   []string                  `json:"output_shape"`
+	PaletteHidden bool                      `json:"palette_hidden,omitempty"`
 }
 
 // listNodeTypes returns every registered node-type spec so the editor can
@@ -457,14 +458,15 @@ func (h *Handler) listNodeTypes(w http.ResponseWriter, r *http.Request) {
 	items := make([]nodeTypeDTO, 0, len(specs))
 	for _, s := range specs {
 		items = append(items, nodeTypeDTO{
-			Type:         s.Type,
-			Kind:         string(s.Kind),
-			Category:     s.Category,
-			LabelZh:      s.LabelZh,
-			LabelEn:      s.LabelEn,
-			Ports:        s.Ports,
-			ConfigFields: s.ConfigFields,
-			OutputShape:  s.OutputShape,
+			Type:          s.Type,
+			Kind:          string(s.Kind),
+			Category:      s.Category,
+			LabelZh:       s.LabelZh,
+			LabelEn:       s.LabelEn,
+			Ports:         s.Ports,
+			ConfigFields:  s.ConfigFields,
+			OutputShape:   s.OutputShape,
+			PaletteHidden: s.PaletteHidden,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})

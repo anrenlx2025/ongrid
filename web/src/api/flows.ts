@@ -186,6 +186,7 @@ export type NodeType = {
   ports: string[];
   config_fields: NodeConfigField[];
   output_shape: string[];
+  palette_hidden?: boolean;
 };
 
 export function listNodeTypes() {

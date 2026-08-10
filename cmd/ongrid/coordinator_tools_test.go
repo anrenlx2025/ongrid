@@ -8,6 +8,7 @@ import (
 
 	aiopstools "github.com/ongridio/ongrid/internal/manager/biz/aiops/tools"
 	aiopstoolsbase "github.com/ongridio/ongrid/internal/manager/biz/aiops/tools/basetool"
+	managerimbridgemodel "github.com/ongridio/ongrid/internal/manager/model/imbridge"
 )
 
 type coordinatorToolStub struct{ name string }
@@ -19,6 +20,12 @@ func (s coordinatorToolStub) Info(context.Context) (*aiopstoolsbase.ToolInfo, er
 		Parameters:  json.RawMessage(`{"type":"object"}`),
 		Class:       "read",
 	}, nil
+}
+
+type imAppGetterStub struct{ app *managerimbridgemodel.ImApp }
+
+func (s imAppGetterStub) GetApp(context.Context, uint64) (*managerimbridgemodel.ImApp, error) {
+	return s.app, nil
 }
 
 func (s coordinatorToolStub) InvokableRun(context.Context, string, ...aiopstoolsbase.InvokeOption) (string, error) {
@@ -113,13 +120,47 @@ func TestDefaultCoordinatorKeepsThirtyTurns(t *testing.T) {
 	}
 }
 
-func TestExecuteK8sActionIsChatOnlyReviewTool(t *testing.T) {
+func TestExecuteK8sActionIsExcludedFromWorkflowToolPalette(t *testing.T) {
 	got := buildCoordinatorToolNames(nil)
 	if !containsString(got, aiopstools.ToolNameExecuteK8sAction) {
 		t.Fatalf("coordinator roster missing %q", aiopstools.ToolNameExecuteK8sAction)
 	}
-	if !isChatOnlyReviewTool(aiopstools.ToolNameExecuteK8sAction) {
+	if !isFlowRuntimeUnsupportedTool(aiopstools.ToolNameExecuteK8sAction) {
 		t.Fatalf("%q should be excluded from flow paths without ReviewGate", aiopstools.ToolNameExecuteK8sAction)
+	}
+}
+
+func TestMessagingToolsAreSharedWithWorkflowToolPalette(t *testing.T) {
+	for _, name := range []string{aiopstools.ToolNameSendNotification, aiopstools.ToolNameSendIMMessage} {
+		if isWorkflowPaletteExcludedTool(name) {
+			t.Fatalf("%q must be available to workflow tool nodes", name)
+		}
+		if isFlowRuntimeUnsupportedTool(name) {
+			t.Fatalf("%q must remain runnable for saved workflows", name)
+		}
+	}
+	coordinator := buildCoordinatorToolNames(nil)
+	if !containsString(coordinator, aiopstools.ToolNameSendNotification) {
+		t.Fatalf("coordinator roster missing %q", aiopstools.ToolNameSendNotification)
+	}
+	if !containsString(coordinator, aiopstools.ToolNameSendIMMessage) {
+		t.Fatalf("coordinator roster missing %q", aiopstools.ToolNameSendIMMessage)
+	}
+}
+
+func TestIMMessageSender_WhenAppDisabled_RejectsBeforeProviderSend(t *testing.T) {
+	sender := imMessageSenderShim{apps: imAppGetterStub{app: &managerimbridgemodel.ImApp{Name: "ops", Enabled: false}}}
+	err := sender.SendIMGroupMessage(context.Background(), 1, "oc_group", "hello")
+	if err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("error = %v, want disabled app", err)
+	}
+}
+
+func TestIMMessageSender_WhenAppMissing_ReturnsNotFound(t *testing.T) {
+	sender := imMessageSenderShim{apps: imAppGetterStub{}}
+	err := sender.SendIMGroupMessage(context.Background(), 42, "oc_group", "hello")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %v, want missing app", err)
 	}
 }
 
