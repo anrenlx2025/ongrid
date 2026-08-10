@@ -80,14 +80,27 @@ cat > "$fake_bin/curl" <<'EOF'
 set -euo pipefail
 out=""
 url=""
+probe=0
 while (( $# > 0 )); do
     case "$1" in
         -o) out=$2; shift 2 ;;
+        --version|--help) probe=1; shift ;;
         http://*|https://*) url=$1; shift ;;
         *) shift ;;
     esac
 done
-[[ -n "$out" && -n "$url" ]]
+# Capability probes do not touch the network, so they must not land in the log the
+# no-network assertions check. Model real curl: --version succeeds and prints.
+if (( probe )); then
+    printf 'curl 8.0.0 (fake)\n'
+    exit 0
+fi
+# Explicit exit: `set -e` does not abort on a failing `[[ a && b ]]`, so a bare
+# test here would fall through and log an empty line for non-download calls.
+if [[ -z "$out" || -z "$url" ]]; then
+    printf 'fake curl: expected -o <file> and a URL\n' >&2
+    exit 2
+fi
 printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
 relative=${url#*releases/download/}
 cp "$FAKE_RELEASE_ROOT/$relative" "$out"
