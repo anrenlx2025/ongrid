@@ -140,22 +140,36 @@ set -e
 [[ "$wrapped_rc" == 7 ]] || fail "wrapper swallowed the exit status: $wrapped_rc"
 
 # Stale-staging prune: anchored name, depth 1, age floor.
-mkdir -p "$install_dir/.edge-stage.OLDONE" "$install_dir/.edge-backup.OLDTWO" \
+# Regression guard: a retained .edge-backup.* must survive. After a health-check
+# timeout upgrade.sh keeps that tree as the manual rollback source, and this
+# prune runs at the start of the next upgrade attempt, before a new Edge swap.
+# Pruning it by age would delete the operator's only known-good Edge tree.
+mkdir -p "$install_dir/.edge-stage.OLDONE" "$install_dir/.edge-backup.RETAINED" \
     "$install_dir/.edge-stage.FRESH" "$install_dir/keepme" \
     "$install_dir/edge/.edge-stage.NESTED"
+printf 'edge\n' > "$install_dir/.edge-backup.RETAINED/marker"
 touch -d '3 hours ago' "$install_dir/.edge-stage.OLDONE" \
-    "$install_dir/.edge-backup.OLDTWO" "$install_dir/keepme" \
+    "$install_dir/.edge-backup.RETAINED" "$install_dir/keepme" \
     "$install_dir/edge/.edge-stage.NESTED" 2>/dev/null \
     || touch -A -030000 "$install_dir/.edge-stage.OLDONE" \
-        "$install_dir/.edge-backup.OLDTWO" "$install_dir/keepme" \
+        "$install_dir/.edge-backup.RETAINED" "$install_dir/keepme" \
         "$install_dir/edge/.edge-stage.NESTED"
 
 ongrid_prune_stale_edge_staging "$install_dir"
 
 [[ ! -d "$install_dir/.edge-stage.OLDONE" ]] || fail "stale staging dir was not pruned"
-[[ ! -d "$install_dir/.edge-backup.OLDTWO" ]] || fail "stale backup dir was not pruned"
+[[ -d "$install_dir/.edge-backup.RETAINED" ]] \
+    || fail "a retained Edge backup must survive the next upgrade's startup prune (manual rollback source)"
+[[ -f "$install_dir/.edge-backup.RETAINED/marker" ]] \
+    || fail "retained Edge backup survived as an empty directory; its contents are the rollback source"
 [[ -d "$install_dir/.edge-stage.FRESH" ]] || fail "a fresh staging dir must survive (concurrent installer)"
 [[ -d "$install_dir/keepme" ]] || fail "prune matched a directory outside the name prefix"
 [[ -d "$install_dir/edge/.edge-stage.NESTED" ]] || fail "prune must not recurse below depth 1"
+
+# Repeated startups must keep leaving the backup alone, since an operator may
+# take several attempts before deciding to roll back.
+ongrid_prune_stale_edge_staging "$install_dir"
+[[ -f "$install_dir/.edge-backup.RETAINED/marker" ]] \
+    || fail "retained Edge backup was pruned on a second startup"
 
 echo "install asset-modes test passed"

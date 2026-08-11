@@ -283,18 +283,25 @@ ongrid_normalize_shared_asset_modes() {
     return 0
 }
 
-# Remove Edge staging / backup directories left behind by an interrupted run.
+# Remove Edge staging directories left behind by an interrupted run.
 # The installers only ever cleaned up on ERR, so `exit 1` paths and SIGINT /
 # SIGTERM leaked a full bundle tree (~178 MB each) into the install directory.
 # Three guards keep this from touching anything else: depth 1 only, an anchored
 # name prefix, and an age floor so a concurrently running installer's staging
 # directory is never removed.
+#
+# .edge-backup.* is deliberately NOT pruned here. After a health-check timeout
+# upgrade.sh keeps the previous Edge tree and prints it as the manual rollback
+# source, and install.sh keeps it when an automatic restore fails. That backup is
+# then the only known-good copy, and this function runs at startup before the
+# next Edge swap: pruning it by age would delete the operator's rollback source
+# out from under a retry. Backups are removed by the successful-upgrade cleanup
+# path, by a completed rollback, or by an explicit operator action.
 ongrid_prune_stale_edge_staging() {
     local install_dir="$1"
 
     [[ -d "$install_dir" ]] || return 0
-    find "$install_dir" -maxdepth 1 -type d \
-        \( -name '.edge-stage.*' -o -name '.edge-backup.*' \) \
+    find "$install_dir" -maxdepth 1 -type d -name '.edge-stage.*' \
         -mmin +120 -exec rm -rf {} + 2>/dev/null || true
     return 0
 }
