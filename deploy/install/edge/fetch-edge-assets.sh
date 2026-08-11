@@ -24,9 +24,18 @@ DEPS_TAG=${ONGRID_EDGE_DEPS_TAG:-$CONFIG_DEPS_TAG}
 CACHE_DIR=${ONGRID_EDGE_ARTIFACT_CACHE_DIR:-/var/cache/ongrid/edge-artifacts}
 CURL_FLAGS=(
     --fail --location --show-error
-    --retry 3 --retry-all-errors --retry-delay 3
+    --retry 3 --retry-delay 3
     --connect-timeout 15 --speed-time 60 --speed-limit 1024
 )
+# --retry-all-errors widens `--retry` to cover non-transient HTTP errors, but it
+# only exists in curl 7.71+. AliOS / CentOS 8 ship 7.61, where an unknown option
+# makes curl exit 2 and every download fail. Ask curl whether it accepts the flag
+# rather than parsing versions: on 7.71+ the flag set is unchanged, and on older
+# curl we keep plain `--retry 3` instead of failing outright. The checksum gate in
+# download_verified is unaffected either way, so a bad download still fails hard.
+if curl --retry-all-errors --version >/dev/null 2>&1; then
+    CURL_FLAGS+=(--retry-all-errors)
+fi
 
 if (( $# > 0 )); then
     TARGETS=("$@")
@@ -133,5 +142,8 @@ for target in "${TARGETS[@]}"; do
         "$BASE_URL" "$DEPS_TAG" "$deps_name" "$deps_sha" \
         "$BASE_URL" "$VERSION" "$edge_name" "$edge_sha" \
         > "$DEST_DIR/edge-assets-${target}.ref"
+    # Redirection applies the caller's umask, unlike the `install -m 0755` above.
+    # The Manager container reads this file as non-root, so pin it explicitly.
+    chmod 0644 "$DEST_DIR/edge-assets-${target}.ref"
     log "verified and staged $target"
 done

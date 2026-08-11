@@ -10,7 +10,42 @@ for installer in install.sh upgrade.sh; do
     echo "$installer does not make the staged Edge directory container-readable" >&2
     exit 1
   }
+  grep -Fq 'ongrid_with_shared_asset_umask' "$repo_root/deploy/install/$installer" || {
+    echo "$installer stages Edge assets under the caller's umask; bundles land unreadable on a hardened host" >&2
+    exit 1
+  }
+  grep -Fq 'ongrid_normalize_shared_asset_modes' "$repo_root/deploy/install/$installer" || {
+    echo "$installer does not normalize shared asset modes; an existing install keeps its 0640 configs" >&2
+    exit 1
+  }
+  grep -Fq 'trap cleanup_edge_stage EXIT' "$repo_root/deploy/install/$installer" || {
+    echo "$installer leaks the Edge staging tree on explicit exits and signals" >&2
+    exit 1
+  }
 done
+
+grep -Fq 'chmod 0644 "$tarball" "$tarball.sha256"' \
+  "$repo_root/deploy/install/edge/build-edge-bundle.sh" || {
+  echo "build-edge-bundle.sh leaves bundle modes at the caller's umask" >&2
+  exit 1
+}
+grep -Fq 'chmod 0644 "$DEST_DIR/edge-assets-${target}.ref"' \
+  "$repo_root/deploy/install/edge/fetch-edge-assets.sh" || {
+  echo "fetch-edge-assets.sh leaves the .ref mode at the caller's umask" >&2
+  exit 1
+}
+
+# curl 7.61 (AliOS / CentOS 8) exits 2 on an unknown option, which turns every
+# asset download into a failure. The flag has to be probed, never hardcoded.
+if grep -Eq '^\s+--retry 3 --retry-all-errors' "$repo_root/deploy/install/edge/fetch-edge-assets.sh"; then
+  echo "fetch-edge-assets.sh hardcodes --retry-all-errors; curl 7.61 hosts cannot download Edge assets" >&2
+  exit 1
+fi
+grep -Fq 'curl --retry-all-errors --version' \
+  "$repo_root/deploy/install/edge/fetch-edge-assets.sh" || {
+  echo "fetch-edge-assets.sh does not probe curl for --retry-all-errors support" >&2
+  exit 1
+}
 
 install_help=$(bash "$repo_root/deploy/install/install.sh" --help)
 uninstall_help=$(bash "$repo_root/deploy/install/uninstall.sh" --help)
