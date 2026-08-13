@@ -56,6 +56,7 @@ func TestCoordinatorRosterDerivesRegisteredCoreTools(t *testing.T) {
 	for _, want := range []string{
 		"host_bash", "rank_edges", "find_outlier_edges", "query_alert_rules", "cloud_bash", "install_skill",
 		aiopstools.ToolSearchToolName, aiopstools.ToolNameQueryNetworkDevices, aiopstools.ToolNameGetNetworkNeighbors,
+		aiopstools.ToolNameCapturePCAP,
 	} {
 		if !containsString(got, want) {
 			t.Errorf("coordinator roster missing policy extra %q (have %v)", want, got)

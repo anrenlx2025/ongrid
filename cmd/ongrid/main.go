@@ -117,6 +117,7 @@ import (
 	managerbizmarketplace "github.com/ongridio/ongrid/internal/manager/biz/marketplace"
 	managerbizmcp "github.com/ongridio/ongrid/internal/manager/biz/mcp"
 	managerbizmonitor "github.com/ongridio/ongrid/internal/manager/biz/monitor"
+	managerbizpacketcapture "github.com/ongridio/ongrid/internal/manager/biz/packetcapture"
 	managerbizsecret "github.com/ongridio/ongrid/internal/manager/biz/secret"
 	managerbizsetting "github.com/ongridio/ongrid/internal/manager/biz/setting"
 	managerbizskill "github.com/ongridio/ongrid/internal/manager/biz/skill"
@@ -128,6 +129,7 @@ import (
 	managermarketplacedata "github.com/ongridio/ongrid/internal/manager/data/marketplace/store"
 	managermcpdata "github.com/ongridio/ongrid/internal/manager/data/mcp/store"
 	managermonitordata "github.com/ongridio/ongrid/internal/manager/data/monitor/store"
+	managerpacketcapturedata "github.com/ongridio/ongrid/internal/manager/data/packetcapture/store"
 	managersecretdata "github.com/ongridio/ongrid/internal/manager/data/secret/store"
 	managersettingdata "github.com/ongridio/ongrid/internal/manager/data/setting/store"
 	managerwebshelldata "github.com/ongridio/ongrid/internal/manager/data/webshell/store"
@@ -164,6 +166,7 @@ import (
 	managerservermetric "github.com/ongridio/ongrid/internal/manager/server/metric"
 	managermiddleware "github.com/ongridio/ongrid/internal/manager/server/middleware"
 	managerservermonitor "github.com/ongridio/ongrid/internal/manager/server/monitor"
+	managerserverpacketcapture "github.com/ongridio/ongrid/internal/manager/server/packetcapture"
 	managerserverprom "github.com/ongridio/ongrid/internal/manager/server/prometheus"
 	managerserverreport "github.com/ongridio/ongrid/internal/manager/server/report"
 	managerserversecret "github.com/ongridio/ongrid/internal/manager/server/secret"
@@ -276,6 +279,7 @@ func main() {
 		manageraudtdata.Migrate,
 		managerreportdata.Migrate,
 		managerflowdata.Migrate,
+		managerpacketcapturedata.Migrate,
 	); err != nil {
 		log.Error("run migrations", slog.Any("err", err))
 		os.Exit(1)
@@ -1246,6 +1250,44 @@ func main() {
 		traceQuerier = pkgtracequery.New(cfg.Traces.URL, log.With(slog.String("comp", "aiops-tracequery")))
 	}
 	toolsReg := aiopstools.NewRegistry(fbClient, edgeUC, deviceUC, promQuerier, logQuerier, traceQuerier, alertUC, log)
+	packetCaptureUC := managerbizpacketcapture.New(
+		managerpacketcapturedata.New(db),
+		fbClient,
+		aiopstools.NewDeviceResolver(deviceUC, edgeUC),
+		log.With(slog.String("comp", "packet-capture")),
+	)
+	packetCaptureRawStore, err := managerbizpacketcapture.NewLocalRawStore(cfg.PacketCapture.RawDir)
+	if err != nil {
+		log.Warn("packet capture raw store disabled", slog.Any("err", err))
+	} else {
+		packetCaptureUC.SetRawStore(packetCaptureRawStore)
+	}
+	packetParserArtifactBaseURL := cfg.PacketCapture.ParserArtifactBaseURL
+	if strings.TrimSpace(packetParserArtifactBaseURL) == "" {
+		packetParserArtifactBaseURL = cfg.PublicURL
+	}
+	if strings.TrimSpace(cfg.PacketCapture.ParserURL) != "" {
+		packetParser, parserErr := managerbizpacketcapture.NewParserClient(managerbizpacketcapture.ParserClientConfig{
+			URL:             cfg.PacketCapture.ParserURL,
+			ArtifactBaseURL: packetParserArtifactBaseURL,
+			TokenSecret:     cfg.PacketCapture.ParserTokenSecret,
+			PrivateKeyFile:  cfg.PacketCapture.ParserManagerPrivateKeyFile,
+			ClientCertFile:  cfg.PacketCapture.ParserClientCertFile,
+			ClientKeyFile:   cfg.PacketCapture.ParserClientKeyFile,
+			CAFile:          cfg.PacketCapture.ParserCAFile,
+			Timeout:         cfg.PacketCapture.ParserTimeout,
+			MaxPackets:      cfg.PacketCapture.ParserMaxPackets,
+			MaxBytes:        cfg.PacketCapture.ParserMaxBytes,
+			IncludeHex:      cfg.PacketCapture.ParserIncludeHex,
+		})
+		if parserErr != nil {
+			log.Warn("packet parser disabled", slog.Any("err", parserErr))
+		} else {
+			packetCaptureUC.SetParser(packetParser)
+		}
+	}
+	packetCaptureHandler := managerserverpacketcapture.NewHandler(packetCaptureUC)
+	toolsReg.SetPacketCaptureCreator(packetCaptureUC)
 	toolsReg.SetPluginConfigLister(pluginConfigUC)
 	toolsReg.SetConfigManager(manageraiopsconfig.NewAlertRuleManager(alertSvc))
 	toolsReg.SetK8sSnapshotReader(k8sSvc)
@@ -2360,6 +2402,7 @@ func main() {
 		// can't carry our manager JWT. Auth comes from the platform
 		// signature scheme inside the handler.
 		imbridgeHandler.RegisterPublic(api)
+		packetCaptureHandler.RegisterInternal(api)
 		// serve_page: public read of an assistant-hosted HTML page (under /api
 		// so nginx proxies it to the manager). The random token IS the
 		// capability; id is validated to block path traversal.
@@ -2473,6 +2516,7 @@ func main() {
 			managerserveraudit.NewHandler(auditUC).Register(protected)
 			reportHandler.Register(protected)
 			flowHandler.Register(protected)
+			packetCaptureHandler.Register(protected)
 		})
 	})
 
@@ -3500,6 +3544,7 @@ var coordinatorExtraToolNames = []string{
 	aiopstools.ToolNameQueryNetworkDevices,
 	aiopstools.ToolNameQueryNetworkInterfaces,
 	aiopstools.ToolNameGetNetworkNeighbors,
+	aiopstools.ToolNameCapturePCAP,
 }
 
 const defaultCoordinatorMaxTurns = 30
@@ -3689,7 +3734,14 @@ func buildAIOpsRuntime(
 	}
 	wrapped := make([]aiopstoolsbase.BaseTool, 0, len(baseTools))
 	for _, t := range baseTools {
-		wrapped = append(wrapped, aiopstoolsdec.Wrap(t, deps))
+		toolDeps := deps
+		if info, err := t.Info(context.Background()); err == nil && info != nil && info.Name == aiopstools.ToolNameCapturePCAP {
+			// A short capture includes capture duration plus parser work. Keep
+			// the normal 15s ceiling for every other tool, but let this bounded
+			// evidence collection finish in the same chat turn.
+			toolDeps.Timeout = 45 * time.Second
+		}
+		wrapped = append(wrapped, aiopstoolsdec.Wrap(t, toolDeps))
 	}
 
 	// 3. Skill / Agent registries — pre-loaded by loadBootstrapRegistries

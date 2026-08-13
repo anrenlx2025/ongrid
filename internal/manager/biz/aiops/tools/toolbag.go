@@ -84,7 +84,7 @@ var tierByName = map[string]string{
 	// Output/communication primitives — small schemas, frequently the point
 	// of a request ("host this report", "send this to the group"). Keep them
 	// full-schema so the LLM picks them instead of falling back to cloud_bash.
-	"serve_page":      "core",
+	"serve_page":        "core",
 	"send_notification": "core",
 
 	// specialty (deferred when over threshold) — host-files trio,
@@ -102,6 +102,7 @@ var tierByName = map[string]string{
 	"host_stat_file":        "specialty",
 	"host_restart_service":  "specialty",
 	"execute_k8s_action":    "specialty",
+	"capture_pcap":          "specialty",
 	"host_bash":             "specialty",
 }
 

@@ -10,7 +10,7 @@
 //   - group:   coarse grouping for display in the palette
 import { tr as trInline } from '@/i18n/locale';
 
-export type AppRouteGroup = '主页' | 'Agent' | '知识库' | '基础设施' | '监控告警' | '设置' | '用户管理';
+export type AppRouteGroup = '主页' | 'Agent' | '知识库' | '基础设施' | '监控告警' | '日常' | '设置' | '用户管理';
 
 export type AppRoute = {
   path: string;

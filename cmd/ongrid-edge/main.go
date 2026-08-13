@@ -215,6 +215,7 @@ func main() {
 		AgentVersion:             version,
 		Kubernetes:               k8sInfo,
 		UpgradeStageDir:          stageDir,
+		PacketCaptureDir:         envOr("ONGRID_PACKET_CAPTURE_DIR", "/var/lib/ongrid-edge/pcap"),
 	}, log)
 	if isK8sController(k8sInfo) {
 		inventoryInterval := parseDurationEnv("ONGRID_K8S_INVENTORY_INTERVAL", 10*time.Minute)

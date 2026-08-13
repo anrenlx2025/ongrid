@@ -201,6 +201,9 @@ func (r *Registry) BuildBaseTools() *ToolBag {
 	if r.caller != nil && r.edges != nil && r.devices != nil {
 		out = append(out, NewRestartServiceTool(r.caller, r.edges, r.devices, r.log))
 	}
+	if r.packetCapture != nil {
+		out = append(out, NewCapturePCAPTool(r.packetCapture, r.log))
+	}
 
 	// 19-20: topology graph tools. expand_topology does a
 	// BFS for blast radius; find_topology_node turns a name into a

@@ -101,6 +101,7 @@ ongrid_prepare_data_directories() {
         "$data_dir/embeddings" \
         "$data_dir/skills" \
         "$data_dir/pages" \
+        "$data_dir/packet-captures" \
         "$data_dir/workspace" \
         "$data_dir/tools" \
         "$log_dir"; then
@@ -120,6 +121,7 @@ ongrid_prepare_data_directories() {
     ongrid_ensure_path_owner 65532:65532 "$data_dir/embeddings" || failed=1
     ongrid_ensure_path_owner 65532:65532 "$data_dir/skills" || failed=1
     ongrid_ensure_path_owner 65532:65532 "$data_dir/pages" || failed=1
+    ongrid_ensure_path_owner 65532:65532 "$data_dir/packet-captures" || failed=1
     ongrid_ensure_path_owner 65532:65532 "$data_dir/workspace" || failed=1
     ongrid_ensure_path_owner 65532:65532 "$data_dir/tools" || failed=1
 
@@ -144,6 +146,7 @@ ongrid_repair_data_permissions() {
     ongrid_chown_tree_required 65532:65532 "$data_dir/embeddings" || failed=1
     ongrid_chown_tree_required 65532:65532 "$data_dir/skills" || failed=1
     ongrid_chown_tree_required 65532:65532 "$data_dir/pages" || failed=1
+    ongrid_chown_tree_required 65532:65532 "$data_dir/packet-captures" || failed=1
     ongrid_chown_tree_required 65532:65532 "$data_dir/workspace" || failed=1
     ongrid_chown_tree_required 65532:65532 "$data_dir/tools" || failed=1
     if ! chmod -R 0755 "$data_dir/embeddings" 2>/dev/null; then

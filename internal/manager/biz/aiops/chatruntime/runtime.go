@@ -1228,12 +1228,16 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 	networkInventoryIntent := containsAny(low,
 		"network device", "network devices", "snmp", "switch", "router", "firewall",
 		"network neighbor", "network neighbours", "connected host", "connection history",
-		"network interface", "interface status", "switch port", "port status") ||
+		"network interface", "interface status", "switch port", "port status",
+		"packet capture", "pcap", "tcpdump", "capture packets", "raw packets", "live traffic") ||
 		strings.Contains(userText, "网络设备") || strings.Contains(userText, "网络邻居") ||
 		strings.Contains(userText, "交换机") || strings.Contains(userText, "路由器") ||
 		strings.Contains(userText, "防火墙") || strings.Contains(userText, "连接关系") ||
 		strings.Contains(userText, "SNMP") || strings.Contains(userText, "接口状态") ||
-		strings.Contains(userText, "端口状态")
+		strings.Contains(userText, "端口状态") || strings.Contains(userText, "抓包") ||
+		strings.Contains(userText, "流量包") || strings.Contains(userText, "原始包")
+	packetCaptureIntent := containsAny(low, "packet capture", "pcap", "tcpdump", "capture packets", "raw packets", "live traffic") ||
+		strings.Contains(userText, "抓包") || strings.Contains(userText, "流量包") || strings.Contains(userText, "原始包")
 	complexHint := complexCoordinatorHint(low, userText)
 	topologyIntent := strings.Contains(low, "topology") || strings.Contains(low, "fleet") || strings.Contains(low, "deployment") ||
 		strings.Contains(userText, "拓扑") || strings.Contains(userText, "规模") || strings.Contains(userText, "版本") || strings.Contains(userText, "部署")
@@ -1254,6 +1258,14 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 		return filterCoordinatorToolNames(bag, "get_topology")
 	}
 	if networkInventoryIntent && !complexHint {
+		if packetCaptureIntent {
+			return filterCoordinatorToolNames(bag,
+				"ToolSearch",
+				"query_devices",
+				"query_network_interfaces",
+				"capture_pcap",
+			)
+		}
 		return filterCoordinatorToolNames(bag,
 			"ToolSearch",
 			"query_network_devices",
@@ -1470,15 +1482,21 @@ func (rt *Runtime) calcDynamicHints(history []*aiopsmodel.Message) []string {
 		return nil
 	}
 	var hints []string
-	if name, n := consecutiveFailedTool(history, 2); n >= 2 {
-		hints = append(hints, fmt.Sprintf("%s 已连续失败 %d 次：换工具，或问用户澄清", name, n))
-	}
-	// Repeat-call detection — same tool with similar args ≥ 3 times in
-	// the trailing window. This was the dominant failure mode in the
-	// "self-loop diagnose" 30-iter loop: query_promql kept getting called
-	// with slightly different metric names but no narrative progress.
-	if name, args, n := repeatedToolCall(history, 3); n >= 3 {
-		hints = append(hints, fmt.Sprintf("%s 已重复调用 %d 次（args: %s）：从你已有的数据下结论，不要再调用同款工具", name, n, args))
+	_, currentUser := latestUserMessage(history)
+	// Historical loop evidence is advisory only. It must not be injected
+	// into an unrelated new question: the graph's real tool memo is rebuilt
+	// per request, so carrying this hint across questions makes the model
+	// believe a previous turn exhausted this turn's budget.
+	if looksLikeToolLoopContinuation(currentUser) {
+		if name, n := consecutiveFailedTool(history, 2); n >= 2 {
+			hints = append(hints, fmt.Sprintf("%s 已连续失败 %d 次：换工具，或问用户澄清", name, n))
+		}
+		// Repeat-call detection — same tool with similar args ≥ 3 times in
+		// the trailing window. This guards a requested continuation without
+		// turning a prior investigation into a session-wide tool budget.
+		if name, args, n := repeatedToolCall(history, 3); n >= 3 {
+			hints = append(hints, fmt.Sprintf("%s 已重复调用 %d 次（args: %s）：从你已有的数据下结论，不要再调用同款工具", name, n, args))
+		}
 	}
 	if alertDraftGuardNeedsDraftRetry(history) {
 		hints = append(hints, "上一轮告警草案被安全闸门拦截：当前用户消息仍在继续创建告警时，直接调用 draft_config_change 生成 config_draft/draft_hash；metric 类规则需要先用 list_metric_catalog 获取当前指标。不要要求用户重新发送，不要输出文字草案，不要仅解释流程")
@@ -1492,6 +1510,21 @@ func (rt *Runtime) calcDynamicHints(history []*aiopsmodel.Message) []string {
 		hints = append(hints, fmt.Sprintf(`上一轮你说"%s"但没真发 tool_call。如要继续探索请直接发 tool_call，不要再写计划句；如已有结论请直接给用户答复`, excerpt))
 	}
 	return hints
+}
+
+// looksLikeToolLoopContinuation limits historical loop hints to an explicit
+// request to continue the preceding investigation. A new question in the same
+// session always receives a fresh per-tool execution budget.
+func looksLikeToolLoopContinuation(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	return containsAnyString(trimmed, lower, []string{
+		"继续", "接着", "重试", "再试", "上一条", "上一步", "刚才那个",
+		"continue", "retry", "try again", "previous step", "same investigation",
+	})
 }
 
 // repeatedToolCall walks the previous user turn's tool messages looking for the

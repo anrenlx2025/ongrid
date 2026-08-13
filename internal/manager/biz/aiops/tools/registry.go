@@ -135,6 +135,7 @@ type Registry struct {
 	k8sSnapshot         K8sSnapshotReader
 	k8sActionProposer   K8sActionProposer
 	legacyK8sActionTool *ExecuteK8sActionTool
+	packetCapture       PacketCaptureCreator
 
 	log   *slog.Logger
 	tools map[string]Tool
@@ -258,6 +259,9 @@ func (r *Registry) SetPluginConfigLister(p PluginConfigLister) {
 // the graph BaseTool registry. The legacy closure-style registry does not
 // expose these mutating flows.
 func (r *Registry) SetConfigManager(m ConfigManager) { r.configManager = m }
+
+// SetPacketCaptureCreator wires capture_pcap into the BaseTool registry.
+func (r *Registry) SetPacketCaptureCreator(p PacketCaptureCreator) { r.packetCapture = p }
 
 // NewRegistry builds a Registry and auto-registers the two MVP tools
 // (get_host_load, get_process_list). When promQuery / logQuery /

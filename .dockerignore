@@ -15,5 +15,17 @@ web/node_modules/
 web/dist/
 web/tsconfig.tsbuildinfo
 
+# Local deployment archives and screenshots must never inflate image build
+# contexts. They are generated outside release artifacts.
+*.tar
+*.tar.gz
+*.tgz
+*.png
+.tmp-*
+
+!packet-capture-ongrid
+!packet-capture-web-dist/
+!packet-capture-web-dist/**
+
 deploy/certs/
 deploy/install/certs/

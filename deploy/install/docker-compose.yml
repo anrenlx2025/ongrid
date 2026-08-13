@@ -252,6 +252,10 @@ services:
       # else a generated page 404s the moment the manager container is
       # recreated and its "open generated page" link goes dead.
       - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/pages:/var/lib/ongrid/pages
+      # Packet capture raw PCAP objects. Manager stores the raw bytes here after
+      # reading them back from the Edge, then serves authenticated downloads and
+      # private parser fetches from the same durable path.
+      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/packet-captures:/var/lib/ongrid/packet-captures
     logging:
       driver: json-file
       options:
@@ -297,6 +301,8 @@ services:
     ports:
       - "${ONGRID_HTTP_PORT:-443}:443"
       - "${ONGRID_HTTP_REDIRECT_PORT:-80}:80"
+    expose:
+      - "8081"
     logging:
       driver: json-file
       options:

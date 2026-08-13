@@ -180,7 +180,7 @@ func classifyToolCategory(name string) string {
 	switch name {
 	case "host_bash":
 		return "shell"
-	case "query_network_devices", "query_network_interfaces", "get_network_neighbors":
+	case "query_network_devices", "query_network_interfaces", "get_network_neighbors", "capture_pcap":
 		return "network"
 	case "get_host_load", "get_host_processes":
 		return "system"

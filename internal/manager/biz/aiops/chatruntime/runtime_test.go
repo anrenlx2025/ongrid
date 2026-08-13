@@ -707,6 +707,7 @@ func TestCalcDynamicHints(t *testing.T) {
 			makeToolMsg("query_logql", true),
 			makeToolMsg("query_logql", true),
 			makeToolMsg("query_logql", true),
+			{Role: model.RoleUser, Content: strPtr("继续排查")},
 		}
 		hints := rt.calcDynamicHints(hist)
 		if len(hints) == 0 {
@@ -716,8 +717,27 @@ func TestCalcDynamicHints(t *testing.T) {
 		for _, h := range hints {
 			joined += h + "\n"
 		}
-		if !contains(joined, "query_logql") || !contains(joined, "连续失败") {
-			t.Errorf("missing failure hint: %q", joined)
+		if !contains(joined, "query_logql") || (!contains(joined, "连续失败") && !contains(joined, "已重复调用")) {
+			t.Errorf("missing loop-protection hint: %q", joined)
+		}
+	})
+
+	t.Run("new_question_does_not_inherit_previous_turn_tool_loop_hint", func(t *testing.T) {
+		hist := []*model.Message{
+			{Role: model.RoleUser, Content: strPtr("检查主机磁盘")},
+			makeToolMsg("host_bash", false),
+			makeToolMsg("host_bash", false),
+			makeToolMsg("host_bash", false),
+			{Role: model.RoleAssistant, Content: strPtr("已完成磁盘检查")},
+			{Role: model.RoleUser, Content: strPtr("看看 docker images 有没有能够清理的？")},
+		}
+		hints := rt.calcDynamicHints(hist)
+		joined := ""
+		for _, h := range hints {
+			joined += h + "\n"
+		}
+		if contains(joined, "host_bash 已重复调用") || contains(joined, "host_bash 已连续失败") {
+			t.Errorf("independent question inherited prior tool loop hint: %q", joined)
 		}
 	})
 

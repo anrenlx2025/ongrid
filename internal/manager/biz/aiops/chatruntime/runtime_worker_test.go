@@ -483,6 +483,28 @@ func TestFilterCoordinatorToolsForIntent_NetworkInventoryUsesProgressiveDiscover
 	}
 }
 
+func TestFilterCoordinatorToolsForIntent_PacketCaptureKeepsCaptureTool(t *testing.T) {
+	bag := []basetool.BaseTool{
+		&fakeTool{name: "ToolSearch", schema: `{"type":"object"}`},
+		&fakeTool{name: "query_devices", schema: `{"type":"object"}`},
+		&fakeTool{name: "query_network_interfaces", schema: `{"type":"object"}`},
+		&fakeTool{name: "capture_pcap", schema: `{"type":"object"}`},
+		&fakeTool{name: "query_network_devices", schema: `{"type":"object"}`},
+		&fakeTool{name: "host_bash", schema: `{"type":"object"}`},
+	}
+	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "Start a 1 second packet capture on device_id 1 interface eth0", true))
+	for _, want := range []string{"ToolSearch", "query_devices", "query_network_interfaces", "capture_pcap"} {
+		if !containsName(names, want) {
+			t.Fatalf("packet capture intent should keep %s, got %v", want, names)
+		}
+	}
+	for _, hidden := range []string{"query_network_devices", "host_bash"} {
+		if containsName(names, hidden) {
+			t.Fatalf("packet capture intent should hide %s, got %v", hidden, names)
+		}
+	}
+}
+
 func TestFilterCoordinatorToolsForIntent_KeepsExplicitTopologyOrHost(t *testing.T) {
 	bag := []basetool.BaseTool{
 		&fakeTool{name: "query_traceql", schema: `{"type":"object"}`},
