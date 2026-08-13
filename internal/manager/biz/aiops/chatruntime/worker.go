@@ -635,7 +635,10 @@ func (rt *Runtime) runWorker(ctx context.Context, agentDef *Agent, sessID, userT
 		invokeOpts = append(invokeOpts, compose.WithChatModelOption(mopts...))
 	}
 	invokeOpts = append(invokeOpts, compose.WithToolsNodeOption(
-		compose.WithToolOption(graph.WithInvokeOpts(basetool.WithUserText(userText))),
+		compose.WithToolOption(graph.WithInvokeOpts(
+			basetool.WithUserText(userText),
+			basetool.WithHostWritePermission(basetool.HostWriteAllowedFromContext(ctx)),
+		)),
 	))
 	// Sever the worker's callback chain from the coordinator's. The ctx we
 	// were handed carries the parent graph's callback manager (eino propagates

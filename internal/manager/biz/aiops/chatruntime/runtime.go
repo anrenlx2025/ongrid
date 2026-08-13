@@ -795,7 +795,10 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	}
 	invokeOpts = append(invokeOpts, compose.WithToolsNodeOption(
 		compose.WithToolOption(
-			graph.WithInvokeOpts(basetool.WithUserText(req.UserText)),
+			graph.WithInvokeOpts(
+				basetool.WithUserText(req.UserText),
+				basetool.WithHostWritePermission(writeEnabled && !viewerOnly),
+			),
 			graph.WithToolInvocationPersistence(toolPersistence),
 		),
 	))
@@ -828,7 +831,7 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	// edge to bypass cmdpolicy and run the raw command. `writeEnabled` was
 	// resolved above (same value that gated the toolbag); reuse it so a single
 	// setting read drives both tool exposure and host-command authority.
-	ctx = basetool.WithHostWriteAllowed(ctx, writeEnabled)
+	ctx = basetool.WithHostWriteAllowed(ctx, writeEnabled && !viewerOnly)
 	// Always autoheal any in-flight tool batch on the way out — covers
 	// the "user closed browser mid-tool-batch" case the in-session
 	// ChatModel.OnStart flush can't reach. Defer with a background-rooted

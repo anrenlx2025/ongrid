@@ -77,6 +77,26 @@ func TestBashTool_LegacyDeviceIDRunsReadOnly(t *testing.T) {
 	}
 }
 
+func TestBashTool_AdminWriteGateBypassesReadOnlyPolicyForReadCommand(t *testing.T) {
+	fc := &fakeCaller{
+		respBody: mustMarshal(tunnel.BashExecResponse{Allowed: true, Stdout: "repo\ttag"}),
+	}
+	tool := newBashTool(t, &fakeHostFilesResolver{mapping: map[uint64]uint64{1: 7}}, fc)
+	_, err := tool.InvokableRun(context.Background(), `{"device_ids":[1],"cmd":"docker images"}`,
+		basetool.WithHostWritePermission(true),
+	)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	var req tunnel.BashExecRequest
+	if err := json.Unmarshal(fc.lastBody, &req); err != nil {
+		t.Fatalf("decode req: %v", err)
+	}
+	if !req.Unrestricted {
+		t.Fatal("admin write gate should send read commands through unrestricted edge execution")
+	}
+}
+
 type recHostBashProposer struct {
 	deviceIDs []uint64
 	command   string
