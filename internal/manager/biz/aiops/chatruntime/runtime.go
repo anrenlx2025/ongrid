@@ -741,11 +741,6 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 			graphCfg.MaxIterations = persona.MaxTurns
 		}
 	}
-	g, err := graph.BuildReActGraph(rt.cfg.ChatModel, sessionToolBag, graphCfg)
-	if err != nil {
-		return nil, fmt.Errorf("chatruntime: build graph: %w", err)
-	}
-
 	// 8. Wire the per-request callback chain. Persistence's
 	//    SessionID is filled in here; everything else lives on
 	//    rt.cfg.CallbackDeps. The SSE handler is appended via the
@@ -763,6 +758,12 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 		deps.SSE = nil
 	}
 	handlers := callbacks.NewDefaultHandlers(deps)
+	toolPersistence := callbacks.EnableSynchronousToolPersistence(handlers)
+	graphCfg.ToolPersistence = toolPersistence
+	g, err := graph.BuildReActGraph(rt.cfg.ChatModel, sessionToolBag, graphCfg)
+	if err != nil {
+		return nil, fmt.Errorf("chatruntime: build graph: %w", err)
+	}
 
 	// 9. Compute per-turn dynamic hints from history + persona's
 	//    critical_reminder (if a worker persona is active for this turn).
@@ -793,7 +794,10 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 		invokeOpts = append(invokeOpts, compose.WithChatModelOption(mopts...))
 	}
 	invokeOpts = append(invokeOpts, compose.WithToolsNodeOption(
-		compose.WithToolOption(graph.WithInvokeOpts(basetool.WithUserText(req.UserText))),
+		compose.WithToolOption(
+			graph.WithInvokeOpts(basetool.WithUserText(req.UserText)),
+			graph.WithToolInvocationPersistence(toolPersistence),
+		),
 	))
 	// Thread the persona-filtered tool view onto ctx so ToolSearch
 	// (which runs inside the graph) only returns tools the current
@@ -1246,8 +1250,16 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 		strings.Contains(userText, "不查拓扑") || strings.Contains(userText, "别查拓扑") || strings.Contains(userText, "无需拓扑") {
 		topologyIntent = false
 	}
+	explicitHostCommand := explicitHostCommandIntent(low, userText)
 	hostIntent := strings.Contains(low, "host_bash") || strings.Contains(low, "journalctl") || strings.Contains(low, "systemctl") ||
-		strings.Contains(low, "dmesg") || strings.Contains(low, "device_id") || strings.Contains(userText, "主机") || strings.Contains(userText, "文件")
+		strings.Contains(low, "dmesg") || strings.Contains(low, "device_id") || strings.Contains(userText, "主机") || strings.Contains(userText, "文件") ||
+		explicitHostCommand
+	// A direct command must win over broad keyword classifiers. In particular,
+	// "docker" contains the legacy "doc" knowledge keyword, which otherwise
+	// routes `docker images` to query_knowledge before host_bash is visible.
+	if explicitHostCommand {
+		return filterCoordinatorToolNames(bag, "host_bash", "query_devices")
+	}
 	if !knowledgeIntent && !metricIntent && !logIntent && !traceIntent && !sourceSearchIntent && !dbHealthIntent && !changeEventIntent && !alertRulesIntent && !incidentIntent && !networkInventoryIntent && !complexHint {
 		return bag
 	}
@@ -1357,6 +1369,24 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 		out = append(out, t)
 	}
 	return out
+}
+
+// explicitHostCommandIntent keeps host_bash available for a direct, known
+// read-only command. These commands do not necessarily mention a host-facing
+// keyword such as "journalctl", so treating them as generic knowledge queries
+// makes the coordinator unable to execute the request it was given.
+func explicitHostCommandIntent(low, userText string) bool {
+	asksHostExecution := strings.Contains(userText, "执行") || strings.Contains(userText, "运行") ||
+		strings.Contains(low, "run ") || strings.Contains(low, "execute ")
+	if !asksHostExecution {
+		return false
+	}
+	return containsAny(low,
+		"docker", "crictl", "nerdctl", "podman",
+		"df ", "du ", "free ", "uptime", "uname", "mount",
+		"ps ", "top ", "htop", "ip addr", "ip route", "ss ", "netstat",
+		"ls ", "cat ", "find ", "grep ", "stat ",
+	)
 }
 
 func filterCoordinatorToolNames(bag []basetool.BaseTool, names ...string) []basetool.BaseTool {

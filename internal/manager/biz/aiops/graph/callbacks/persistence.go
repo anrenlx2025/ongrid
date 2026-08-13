@@ -111,6 +111,12 @@ func persistenceWriteContext(parent context.Context) (context.Context, context.C
 type PersistenceHandler struct {
 	deps PersistenceDeps
 
+	// directToolPersistence moves tool lifecycle writes to graph's adapter
+	// boundary. Eino does not reliably emit nested ToolsNode callbacks through
+	// the outer graph, so leaving callback persistence enabled can create a
+	// duplicate row on versions where it does propagate them.
+	directToolPersistence bool
+
 	// errCounter is the lazy collector for persist failures. Resolved
 	// at construction; nil when Registerer is nil.
 	errCounter *prometheus.CounterVec
@@ -257,6 +263,9 @@ func (h *PersistenceHandler) Needed(_ context.Context, info *callbacks.RunInfo, 
 	case components.ComponentOfChatModel:
 		return timing == callbacks.TimingOnStart || timing == callbacks.TimingOnEnd
 	case components.ComponentOfTool:
+		if h.directToolPersistence {
+			return false
+		}
 		return timing == callbacks.TimingOnStart || timing == callbacks.TimingOnEnd || timing == callbacks.TimingOnError
 	default:
 		return false
@@ -286,6 +295,15 @@ func (h *PersistenceHandler) OnStart(ctx context.Context, info *callbacks.RunInf
 		h.trace(ctx, "tool_start_skip_nil_input", info, "")
 		return ctx
 	}
+	h.persistToolStart(ctx, info.Name, tin.ArgumentsInJSON)
+	return ctx
+}
+
+func (h *PersistenceHandler) persistToolStart(ctx context.Context, toolName, argumentsInJSON string) {
+	if h == nil || toolName == "" {
+		return
+	}
+	info := &callbacks.RunInfo{Name: toolName, Component: components.ComponentOfTool}
 	h.trace(ctx, "tool_start", info, "")
 	startedAt := time.Now().UTC()
 	// Resolve MessageID + LLM call id from the assistant turn that
@@ -314,8 +332,8 @@ func (h *PersistenceHandler) OnStart(ctx context.Context, info *callbacks.RunInf
 	}
 	row := &model.ToolCall{
 		MessageID:     messageID,
-		ToolName:      info.Name,
-		ArgumentsJSON: tin.ArgumentsInJSON,
+		ToolName:      toolName,
+		ArgumentsJSON: argumentsInJSON,
 		Status:        model.StatusPending,
 		StartedAt:     startedAt,
 		CreatedAt:     startedAt,
@@ -328,7 +346,7 @@ func (h *PersistenceHandler) OnStart(ctx context.Context, info *callbacks.RunInf
 	defer cancel()
 	if err := h.deps.Repo.CreateToolCall(writeCtx, row); err != nil {
 		h.recordErr("tool_call_insert", err)
-		return ctx
+		return
 	}
 	// stash by the eino tool_call_id so OnEnd can update the same row;
 	// llmCallID (if any) flows downstream so the role=tool chat_messages
@@ -338,13 +356,29 @@ func (h *PersistenceHandler) OnStart(ctx context.Context, info *callbacks.RunInf
 	h.toolCalls[einoTCID] = toolCallEntry{
 		rowID:      row.ID,
 		startedAt:  startedAt,
-		toolName:   info.Name,
-		argsJSON:   tin.ArgumentsInJSON,
+		toolName:   toolName,
+		argsJSON:   argumentsInJSON,
 		toolCallID: einoTCID,
 		llmCallID:  llmCallID,
 	}
 	h.toolCallsMu.Unlock()
-	return ctx
+}
+
+// PersistToolStart is called by graph's synchronous tool adapter. It avoids
+// relying on nested ToolsNode callbacks, which can be lost before OnEnd.
+func (h *PersistenceHandler) PersistToolStart(ctx context.Context, toolName, argumentsInJSON string) {
+	h.persistToolStart(ctx, toolName, argumentsInJSON)
+}
+
+// PersistToolEnd is called by graph's synchronous tool adapter after every
+// return path, including memoised and budget-limited results.
+func (h *PersistenceHandler) PersistToolEnd(ctx context.Context, toolName, response string) {
+	if h == nil || toolName == "" {
+		return
+	}
+	info := &callbacks.RunInfo{Name: toolName, Component: components.ComponentOfTool}
+	h.trace(ctx, "tool_end_success", info, toolCallIDFromCtx(ctx, info))
+	h.persistToolEnd(ctx, info, &einotool.CallbackOutput{Response: response}, nil)
 }
 
 // ctxToolCallID returns the WithToolCallID seam value, or "" when

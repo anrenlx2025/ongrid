@@ -117,6 +117,20 @@ func NewDefaultHandlers(deps Deps) []callbacks.Handler {
 	return out
 }
 
+// EnableSynchronousToolPersistence returns the request-scoped persistence
+// handler after switching its tool writes to graph's adapter boundary. This
+// is required because nested ToolsNode callbacks are not guaranteed to reach
+// the outer callback chain in the supported Eino runtime.
+func EnableSynchronousToolPersistence(handlers []callbacks.Handler) *PersistenceHandler {
+	for _, handler := range handlers {
+		if p, ok := handler.(*PersistenceHandler); ok {
+			p.directToolPersistence = true
+			return p
+		}
+	}
+	return nil
+}
+
 // FinalizeBatches runs end-of-request bookkeeping on every handler in
 // the chain that wants one. Currently this is just PersistenceHandler:
 // see flushIncompleteBatch — the ChatModel.OnStart hook autoheals the

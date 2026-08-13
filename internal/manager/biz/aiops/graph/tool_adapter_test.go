@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -26,6 +27,30 @@ type fakeBaseTool struct {
 	calls       atomic.Int32
 	lastArgs    string
 	lastOptsLen int
+}
+
+type recordingToolPersistence struct {
+	mu     sync.Mutex
+	starts []string
+	ends   []string
+}
+
+func (r *recordingToolPersistence) PersistToolStart(_ context.Context, name, args string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.starts = append(r.starts, name+":"+args)
+}
+
+func (r *recordingToolPersistence) PersistToolEnd(_ context.Context, name, response string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ends = append(r.ends, name+":"+response)
+}
+
+func (r *recordingToolPersistence) records() (starts, ends []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.starts...), append([]string(nil), r.ends...)
 }
 
 func (f *fakeBaseTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
@@ -148,6 +173,26 @@ func TestWrapBaseTool_InvokableRunForwardsArgs(t *testing.T) {
 	}
 	if inner.lastArgs != `{"a":1}` {
 		t.Errorf("lastArgs = %q, want %q", inner.lastArgs, `{"a":1}`)
+	}
+}
+
+func TestWrapBaseTool_PersistsActualInvocationAtAdapterBoundary(t *testing.T) {
+	t.Parallel()
+	inner := &fakeBaseTool{name: "host_bash", class: "read", runResp: `{"devices":[{"ok":true}]}`}
+	sink := &recordingToolPersistence{}
+	wrapped := WrapBaseTool(inner)
+	out, err := wrapped.InvokableRun(context.Background(), `{"device_ids":[1],"cmd":"docker images"}`,
+		WithToolInvocationPersistence(sink),
+	)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	starts, ends := sink.records()
+	if len(starts) != 1 || starts[0] != `host_bash:{"device_ids":[1],"cmd":"docker images"}` {
+		t.Fatalf("start records = %v", starts)
+	}
+	if len(ends) != 1 || ends[0] != "host_bash:"+out {
+		t.Fatalf("end records = %v", ends)
 	}
 }
 

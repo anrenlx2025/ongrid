@@ -521,6 +521,21 @@ func TestFilterCoordinatorToolsForIntent_KeepsExplicitTopologyOrHost(t *testing.
 	}
 }
 
+func TestFilterCoordinatorToolsForIntent_KeepsHostBashForExplicitDockerRead(t *testing.T) {
+	bag := []basetool.BaseTool{
+		&fakeTool{name: "query_knowledge", schema: `{"type":"object"}`},
+		&fakeTool{name: "get_topology", schema: `{"type":"object"}`},
+		&fakeTool{name: "host_bash", schema: `{"type":"object"}`},
+	}
+	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "在设备 1 上执行只读命令 docker images，只返回前 3 行", true))
+	if !containsName(names, "host_bash") {
+		t.Fatalf("explicit docker command should keep host_bash, got %v", names)
+	}
+	if containsName(names, "get_topology") {
+		t.Fatalf("explicit docker command should not add topology detour, got %v", names)
+	}
+}
+
 func TestFilterCoordinatorToolsForIntent_HonorsNegativeTopologyIntent(t *testing.T) {
 	bag := []basetool.BaseTool{
 		&fakeTool{name: "query_traceql", schema: `{"type":"object"}`},

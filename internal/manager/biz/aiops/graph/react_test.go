@@ -172,6 +172,39 @@ func TestBuildReActGraph_ToolCallThenFinal(t *testing.T) {
 	}
 }
 
+func TestBuildReActGraph_PersistsNestedToolInvocation(t *testing.T) {
+	t.Parallel()
+	scripted := newScriptedChatModel(
+		makeAssistantToolCall("", "call_host_bash", "host_bash", `{"cmd":"docker images"}`),
+		makeAssistantNoTools("done"),
+	)
+	hostBash := &fakeBaseTool{
+		name:       "host_bash",
+		class:      "read",
+		parameters: `{"type":"object","properties":{"cmd":{"type":"string"}}}`,
+		runResp:    `{"ok":true}`,
+	}
+	sink := &recordingToolPersistence{}
+	g, err := BuildReActGraph(scripted, []basetool.BaseTool{hostBash}, Config{MaxIterations: 5, ToolPersistence: sink})
+	if err != nil {
+		t.Fatalf("BuildReActGraph: %v", err)
+	}
+	out, err := g.Invoke(context.Background(), &Input{UserText: "run docker images"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if out == nil || out.AssistantMessage == nil || out.AssistantMessage.Content != "done" {
+		t.Fatalf("terminal reply = %+v, want done", out)
+	}
+	starts, ends := sink.records()
+	if len(starts) != 1 || starts[0] != `host_bash:{"cmd":"docker images"}` {
+		t.Fatalf("start records = %v", starts)
+	}
+	if len(ends) != 1 || ends[0] != `host_bash:{"ok":true}` {
+		t.Fatalf("end records = %v", ends)
+	}
+}
+
 func TestBuildReActGraph_RecoversFromToolError(t *testing.T) {
 	t.Parallel()
 	scripted := newScriptedChatModel(

@@ -579,11 +579,6 @@ func (rt *Runtime) runWorker(ctx context.Context, agentDef *Agent, sessID, userT
 		cfg.Model = agentDef.Model
 	}
 
-	g, err := graph.BuildReActGraph(rt.cfg.ChatModel, workerTools, cfg)
-	if err != nil {
-		return "", fmt.Errorf("chatruntime: build worker graph: %w", err)
-	}
-
 	// Persist the user-role prompt under the worker's session id. Same
 	// invariant Handle() honours on the coordinator path — the user turn
 	// lives on disk before the graph runs so a crash mid-invoke leaves
@@ -620,6 +615,11 @@ func (rt *Runtime) runWorker(ctx context.Context, agentDef *Agent, sessID, userT
 		// tool_start/tool_end are UI breadcrumbs for the parent chat.
 		deps.SSE = workerToolForwarder(parentEmit, workerID)
 		handlers = callbacks.NewDefaultHandlers(deps)
+	}
+	cfg.ToolPersistence = callbacks.EnableSynchronousToolPersistence(handlers)
+	g, err := graph.BuildReActGraph(rt.cfg.ChatModel, workerTools, cfg)
+	if err != nil {
+		return "", fmt.Errorf("chatruntime: build worker graph: %w", err)
 	}
 
 	// Thread the coordinator's resolved LLM choice (stamped on ctx via

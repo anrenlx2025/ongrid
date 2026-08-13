@@ -246,7 +246,26 @@ func WrapBaseTool(t basetool.BaseTool) einotool.InvokableTool {
 // passed through eino's `tool.Option` slot. Unexported so callers
 // route through WithInvokeOpts.
 type einoInvokeOptKey struct {
-	opts []basetool.InvokeOption
+	opts        []basetool.InvokeOption
+	persistence ToolInvocationPersistence
+}
+
+// ToolInvocationPersistence records the lifecycle of an actual adapter
+// invocation. Eino's nested ToolsNode does not reliably propagate component
+// callbacks to the outer graph, so the adapter is the only reliable place to
+// persist a tool result before the next model turn is assembled.
+type ToolInvocationPersistence interface {
+	PersistToolStart(ctx context.Context, toolName, argumentsInJSON string)
+	PersistToolEnd(ctx context.Context, toolName, response string)
+}
+
+// WithToolInvocationPersistence passes the persistence sink through Eino's
+// documented per-tool option channel. ToolsNode may derive a child context
+// without request values, but it preserves tool options for InvokableRun.
+func WithToolInvocationPersistence(sink ToolInvocationPersistence) einotool.Option {
+	return einotool.WrapImplSpecificOptFn(func(k *einoInvokeOptKey) {
+		k.persistence = sink
+	})
 }
 
 // WithInvokeOpts is the eino-side option helper that carries
@@ -274,7 +293,8 @@ func WithInvokeOpts(opts ...basetool.InvokeOption) einotool.Option {
 // PR-3 decorator chain wrapped *around* the inner tool *before* it
 // reaches this adapter.
 type einoToolAdapter struct {
-	inner basetool.BaseTool
+	inner       basetool.BaseTool
+	persistence ToolInvocationPersistence
 	// memo is the per-run identical-call cache (nil = memoization off, e.g.
 	// the single-tool WrapBaseTool path used by tests). Shared across all
 	// adapters built by one WrapBaseTools call.
@@ -357,13 +377,25 @@ func (a *einoToolAdapter) Info(ctx context.Context) (*schema.ToolInfo, error) {
 // True nil-receiver / unrecoverable bugs (we wrote the wrong inner)
 // still surface as Go error so eino can panic-loud, since those are
 // not user-fixable.
-func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
+func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (out string, err error) {
 	if a == nil || a.inner == nil {
 		return "", fmt.Errorf("graph: tool adapter has nil inner tool")
 	}
+	// Persist at the adapter boundary instead of depending on the nested
+	// ToolsNode callback. The latter may omit Tool.OnEnd, leaving a valid tool
+	// execution represented as an auto-healed failure in chat history.
+	a.resolveInfo(ctx)
+	resolved := einotool.GetImplSpecificOptions(&einoInvokeOptKey{}, opts...)
+	sink := a.persistence
+	if sink == nil {
+		sink = resolved.persistence
+	}
+	if sink != nil && a.cacheName != "" {
+		sink.PersistToolStart(ctx, a.cacheName, argumentsInJSON)
+		defer func() { sink.PersistToolEnd(ctx, a.cacheName, out) }()
+	}
 	var memoKey string
 	if a.memo != nil {
-		a.resolveInfo(ctx)
 		// 1. Identical-call memo (read tools only): a byte-identical repeat
 		//    returns the prior result without re-executing.
 		if a.cacheable && a.cacheName != "" {
@@ -384,8 +416,7 @@ func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON stri
 			return blocked, nil
 		}
 	}
-	resolved := einotool.GetImplSpecificOptions(&einoInvokeOptKey{}, opts...)
-	out, err := a.inner.InvokableRun(ctx, argumentsInJSON, resolved.opts...)
+	out, err = a.inner.InvokableRun(ctx, argumentsInJSON, resolved.opts...)
 	if err != nil {
 		// Count most failures toward the cap so a failing tool cannot be
 		// hammered. draft_config_change is the exception: validation failures
@@ -435,17 +466,21 @@ func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON stri
 // eino tool.BaseTool ready to feed into compose.ToolsNodeConfig.Tools.
 // Nil entries in the input are skipped so callers can pass a sparse
 // list (e.g. from a skill activation filter).
-func WrapBaseTools(tools []basetool.BaseTool) []einotool.BaseTool {
+func WrapBaseTools(tools []basetool.BaseTool, persistence ...ToolInvocationPersistence) []einotool.BaseTool {
 	// One memo shared by every tool in this build = scoped to one run
 	// (the graph is rebuilt per request). The single-tool WrapBaseTool
 	// path deliberately leaves memo nil (tests / non-graph callers).
 	memo := newToolMemo()
+	var sink ToolInvocationPersistence
+	if len(persistence) > 0 {
+		sink = persistence[0]
+	}
 	out := make([]einotool.BaseTool, 0, len(tools))
 	for _, t := range tools {
 		if t == nil {
 			continue
 		}
-		out = append(out, &einoToolAdapter{inner: t, memo: memo})
+		out = append(out, &einoToolAdapter{inner: t, memo: memo, persistence: sink})
 	}
 	return out
 }
