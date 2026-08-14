@@ -144,6 +144,9 @@ func TestCapturePCAPToolCreatesRepeatedMembersInOneSession(t *testing.T) {
 			t.Fatalf("target = %+v", target)
 		}
 	}
+	if creator.sessionIn.Targets[1].StartAfterSeconds != 30 {
+		t.Fatalf("second round starts after %d seconds", creator.sessionIn.Targets[1].StartAfterSeconds)
+	}
 }
 
 func TestCapturePCAPToolUsesWorkflowSourceFromContext(t *testing.T) {

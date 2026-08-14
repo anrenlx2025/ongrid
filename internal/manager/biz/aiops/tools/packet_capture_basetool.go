@@ -28,7 +28,7 @@ var CapturePCAPSchema = json.RawMessage(`{
     "device_id": {"type": "integer", "description": "Host device id to capture on."},
     "interface": {"type": "string", "description": "Network interface name on the host, for example eth0."},
 	"targets": {"type": "array", "minItems": 1, "description": "Capture targets. Use one item for one host; multiple items may be on the same or different edges.", "items": {"type": "object", "properties": {"device_id": {"type": "integer"}, "interface": {"type": "string"}}, "required": ["device_id", "interface"]}},
-	"repeat_count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1, "description": "Number of independent capture members to create per target in the same session. Use 2 when the operator asks for two captures in one investigation."},
+	"repeat_count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1, "description": "Number of sequential capture rounds per target in the same session. A round captures all targets concurrently; later rounds start after the prior round duration."},
     "filter": {"type": "string", "description": "Simple filter grammar: tcp, udp, icmp, icmp6, host <IP>, port <N>, joined by 'and'. Example: tcp and port 443."},
     "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 300, "default": 30},
     "max_bytes": {"type": "integer", "minimum": 1, "maximum": 268435456, "default": 67108864},
@@ -169,8 +169,15 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 	if repeatCount > 1 {
 		original := targets
 		targets = make([]pcapbiz.SessionTarget, 0, len(original)*repeatCount)
-		for range repeatCount {
-			targets = append(targets, original...)
+		interval := in.DurationSeconds
+		if interval == 0 {
+			interval = 30
+		}
+		for round := range repeatCount {
+			for _, target := range original {
+				target.StartAfterSeconds = round * interval
+				targets = append(targets, target)
+			}
 		}
 	}
 	title := strings.TrimSpace(in.Title)

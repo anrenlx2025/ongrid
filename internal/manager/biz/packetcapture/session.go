@@ -19,8 +19,9 @@ import (
 const sessionStartLeadTime = 5 * time.Second
 
 type SessionTarget struct {
-	DeviceID  uint64 `json:"device_id"`
-	Interface string `json:"interface"`
+	DeviceID          uint64 `json:"device_id"`
+	Interface         string `json:"interface"`
+	StartAfterSeconds int    `json:"start_after_seconds,omitempty"`
 }
 
 type CreateSessionInput struct {
@@ -83,7 +84,8 @@ func (u *Usecase) CreateSession(ctx context.Context, in CreateSessionInput) (*Se
 	}
 	out := &SessionOutput{Session: session, Captures: make([]*model.Capture, 0, len(in.Targets))}
 	for _, target := range in.Targets {
-		created, createErr := u.Create(ctx, CreateInput{DeviceID: target.DeviceID, Interface: target.Interface, Filter: probe.Filter, DurationSeconds: probe.DurationSeconds, MaxBytes: probe.MaxBytes, MaxPackets: probe.MaxPackets, Snaplen: probe.Snaplen, Promiscuous: probe.Promiscuous, Title: probe.Title, Description: probe.Description, Source: probe.Source, CreatedBy: probe.CreatedBy, SessionID: session.ID, PlannedStartAt: &plannedStart})
+		memberStart := plannedStart.Add(time.Duration(target.StartAfterSeconds) * time.Second)
+		created, createErr := u.Create(ctx, CreateInput{DeviceID: target.DeviceID, Interface: target.Interface, Filter: probe.Filter, DurationSeconds: probe.DurationSeconds, MaxBytes: probe.MaxBytes, MaxPackets: probe.MaxPackets, Snaplen: probe.Snaplen, Promiscuous: probe.Promiscuous, Title: probe.Title, Description: probe.Description, Source: probe.Source, CreatedBy: probe.CreatedBy, SessionID: session.ID, PlannedStartAt: &memberStart})
 		if createErr != nil {
 			out.MemberErrors = append(out.MemberErrors, fmt.Sprintf("device %d: %v", target.DeviceID, createErr))
 			continue
