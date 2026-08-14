@@ -42,9 +42,12 @@ export type ConfigDraftResult = {
 type ConfirmConfigDraft = (draft: ConfigDraftResult) => boolean | void | Promise<boolean | void>;
 
 type OperationCardData = {
+  kind: string;
   id: string;
   title: string;
   state: string;
+  summary?: string;
+  detailURL?: string;
   filter?: string;
   memberCount: number;
 };
@@ -187,7 +190,9 @@ function ToolCallSummaryBlock({
   if (approval) {
     return <PendingApprovalCard approvalID={approval.id} kind={approval.kind} command={argCommandText(call.arguments)} />;
   }
-  const operation = !isError ? asPacketCaptureOperation(call.result) : null;
+  const operation = !isError
+    ? asOperation(call.result) ?? (isPending ? pendingPacketCaptureOperation(call.name, call.arguments) : null)
+    : null;
   if (operation) return <OperationCard operation={operation} />;
   const configDraft = !isError ? asConfigDraft(call.result) : null;
   return (
@@ -266,10 +271,33 @@ function ToolCallSummaryBlock({
   );
 }
 
-function asPacketCaptureOperation(result: unknown): OperationCardData | null {
+function asOperation(result: unknown): OperationCardData | null {
   const value = typeof result === 'string' ? safeParse(result) : result;
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
+  const operation = record.operation && typeof record.operation === 'object'
+    ? record.operation as Record<string, unknown>
+    : null;
+  if (operation?.kind === 'packet_capture_session') {
+    const id = typeof operation.id === 'string' ? operation.id : '';
+    const links = operation.links && typeof operation.links === 'object'
+      ? operation.links as Record<string, unknown>
+      : {};
+    return {
+      kind: 'packet_capture_session',
+      id,
+      title: typeof operation.title === 'string' && operation.title ? operation.title : 'Packet capture',
+      state: typeof operation.state === 'string' ? operation.state : 'collecting',
+      summary: typeof operation.summary === 'string' ? operation.summary : undefined,
+      detailURL: typeof links.detail === 'string' ? links.detail : undefined,
+      memberCount: Array.isArray(record.captures) ? record.captures.length : 0,
+    };
+  }
+
+  return asLegacyPacketCaptureOperation(record);
+}
+
+function asLegacyPacketCaptureOperation(record: Record<string, unknown>): OperationCardData | null {
   if (!record.session || typeof record.session !== 'object') return null;
   const session = record.session as Record<string, unknown>;
   const id = typeof session.public_id === 'string'
@@ -286,6 +314,7 @@ function asPacketCaptureOperation(result: unknown): OperationCardData | null {
     : null;
 
   return {
+    kind: 'packet_capture_session',
     id,
     title: typeof session.title === 'string' && session.title ? session.title : 'Packet capture',
     state: typeof session.state === 'string'
@@ -295,6 +324,26 @@ function asPacketCaptureOperation(result: unknown): OperationCardData | null {
         : 'collecting',
     filter: typeof session.canonical_filter === 'string' ? session.canonical_filter : undefined,
     memberCount: Array.isArray(record.captures) ? record.captures.length : capture ? 1 : 0,
+    detailURL: `/artifacts/packet-sessions/${encodeURIComponent(id)}`,
+  };
+}
+
+function pendingPacketCaptureOperation(
+  toolName: string,
+  argumentsValue: unknown,
+): OperationCardData | null {
+  if (toolName !== 'capture_pcap') return null;
+  const args = typeof argumentsValue === 'string' ? safeParse(argumentsValue) : argumentsValue;
+  if (!args || typeof args !== 'object') return null;
+  const record = args as Record<string, unknown>;
+  const repeatCount = typeof record.repeat_count === 'number' ? record.repeat_count : 1;
+  return {
+    kind: 'packet_capture_session',
+    id: '',
+    title: typeof record.title === 'string' && record.title ? record.title : 'Packet capture',
+    state: 'creating',
+    filter: typeof record.filter === 'string' ? record.filter : undefined,
+    memberCount: repeatCount,
   };
 }
 
@@ -316,13 +365,15 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
             {operation.filter || tr('全部流量', 'all traffic')} · {operation.memberCount} {tr('个采集点', 'capture points')}
           </div>
         </div>
-        <a
-          href={`/artifacts/packet-sessions/${encodeURIComponent(operation.id)}`}
-          className="inline-flex h-8 items-center justify-center gap-1 border border-zinc-700 px-2.5 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
-        >
-          <ExternalLink size={13} />
-          {tr('打开调查', 'Open investigation')}
-        </a>
+        {operation.detailURL && (
+          <a
+            href={operation.detailURL}
+            className="inline-flex h-8 items-center justify-center gap-1 border border-zinc-700 px-2.5 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+          >
+            <ExternalLink size={13} />
+            {tr('打开调查', 'Open investigation')}
+          </a>
+        )}
       </div>
     </section>
   );
@@ -330,6 +381,8 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
 
 function operationPresentation(state: string, tr: (zh: string, en: string) => string) {
   switch (state) {
+    case 'creating':
+      return { label: tr('正在创建', 'Creating'), className: 'text-sky-400' };
     case 'ready':
       return { label: tr('已完成', 'Ready'), className: 'text-emerald-400' };
     case 'partial':

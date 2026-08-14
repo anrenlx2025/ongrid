@@ -18,7 +18,7 @@ const (
 	ToolNameGetPCAPSession = "get_packet_capture_session"
 )
 
-const capturePCAPDescription = "Start a bounded packet capture on one host device, or a coordinated capture session across multiple edge-hosted devices using targets. For short captures, waits for parsing and returns durable packet artifacts or a session id. Captures are audited and must be explicitly requested by the operator."
+const capturePCAPDescription = "Start a bounded packet capture session on one or more host devices. Use repeat_count to create multiple capture members for each target in the same session. The tool returns as soon as every member is accepted by its edge; inspect the returned session for progress and artifacts. Captures are audited and must be explicitly requested by the operator."
 
 const capturePCAPWhenToUse = "Use only when the user explicitly asks to capture packets or diagnose live network traffic on a specific host device/interface. Do not use for normal metric/log/trace questions. Prefer query_logql/query_traceql/query_promql first unless the user asks for raw packets."
 
@@ -27,14 +27,16 @@ var CapturePCAPSchema = json.RawMessage(`{
   "properties": {
     "device_id": {"type": "integer", "description": "Host device id to capture on."},
     "interface": {"type": "string", "description": "Network interface name on the host, for example eth0."},
-	"targets": {"type": "array", "minItems": 2, "description": "For cross-edge diagnosis: two or more targets, each on a different edge.", "items": {"type": "object", "properties": {"device_id": {"type": "integer"}, "interface": {"type": "string"}}, "required": ["device_id", "interface"]}},
+	"targets": {"type": "array", "minItems": 1, "description": "Capture targets. Use one item for one host; multiple items may be on the same or different edges.", "items": {"type": "object", "properties": {"device_id": {"type": "integer"}, "interface": {"type": "string"}}, "required": ["device_id", "interface"]}},
+	"repeat_count": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1, "description": "Number of independent capture members to create per target in the same session. Use 2 when the operator asks for two captures in one investigation."},
     "filter": {"type": "string", "description": "Simple filter grammar: tcp, udp, icmp, icmp6, host <IP>, port <N>, joined by 'and'. Example: tcp and port 443."},
     "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 300, "default": 30},
     "max_bytes": {"type": "integer", "minimum": 1, "maximum": 268435456, "default": 67108864},
     "max_packets": {"type": "integer", "minimum": 1, "maximum": 500000, "default": 100000},
     "snaplen": {"type": "integer", "minimum": 64, "maximum": 65535, "default": 1514},
     "promiscuous": {"type": "boolean", "default": false},
-    "reason": {"type": "string", "description": "Why this capture is requested. Stored on the capture record."}
+	"title": {"type": "string", "description": "Short investigation name shown on the packet capture session."},
+	"reason": {"type": "string", "description": "Why this capture is requested. Stored on the capture record."}
   },
 	"anyOf": [{"required": ["device_id", "interface"]}, {"required": ["targets"]}]
 }`)
@@ -100,6 +102,8 @@ type capturePCAPArgs struct {
 	MaxPackets      int    `json:"max_packets"`
 	Snaplen         int    `json:"snaplen"`
 	Promiscuous     bool   `json:"promiscuous"`
+	RepeatCount     int    `json:"repeat_count"`
+	Title           string `json:"title"`
 	Reason          string `json:"reason"`
 	Targets         []struct {
 		DeviceID  uint64 `json:"device_id"`
@@ -155,15 +159,40 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 	if len(targets) == 0 {
 		targets = append(targets, pcapbiz.SessionTarget{DeviceID: in.DeviceID, Interface: strings.TrimSpace(in.Interface)})
 	}
-	out, err := sessionCreator.CreateSession(ctx, pcapbiz.CreateSessionInput{Targets: targets, Filter: strings.TrimSpace(in.Filter), DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: "Packet capture", Description: strings.TrimSpace(in.Reason), Source: source, CreatedBy: resolved.UserID})
+	repeatCount := in.RepeatCount
+	if repeatCount == 0 {
+		repeatCount = 1
+	}
+	if repeatCount < 1 || repeatCount > 10 {
+		return "", fmt.Errorf("%s: repeat_count must be between 1 and 10", ToolNameCapturePCAP)
+	}
+	if repeatCount > 1 {
+		original := targets
+		targets = make([]pcapbiz.SessionTarget, 0, len(original)*repeatCount)
+		for range repeatCount {
+			targets = append(targets, original...)
+		}
+	}
+	title := strings.TrimSpace(in.Title)
+	if title == "" {
+		title = "Packet capture"
+	}
+	out, err := sessionCreator.CreateSession(ctx, pcapbiz.CreateSessionInput{Targets: targets, Filter: strings.TrimSpace(in.Filter), DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: title, Description: strings.TrimSpace(in.Reason), Source: source, CreatedBy: resolved.UserID})
 	if err != nil {
 		return "", err
 	}
 	if len(out.Captures) == 0 {
 		return "", fmt.Errorf("%s: packet capture session has no created members", ToolNameCapturePCAP)
 	}
-	capture, waited := t.waitForCapture(ctx, out.Captures[0])
-	body, err := json.Marshal(map[string]any{"session": out.Session, "member_errors": out.MemberErrors, "result": capturePCAPResult(capture, nil, waited)})
+	operation := basetool.Operation{
+		Kind:    "packet_capture_session",
+		ID:      out.Session.PublicID,
+		State:   string(out.Session.State),
+		Title:   out.Session.Title,
+		Summary: fmt.Sprintf("%d capture member(s)", len(out.Captures)),
+		Links:   map[string]string{"detail": "/artifacts/packet-sessions/" + out.Session.PublicID},
+	}
+	body, err := json.Marshal(map[string]any{"operation": operation, "session": out.Session, "captures": out.Captures, "member_errors": out.MemberErrors, "result": capturePCAPResult(out.Captures[0], nil, false)})
 	if err != nil {
 		return "", fmt.Errorf("%s: marshal response: %w", ToolNameCapturePCAP, err)
 	}

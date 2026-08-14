@@ -13,8 +13,9 @@ import (
 )
 
 type fakePacketCaptureCreator struct {
-	in      pcapbiz.CreateInput
-	refresh func(*pcapmodel.Capture) *pcapmodel.Capture
+	in        pcapbiz.CreateInput
+	sessionIn pcapbiz.CreateSessionInput
+	refresh   func(*pcapmodel.Capture) *pcapmodel.Capture
 }
 
 func (f *fakePacketCaptureCreator) Create(_ context.Context, in pcapbiz.CreateInput) (*pcapbiz.CreateOutput, error) {
@@ -31,6 +32,7 @@ func (f *fakePacketCaptureCreator) Create(_ context.Context, in pcapbiz.CreateIn
 }
 
 func (f *fakePacketCaptureCreator) CreateSession(ctx context.Context, in pcapbiz.CreateSessionInput) (*pcapbiz.SessionOutput, error) {
+	f.sessionIn = in
 	if len(in.Targets) == 0 {
 		return nil, nil
 	}
@@ -116,8 +118,31 @@ func TestCapturePCAPToolInvokesUsecase(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
 		t.Fatalf("decode output: %v", err)
 	}
-	if decoded.Session.PublicID == "" || decoded.Result.Capture.ID != 12 || !decoded.Result.Waited || decoded.Result.Artifact.ID == "" || len(decoded.Result.Artifact.FirstPackets) != 1 {
+	if decoded.Session.PublicID == "" || decoded.Result.Capture.ID != 12 || decoded.Result.Waited || decoded.Result.Artifact.ID != "" {
 		t.Fatalf("output = %s", out)
+	}
+}
+
+func TestCapturePCAPToolCreatesRepeatedMembersInOneSession(t *testing.T) {
+	creator := &fakePacketCaptureCreator{}
+	tool := NewCapturePCAPTool(creator, nil)
+
+	_, err := tool.InvokableRun(context.Background(), `{
+		"device_id": 24,
+		"interface": "eth0",
+		"repeat_count": 2,
+		"title": "HTTPS investigation"
+	}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	if len(creator.sessionIn.Targets) != 2 || creator.sessionIn.Title != "HTTPS investigation" {
+		t.Fatalf("session input = %+v", creator.sessionIn)
+	}
+	for _, target := range creator.sessionIn.Targets {
+		if target.DeviceID != 24 || target.Interface != "eth0" {
+			t.Fatalf("target = %+v", target)
+		}
 	}
 }
 
