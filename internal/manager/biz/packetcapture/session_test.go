@@ -169,3 +169,19 @@ func TestAnalyzeSessionMarksMissingObservationWithoutClaimingLoss(t *testing.T) 
 		t.Fatal("clock/observation warning missing")
 	}
 }
+
+func TestUpdateSessionAnalysisKeepsActiveCaptureCollecting(t *testing.T) {
+	repo := &sessionTestRepo{fakeRepo: newFakeRepo(), sessions: map[string]*model.Session{}}
+	session := &model.Session{ID: 1, PublicID: "pcap-session-active", State: model.SessionStateCollecting}
+	repo.sessions[session.PublicID] = session
+	repo.byID[1] = &model.Capture{ID: 1, SessionID: session.ID, State: model.StateCapturing}
+	uc := New(repo, &fakeCaller{}, sessionResolver{}, nil)
+
+	detail, err := uc.updateSessionAnalysis(context.Background(), session.PublicID)
+	if err != nil {
+		t.Fatalf("update session analysis: %v", err)
+	}
+	if detail.Session.State != model.SessionStateCollecting {
+		t.Fatalf("state = %q, want collecting", detail.Session.State)
+	}
+}
