@@ -221,3 +221,32 @@ describe('MessageBubble config draft card', () => {
     expect(screen.getByRole('button', { name: /确认应用|Apply/ })).toBeInTheDocument();
   });
 });
+
+describe('MessageBubble operation card', () => {
+  it('renders a persisted packet capture result as an investigation card', () => {
+    const message: ChatMessage = {
+      id: 'packet-capture-result',
+      role: 'tool',
+      tool_name: 'capture_pcap',
+      content: JSON.stringify({
+        session: {
+          public_id: 'pcap-session-7d5a7c7e',
+          title: 'Checkout latency investigation',
+          state: 'ready',
+          canonical_filter: 'tcp port 443',
+        },
+        result: { capture: { state: 'ready' } },
+      }),
+    };
+
+    render(<MessageBubble message={message} />);
+
+    expect(screen.getByText('抓包会话')).toBeInTheDocument();
+    expect(screen.getByText('Checkout latency investigation')).toBeInTheDocument();
+    expect(screen.getByText('已完成')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '打开调查' })).toHaveAttribute(
+      'href',
+      '/artifacts/packet-sessions/pcap-session-7d5a7c7e',
+    );
+  });
+});

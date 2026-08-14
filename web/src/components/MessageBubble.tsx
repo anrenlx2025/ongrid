@@ -1,7 +1,20 @@
 import { useState, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Wrench, ChevronDown, ChevronRight, Loader2, AlertCircle, CheckCircle2, ShieldAlert, Check, X, XCircle } from 'lucide-react';
+import {
+  AlertCircle,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  Loader2,
+  Network,
+  ShieldAlert,
+  Wrench,
+  X,
+  XCircle,
+} from 'lucide-react';
 import type { ChatMessage, ToolCallSummary } from '@/api/chat';
 import { approveApproval, rejectApproval, getApproval } from '@/api/approvals';
 import { cn } from '@/lib/cn';
@@ -27,6 +40,14 @@ export type ConfigDraftResult = {
 };
 
 type ConfirmConfigDraft = (draft: ConfigDraftResult) => boolean | void | Promise<boolean | void>;
+
+type OperationCardData = {
+  id: string;
+  title: string;
+  state: string;
+  filter?: string;
+  memberCount: number;
+};
 
 type Props = {
   message: ChatMessage;
@@ -166,6 +187,8 @@ function ToolCallSummaryBlock({
   if (approval) {
     return <PendingApprovalCard approvalID={approval.id} kind={approval.kind} command={argCommandText(call.arguments)} />;
   }
+  const operation = !isError ? asPacketCaptureOperation(call.result) : null;
+  if (operation) return <OperationCard operation={operation} />;
   const configDraft = !isError ? asConfigDraft(call.result) : null;
   return (
     <div
@@ -241,6 +264,81 @@ function ToolCallSummaryBlock({
       )}
     </div>
   );
+}
+
+function asPacketCaptureOperation(result: unknown): OperationCardData | null {
+  const value = typeof result === 'string' ? safeParse(result) : result;
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  if (!record.session || typeof record.session !== 'object') return null;
+  const session = record.session as Record<string, unknown>;
+  const id = typeof session.public_id === 'string'
+    ? session.public_id
+    : typeof session.id === 'string'
+      ? session.id
+      : '';
+  if (!id.startsWith('pcap-session-')) return null;
+  const nested = record.result && typeof record.result === 'object'
+    ? record.result as Record<string, unknown>
+    : {};
+  const capture = nested.capture && typeof nested.capture === 'object'
+    ? nested.capture as Record<string, unknown>
+    : null;
+
+  return {
+    id,
+    title: typeof session.title === 'string' && session.title ? session.title : 'Packet capture',
+    state: typeof session.state === 'string'
+      ? session.state
+      : typeof capture?.state === 'string'
+        ? capture.state
+        : 'collecting',
+    filter: typeof session.canonical_filter === 'string' ? session.canonical_filter : undefined,
+    memberCount: Array.isArray(record.captures) ? record.captures.length : capture ? 1 : 0,
+  };
+}
+
+function OperationCard({ operation }: { operation: OperationCardData }) {
+  const { tr } = useI18n();
+  const presentation = operationPresentation(operation.state, tr);
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-900/40 text-xs">
+      <div className="flex items-center gap-2 border-b border-zinc-800/80 px-3 py-2.5">
+        <Network size={14} className="text-sky-400" />
+        <span className="font-medium text-zinc-100">{tr('抓包会话', 'Packet capture')}</span>
+        <span className={`ml-auto ${presentation.className}`}>{presentation.label}</span>
+      </div>
+      <div className="grid gap-2 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+        <div className="min-w-0">
+          <div className="truncate font-medium text-zinc-200">{operation.title}</div>
+          <div className="mt-1 font-mono text-[11px] text-zinc-500">
+            {operation.filter || tr('全部流量', 'all traffic')} · {operation.memberCount} {tr('个采集点', 'capture points')}
+          </div>
+        </div>
+        <a
+          href={`/artifacts/packet-sessions/${encodeURIComponent(operation.id)}`}
+          className="inline-flex h-8 items-center justify-center gap-1 border border-zinc-700 px-2.5 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+        >
+          <ExternalLink size={13} />
+          {tr('打开调查', 'Open investigation')}
+        </a>
+      </div>
+    </section>
+  );
+}
+
+function operationPresentation(state: string, tr: (zh: string, en: string) => string) {
+  switch (state) {
+    case 'ready':
+      return { label: tr('已完成', 'Ready'), className: 'text-emerald-400' };
+    case 'partial':
+      return { label: tr('部分完成', 'Partial'), className: 'text-amber-400' };
+    case 'failed':
+      return { label: tr('失败', 'Failed'), className: 'text-red-400' };
+    default:
+      return { label: tr('采集中', 'Capturing'), className: 'text-sky-400' };
+  }
 }
 
 function ConfigDraftCard({
