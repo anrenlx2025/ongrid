@@ -30,12 +30,16 @@ func NewHandler(uc *bizpacketcapture.Usecase) *Handler {
 }
 
 func (h *Handler) Register(r chi.Router) {
+	r.Get("/v1/packet-capture-sessions", h.listSessions)
+	r.Get("/v1/packet-capture-sessions/{publicID}", h.getSession)
 	r.Get("/v1/packet-captures", h.list)
 	r.Get("/v1/packet-captures/artifacts/{artifactID}", h.getArtifact)
 	r.Get("/v1/packet-captures/{id}", h.get)
 	r.Get("/v1/packet-captures/{id}/download", h.download)
 	r.With(h.requireWriter).Post("/v1/packet-captures", h.create)
 	r.With(h.requireWriter).Post("/v1/packet-captures/{id}/refresh", h.refresh)
+	r.With(h.requireWriter).Post("/v1/packet-capture-sessions", h.createSession)
+	r.With(h.requireWriter).Post("/v1/packet-capture-sessions/{publicID}/refresh", h.refreshSession)
 }
 
 // @Summary Get packet capture artifact
@@ -79,6 +83,7 @@ type captureDTO struct {
 	State           string     `json:"state"`
 	EdgeID          uint64     `json:"edge_id"`
 	DeviceID        uint64     `json:"device_id"`
+	SessionID       uint64     `json:"session_id,omitempty"`
 	InterfaceName   string     `json:"interface_name"`
 	CanonicalFilter string     `json:"canonical_filter"`
 	Direction       string     `json:"direction"`
@@ -117,6 +122,51 @@ type createReq struct {
 	RequestIdempotencyKey string `json:"request_idempotency_key"`
 }
 
+type sessionTargetReq struct {
+	DeviceID  uint64 `json:"device_id"`
+	Interface string `json:"interface"`
+}
+type createSessionReq struct {
+	Targets         []sessionTargetReq `json:"targets"`
+	Filter          string             `json:"filter"`
+	DurationSeconds int                `json:"duration_seconds"`
+	MaxBytes        int64              `json:"max_bytes"`
+	MaxPackets      int                `json:"max_packets"`
+	Snaplen         int                `json:"snaplen"`
+	Promiscuous     bool               `json:"promiscuous"`
+	Title           string             `json:"title"`
+	Description     string             `json:"description"`
+}
+
+type sessionDTO struct {
+	ID              string    `json:"id"`
+	State           string    `json:"state"`
+	Title           string    `json:"title"`
+	Description     string    `json:"description"`
+	CanonicalFilter string    `json:"canonical_filter"`
+	DurationSeconds uint32    `json:"duration_seconds"`
+	PlannedStartAt  time.Time `json:"planned_start_at"`
+	ClockQuality    string    `json:"clock_quality"`
+	Analysis        any       `json:"analysis,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+func toSessionDTO(s *model.Session) sessionDTO {
+	if s == nil {
+		return sessionDTO{}
+	}
+	dto := sessionDTO{ID: s.PublicID, State: s.State, Title: s.Title, Description: s.Description, CanonicalFilter: s.CanonicalFilter, DurationSeconds: s.DurationSecs, PlannedStartAt: s.PlannedStartAt, ClockQuality: s.ClockQuality, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
+	if s.AnalysisJSON != "" {
+		// A malformed stored analysis must not make the session list unavailable;
+		// the detail endpoint recomputes analysis from member artifacts.
+		if err := json.Unmarshal([]byte(s.AnalysisJSON), &dto.Analysis); err != nil {
+			dto.Analysis = nil
+		}
+	}
+	return dto
+}
+
 func toDTO(c *model.Capture) captureDTO {
 	if c == nil {
 		return captureDTO{}
@@ -128,6 +178,7 @@ func toDTO(c *model.Capture) captureDTO {
 		State:           c.State,
 		EdgeID:          c.EdgeID,
 		DeviceID:        c.DeviceID,
+		SessionID:       c.SessionID,
 		InterfaceName:   c.InterfaceName,
 		CanonicalFilter: c.CanonicalFilter,
 		Direction:       c.Direction,
@@ -157,6 +208,46 @@ func toDTO(c *model.Capture) captureDTO {
 		}
 	}
 	return dto
+}
+
+// @Summary List packet capture sessions
+// @Router /api/v1/packet-capture-sessions [get]
+// @Success 200 {object} map[string]interface{}
+func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
+	if !h.authed(w, r) {
+		return
+	}
+	items, total, err := h.uc.ListSessions(r.Context(), atoiDefault(r.URL.Query().Get("limit"), 50), atoiDefault(r.URL.Query().Get("offset"), 0))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	out := make([]sessionDTO, 0, len(items))
+	for _, item := range items {
+		out = append(out, toSessionDTO(item))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": out, "total": total})
+}
+
+// @Summary Get packet capture session
+// @Router /api/v1/packet-capture-sessions/{publicID} [get]
+// @Success 200 {object} map[string]interface{}
+func (h *Handler) getSession(w http.ResponseWriter, r *http.Request) {
+	if !h.authed(w, r) {
+		return
+	}
+	detail, err := h.uc.GetSession(r.Context(), chi.URLParam(r, "publicID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	members := make([]captureDTO, 0, len(detail.Captures))
+	for _, capture := range detail.Captures {
+		members = append(members, toDTO(capture))
+	}
+	dto := toSessionDTO(detail.Session)
+	dto.Analysis = detail.Analysis
+	writeJSON(w, http.StatusOK, map[string]any{"session": dto, "captures": members})
 }
 
 // @Summary List packet captures
@@ -297,6 +388,32 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toDTO(out.Capture))
 }
 
+// @Summary Create multi-edge packet capture session
+// @Router /api/v1/packet-capture-sessions [post]
+// @Success 201 {object} map[string]interface{}
+func (h *Handler) createSession(w http.ResponseWriter, r *http.Request) {
+	t, _ := tenantctx.From(r.Context())
+	var in createSessionReq
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
+		writeErr(w, errors.Join(errs.ErrInvalid, err))
+		return
+	}
+	targets := make([]bizpacketcapture.SessionTarget, 0, len(in.Targets))
+	for _, target := range in.Targets {
+		targets = append(targets, bizpacketcapture.SessionTarget{DeviceID: target.DeviceID, Interface: target.Interface})
+	}
+	out, err := h.uc.CreateSession(r.Context(), bizpacketcapture.CreateSessionInput{Targets: targets, Filter: in.Filter, DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: in.Title, Description: in.Description, Source: bizpacketcapture.SourceAPI, CreatedBy: t.UserID})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	members := make([]captureDTO, 0, len(out.Captures))
+	for _, capture := range out.Captures {
+		members = append(members, toDTO(capture))
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"session": toSessionDTO(out.Session), "captures": members, "member_errors": out.MemberErrors})
+}
+
 // @Summary Refresh packet capture state
 // @Router /api/v1/packet-captures/{id}/refresh [post]
 // @Success 200 {object} captureDTO
@@ -312,6 +429,24 @@ func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toDTO(capture))
+}
+
+// @Summary Refresh packet capture session
+// @Router /api/v1/packet-capture-sessions/{publicID}/refresh [post]
+// @Success 200 {object} map[string]interface{}
+func (h *Handler) refreshSession(w http.ResponseWriter, r *http.Request) {
+	detail, err := h.uc.RefreshSession(r.Context(), chi.URLParam(r, "publicID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	members := make([]captureDTO, 0, len(detail.Captures))
+	for _, capture := range detail.Captures {
+		members = append(members, toDTO(capture))
+	}
+	dto := toSessionDTO(detail.Session)
+	dto.Analysis = detail.Analysis
+	writeJSON(w, http.StatusOK, map[string]any{"session": dto, "captures": members})
 }
 
 func (h *Handler) authed(w http.ResponseWriter, r *http.Request) bool {

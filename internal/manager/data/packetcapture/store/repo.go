@@ -25,7 +25,7 @@ func Migrate(db *gorm.DB) error {
 			return fmt.Errorf("packet capture: drop idempotency index: %w", err)
 		}
 	}
-	if err := db.AutoMigrate(&model.Capture{}); err != nil {
+	if err := db.AutoMigrate(&model.Session{}, &model.Capture{}); err != nil {
 		return err
 	}
 	return migrateLegacyArtifactIDs(db)
@@ -163,6 +163,68 @@ func (r *Repo) List(ctx context.Context, filter bizpacketcapture.ListFilter) ([]
 		return nil, 0, fmt.Errorf("packet capture: list: %w", err)
 	}
 	return captures, total, nil
+}
+
+func (r *Repo) CreateSession(ctx context.Context, session *model.Session) error {
+	if session == nil || strings.TrimSpace(session.PublicID) == "" {
+		return fmt.Errorf("packet capture: create session input: %w", errs.ErrInvalid)
+	}
+	if err := r.db.WithContext(ctx).Create(session).Error; err != nil {
+		if isDuplicate(err) {
+			return errs.ErrConflict
+		}
+		return fmt.Errorf("packet capture: create session: %w", err)
+	}
+	return nil
+}
+
+func (r *Repo) GetSession(ctx context.Context, publicID string) (*model.Session, error) {
+	var session model.Session
+	if err := r.db.WithContext(ctx).Where("public_id = ?", strings.TrimSpace(publicID)).First(&session).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrNotFound
+		}
+		return nil, fmt.Errorf("packet capture: get session: %w", err)
+	}
+	return &session, nil
+}
+
+func (r *Repo) ListSessions(ctx context.Context, limit, offset int) ([]*model.Session, int64, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	db := r.db.WithContext(ctx).Model(&model.Session{})
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("packet capture: count sessions: %w", err)
+	}
+	var sessions []*model.Session
+	if err := db.Order("created_at DESC, id DESC").Offset(offset).Limit(limit).Find(&sessions).Error; err != nil {
+		return nil, 0, fmt.Errorf("packet capture: list sessions: %w", err)
+	}
+	return sessions, total, nil
+}
+
+func (r *Repo) ListBySessionID(ctx context.Context, sessionID uint64) ([]*model.Capture, error) {
+	var captures []*model.Capture
+	if err := r.db.WithContext(ctx).Where("session_id = ?", sessionID).Order("id ASC").Find(&captures).Error; err != nil {
+		return nil, fmt.Errorf("packet capture: list session captures: %w", err)
+	}
+	return captures, nil
+}
+
+func (r *Repo) SetSessionAnalysis(ctx context.Context, id uint64, state, analysisJSON string) error {
+	res := r.db.WithContext(ctx).Model(&model.Session{}).Where("id = ?", id).Updates(map[string]any{"state": state, "analysis_json": analysisJSON})
+	if res.Error != nil {
+		return fmt.Errorf("packet capture: set session analysis: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
 }
 
 func (r *Repo) Delete(ctx context.Context, id uint64) error {

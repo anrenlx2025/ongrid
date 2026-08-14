@@ -88,6 +88,7 @@ func (a *Agent) startPacketCaptureTask(_ context.Context, in tunnel.PacketCaptur
 		MaxPackets:  in.MaxPackets,
 		Snaplen:     in.Snaplen,
 		Promiscuous: in.Promiscuous,
+		StartAt:     in.StartAt,
 	})
 	if err != nil {
 		return tunnel.PacketCaptureTask{}, err
@@ -141,6 +142,7 @@ func toTunnelPacketCaptureTask(task packetcapture.Task) tunnel.PacketCaptureTask
 			MaxPackets:      task.Request.MaxPackets,
 			Snaplen:         task.Request.Snaplen,
 			Promiscuous:     task.Request.Promiscuous,
+			StartAt:         task.Request.StartAt,
 		},
 		State: task.State,
 		Result: tunnel.PacketCaptureResult{

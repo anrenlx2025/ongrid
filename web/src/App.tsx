@@ -23,6 +23,7 @@ const IncidentDetailPage = lazy(() => import('@/pages/IncidentDetail'));
 const ReportDetailPage = lazy(() => import('@/pages/ReportDetail'));
 const TasksPage = lazy(() => import('@/pages/Tasks'));
 const PacketArtifactDetailPage = lazy(() => import('@/pages/PacketArtifactDetail'));
+const PacketCaptureSessionDetailPage = lazy(() => import('@/pages/PacketCaptureSessionDetail'));
 const PagesPage = lazy(() => import('@/pages/Pages'));
 const PageViewPage = lazy(() => import('@/pages/PageView'));
 const SkillsPage = lazy(() => import('@/pages/Skills'));
@@ -128,6 +129,7 @@ export default function App() {
         <Route path="/tasks/:id" element={<TasksPage />} />
         <Route path="/packet-captures" element={<Navigate to="/pages?tab=packets" replace />} />
         <Route path="/artifacts/packets/:artifactID" element={<PacketArtifactDetailPage />} />
+        <Route path="/artifacts/packet-sessions/:sessionID" element={<PacketCaptureSessionDetailPage />} />
         <Route path="/pages" element={<PagesPage />} />
         <Route path="/pages/:id" element={<PagesPage />} />
         <Route path="/skills" element={<SkillsPage />} />

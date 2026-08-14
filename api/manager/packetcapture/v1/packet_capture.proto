@@ -17,6 +17,10 @@ service PacketCaptureService {
   rpc CancelPacketCapture(CancelPacketCaptureRequest) returns (CancelPacketCaptureResponse);
   rpc ListPacketCapturePackets(ListPacketCapturePacketsRequest) returns (ListPacketCapturePacketsResponse);
   rpc GetPacketCapturePacket(GetPacketCapturePacketRequest) returns (GetPacketCapturePacketResponse);
+  rpc CreatePacketCaptureSession(CreatePacketCaptureSessionRequest) returns (CreatePacketCaptureSessionResponse);
+  rpc GetPacketCaptureSession(GetPacketCaptureSessionRequest) returns (GetPacketCaptureSessionResponse);
+  rpc ListPacketCaptureSessions(ListPacketCaptureSessionsRequest) returns (ListPacketCaptureSessionsResponse);
+  rpc RefreshPacketCaptureSession(RefreshPacketCaptureSessionRequest) returns (RefreshPacketCaptureSessionResponse);
 }
 
 enum CaptureTargetKind {
@@ -60,6 +64,14 @@ enum PacketCaptureSource {
   PACKET_CAPTURE_SOURCE_ASSISTANT = 2;
   PACKET_CAPTURE_SOURCE_WORKFLOW = 3;
   PACKET_CAPTURE_SOURCE_ALERT = 4;
+}
+
+enum PacketCaptureSessionState {
+  PACKET_CAPTURE_SESSION_STATE_UNSPECIFIED = 0;
+  PACKET_CAPTURE_SESSION_STATE_COLLECTING = 1;
+  PACKET_CAPTURE_SESSION_STATE_READY = 2;
+  PACKET_CAPTURE_SESSION_STATE_PARTIAL = 3;
+  PACKET_CAPTURE_SESSION_STATE_FAILED = 4;
 }
 
 message StructuredPacketFilter {
@@ -281,3 +293,40 @@ message GetPacketCapturePacketResponse {
   bytes raw_bytes = 3 [json_name = "raw_bytes"];
   bool raw_bytes_truncated = 4 [json_name = "raw_bytes_truncated"];
 }
+
+message PacketCaptureSessionTarget {
+  uint64 device_id = 1 [json_name = "device_id"];
+  string interface_name = 2 [json_name = "interface_name"];
+}
+
+message PacketCaptureSession {
+  string public_id = 1 [json_name = "public_id"];
+  PacketCaptureSessionState state = 2 [json_name = "state"];
+  string title = 3 [json_name = "title"];
+  string description = 4 [json_name = "description"];
+  string canonical_filter = 5 [json_name = "canonical_filter"];
+  uint32 duration_seconds = 6 [json_name = "duration_seconds"];
+  google.protobuf.Timestamp planned_start_at = 7 [json_name = "planned_start_at"];
+  string clock_quality = 8 [json_name = "clock_quality"];
+  google.protobuf.Timestamp created_at = 9 [json_name = "created_at"];
+}
+
+message CreatePacketCaptureSessionRequest {
+  repeated PacketCaptureSessionTarget targets = 1 [json_name = "targets"];
+  string filter = 2 [json_name = "filter"];
+  uint32 duration_seconds = 3 [json_name = "duration_seconds"];
+  uint64 max_bytes = 4 [json_name = "max_bytes"];
+  uint64 max_packets = 5 [json_name = "max_packets"];
+  uint32 snaplen = 6 [json_name = "snaplen"];
+  bool promiscuous_mode = 7 [json_name = "promiscuous_mode"];
+  string title = 8 [json_name = "title"];
+  string description = 9 [json_name = "description"];
+}
+
+message CreatePacketCaptureSessionResponse { PacketCaptureSession session = 1 [json_name = "session"]; repeated PacketCapture captures = 2 [json_name = "captures"]; repeated string member_errors = 3 [json_name = "member_errors"]; }
+message GetPacketCaptureSessionRequest { string public_id = 1 [json_name = "public_id"]; }
+message GetPacketCaptureSessionResponse { PacketCaptureSession session = 1 [json_name = "session"]; repeated PacketCapture captures = 2 [json_name = "captures"]; }
+message ListPacketCaptureSessionsRequest { int32 page = 1 [json_name = "page"]; int32 page_size = 2 [json_name = "page_size"]; }
+message ListPacketCaptureSessionsResponse { repeated PacketCaptureSession items = 1 [json_name = "items"]; int32 total = 2 [json_name = "total"]; }
+message RefreshPacketCaptureSessionRequest { string public_id = 1 [json_name = "public_id"]; }
+message RefreshPacketCaptureSessionResponse { PacketCaptureSession session = 1 [json_name = "session"]; repeated PacketCapture captures = 2 [json_name = "captures"]; }

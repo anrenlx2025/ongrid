@@ -49,6 +49,16 @@ type Repo interface {
 	SetParsedArtifact(ctx context.Context, id uint64, artifactID string, parsedJSON string) error
 }
 
+// SessionRepo is deliberately separate from Repo so existing capture-only
+// adapters remain valid. The production store implements both interfaces.
+type SessionRepo interface {
+	CreateSession(ctx context.Context, session *model.Session) error
+	GetSession(ctx context.Context, publicID string) (*model.Session, error)
+	ListSessions(ctx context.Context, limit, offset int) ([]*model.Session, int64, error)
+	ListBySessionID(ctx context.Context, sessionID uint64) ([]*model.Capture, error)
+	SetSessionAnalysis(ctx context.Context, id uint64, state, analysisJSON string) error
+}
+
 type EdgeCaller interface {
 	Call(ctx context.Context, edgeID uint64, method string, body []byte) ([]byte, error)
 }
@@ -180,6 +190,8 @@ type CreateInput struct {
 	Source                string
 	CreatedBy             uint64
 	RequestIdempotencyKey string
+	SessionID             uint64
+	PlannedStartAt        *time.Time
 }
 
 type CreateOutput struct {
@@ -273,6 +285,7 @@ func (u *Usecase) Create(ctx context.Context, in CreateInput) (*CreateOutput, er
 		Title:                 normalized.Title,
 		Description:           normalized.Description,
 		ArtifactID:            "pcap-" + uuid.NewString(),
+		SessionID:             normalized.SessionID,
 		LabelsJSON:            "{}",
 	}
 	if err := u.repo.Create(ctx, capture); err != nil {
@@ -290,6 +303,7 @@ func (u *Usecase) Create(ctx context.Context, in CreateInput) (*CreateOutput, er
 		MaxPackets:      normalized.MaxPackets,
 		Snaplen:         normalized.Snaplen,
 		Promiscuous:     normalized.Promiscuous,
+		StartAt:         normalized.PlannedStartAt,
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -558,19 +572,21 @@ func (u *Usecase) discardFailedCapture(ctx context.Context, capture *model.Captu
 }
 
 type normalizedCreateInput struct {
-	DeviceID              uint64 `json:"device_id"`
-	Interface             string `json:"interface"`
-	Filter                string `json:"filter,omitempty"`
-	DurationSeconds       int    `json:"duration_seconds"`
-	MaxBytes              int64  `json:"max_bytes"`
-	MaxPackets            int    `json:"max_packets"`
-	Snaplen               int    `json:"snaplen"`
-	Promiscuous           bool   `json:"promiscuous"`
-	Title                 string `json:"title,omitempty"`
-	Description           string `json:"description,omitempty"`
-	Source                string `json:"source"`
-	CreatedBy             uint64 `json:"created_by"`
-	RequestIdempotencyKey string `json:"request_idempotency_key,omitempty"`
+	DeviceID              uint64     `json:"device_id"`
+	Interface             string     `json:"interface"`
+	Filter                string     `json:"filter,omitempty"`
+	DurationSeconds       int        `json:"duration_seconds"`
+	MaxBytes              int64      `json:"max_bytes"`
+	MaxPackets            int        `json:"max_packets"`
+	Snaplen               int        `json:"snaplen"`
+	Promiscuous           bool       `json:"promiscuous"`
+	Title                 string     `json:"title,omitempty"`
+	Description           string     `json:"description,omitempty"`
+	Source                string     `json:"source"`
+	CreatedBy             uint64     `json:"created_by"`
+	RequestIdempotencyKey string     `json:"request_idempotency_key,omitempty"`
+	SessionID             uint64     `json:"session_id,omitempty"`
+	PlannedStartAt        *time.Time `json:"planned_start_at,omitempty"`
 }
 
 func normalizeCreateInput(in CreateInput) (normalizedCreateInput, error) {
@@ -588,6 +604,8 @@ func normalizeCreateInput(in CreateInput) (normalizedCreateInput, error) {
 		Source:                strings.TrimSpace(in.Source),
 		CreatedBy:             in.CreatedBy,
 		RequestIdempotencyKey: strings.TrimSpace(in.RequestIdempotencyKey),
+		SessionID:             in.SessionID,
+		PlannedStartAt:        in.PlannedStartAt,
 	}
 	if out.DeviceID == 0 {
 		return normalizedCreateInput{}, fmt.Errorf("%w: device_id required", errs.ErrInvalid)

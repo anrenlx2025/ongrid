@@ -25,6 +25,13 @@ const (
 	StateDeleted         = "deleted"
 )
 
+const (
+	SessionStateCollecting = "collecting"
+	SessionStateReady      = "ready"
+	SessionStatePartial    = "partial"
+	SessionStateFailed     = "failed"
+)
+
 // Capture is one requested packet collection. JSON snapshots preserve the
 // exact request and resolved target even if the device later changes.
 type Capture struct {
@@ -35,8 +42,9 @@ type Capture struct {
 	Source                string `gorm:"column:source;type:varchar(32);not null;default:'';index" json:"source"`
 	State                 string `gorm:"column:state;type:varchar(32);not null;default:'queued';index" json:"state"`
 
-	EdgeID   uint64 `gorm:"column:edge_id;not null;index" json:"edge_id"`
-	DeviceID uint64 `gorm:"column:device_id;not null;default:0;index" json:"device_id"`
+	EdgeID    uint64 `gorm:"column:edge_id;not null;index" json:"edge_id"`
+	DeviceID  uint64 `gorm:"column:device_id;not null;default:0;index" json:"device_id"`
+	SessionID uint64 `gorm:"column:session_id;not null;default:0;index" json:"session_id,omitempty"`
 
 	TargetKind          string `gorm:"column:target_kind;type:varchar(48);not null;default:''" json:"target_kind"`
 	RequestedTargetJSON string `gorm:"column:requested_target_json;type:text;not null" json:"-"`
@@ -80,3 +88,27 @@ type Capture struct {
 }
 
 func (Capture) TableName() string { return "packet_captures" }
+
+// Session groups captures requested against several edges for one diagnosis.
+// AnalysisJSON stores only normalized packet metadata, never raw PCAP bytes.
+type Session struct {
+	ID        uint64 `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
+	PublicID  string `gorm:"column:public_id;type:varchar(64);not null;uniqueIndex" json:"public_id"`
+	CreatedBy uint64 `gorm:"column:created_by;not null;index" json:"created_by"`
+	Source    string `gorm:"column:source;type:varchar(32);not null;default:'';index" json:"source"`
+	State     string `gorm:"column:state;type:varchar(32);not null;default:'collecting';index" json:"state"`
+
+	Title           string    `gorm:"column:title;type:varchar(255);not null;default:''" json:"title"`
+	Description     string    `gorm:"column:description;type:text;not null" json:"description"`
+	CanonicalFilter string    `gorm:"column:canonical_filter;type:text;not null" json:"canonical_filter"`
+	DurationSecs    uint32    `gorm:"column:duration_seconds;not null;default:30" json:"duration_seconds"`
+	PlannedStartAt  time.Time `gorm:"column:planned_start_at;index" json:"planned_start_at"`
+	ClockQuality    string    `gorm:"column:clock_quality;type:varchar(32);not null;default:'uncalibrated'" json:"clock_quality"`
+	AnalysisJSON    string    `gorm:"column:analysis_json;type:longtext;not null" json:"-"`
+
+	CreatedAt time.Time      `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt time.Time      `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"column:deleted_at;index" json:"-"`
+}
+
+func (Session) TableName() string { return "packet_capture_sessions" }

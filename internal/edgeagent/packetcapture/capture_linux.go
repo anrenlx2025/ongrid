@@ -46,6 +46,7 @@ type Request struct {
 	MaxPackets  int           `json:"max_packets"`
 	Snaplen     int           `json:"snaplen"`
 	Promiscuous bool          `json:"promiscuous"`
+	StartAt     *time.Time    `json:"start_at,omitempty"`
 }
 
 // Result contains capture metadata suitable for the manager to persist and

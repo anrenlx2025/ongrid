@@ -56,6 +56,49 @@ func TestServiceCompletesTask(t *testing.T) {
 	t.Fatalf("task did not complete: %+v", task)
 }
 
+func TestServiceHonorsPlannedStartTime(t *testing.T) {
+	started := make(chan time.Time, 1)
+	svc := newServiceForTest(t, func(_ context.Context, _ Request) (Result, error) {
+		started <- time.Now().UTC()
+		return Result{}, nil
+	})
+	planned := time.Now().UTC().Add(40 * time.Millisecond)
+	if _, err := svc.Start(Request{CaptureID: "capture-start-at", Interface: "eth0", StartAt: &planned}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case actual := <-started:
+		if actual.Before(planned.Add(-5 * time.Millisecond)) {
+			t.Fatalf("started at %s before planned %s", actual, planned)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("capture never started")
+	}
+}
+
+func TestServiceCancelsBeforePlannedStart(t *testing.T) {
+	svc := newServiceForTest(t, func(context.Context, Request) (Result, error) {
+		t.Fatal("runner should not start")
+		return Result{}, nil
+	})
+	planned := time.Now().UTC().Add(time.Second)
+	if _, err := svc.Start(Request{CaptureID: "capture-cancel-before-start", Interface: "eth0", StartAt: &planned}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := svc.Cancel("capture-cancel-before-start"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if task, ok := svc.Get("capture-cancel-before-start"); ok && task.State == TaskCancelled {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	task, _ := svc.Get("capture-cancel-before-start")
+	t.Fatalf("task=%+v, want cancelled", task)
+}
+
 func TestServiceReadCompletedCapture(t *testing.T) {
 	dir := t.TempDir()
 	svc := newServiceForDirTest(t, dir, func(_ context.Context, in Request) (Result, error) {

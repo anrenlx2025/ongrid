@@ -105,6 +105,30 @@ func (s *Service) Start(in Request) (Task, error) {
 }
 
 func (s *Service) run(ctx context.Context, captureID string) {
+	s.mu.RLock()
+	state, ok := s.tasks[captureID]
+	if !ok {
+		s.mu.RUnlock()
+		return
+	}
+	startAt := state.task.Request.StartAt
+	s.mu.RUnlock()
+	if startAt != nil && startAt.After(time.Now().UTC()) {
+		timer := time.NewTimer(time.Until(*startAt))
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			finished := time.Now().UTC()
+			s.mu.Lock()
+			if state, ok := s.tasks[captureID]; ok {
+				state.task.State = TaskCancelled
+				state.task.FinishedAt = &finished
+			}
+			s.mu.Unlock()
+			return
+		case <-timer.C:
+		}
+	}
 	started := time.Now().UTC()
 	s.mu.Lock()
 	state, ok := s.tasks[captureID]

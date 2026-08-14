@@ -15,7 +15,7 @@ import (
 
 const ToolNameCapturePCAP = "capture_pcap"
 
-const capturePCAPDescription = "Start a bounded packet capture on a host device. For short captures, waits for parsing and returns the durable artifact id plus a packet summary. Captures are audited and must be explicitly requested by the operator."
+const capturePCAPDescription = "Start a bounded packet capture on one host device, or a coordinated capture session across multiple edge-hosted devices using targets. For short captures, waits for parsing and returns durable packet artifacts or a session id. Captures are audited and must be explicitly requested by the operator."
 
 const capturePCAPWhenToUse = "Use only when the user explicitly asks to capture packets or diagnose live network traffic on a specific host device/interface. Do not use for normal metric/log/trace questions. Prefer query_logql/query_traceql/query_promql first unless the user asks for raw packets."
 
@@ -24,6 +24,7 @@ var CapturePCAPSchema = json.RawMessage(`{
   "properties": {
     "device_id": {"type": "integer", "description": "Host device id to capture on."},
     "interface": {"type": "string", "description": "Network interface name on the host, for example eth0."},
+	"targets": {"type": "array", "minItems": 2, "description": "For cross-edge diagnosis: two or more targets, each on a different edge.", "items": {"type": "object", "properties": {"device_id": {"type": "integer"}, "interface": {"type": "string"}}, "required": ["device_id", "interface"]}},
     "filter": {"type": "string", "description": "Simple filter grammar: tcp, udp, icmp, icmp6, host <IP>, port <N>, joined by 'and'. Example: tcp and port 443."},
     "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 300, "default": 30},
     "max_bytes": {"type": "integer", "minimum": 1, "maximum": 268435456, "default": 67108864},
@@ -32,12 +33,16 @@ var CapturePCAPSchema = json.RawMessage(`{
     "promiscuous": {"type": "boolean", "default": false},
     "reason": {"type": "string", "description": "Why this capture is requested. Stored on the capture record."}
   },
-  "required": ["device_id", "interface"]
+	"anyOf": [{"required": ["device_id", "interface"]}, {"required": ["targets"]}]
 }`)
 
 type PacketCaptureCreator interface {
 	Create(ctx context.Context, in pcapbiz.CreateInput) (*pcapbiz.CreateOutput, error)
 	Refresh(ctx context.Context, id uint64) (*pcapmodel.Capture, error)
+}
+
+type PacketCaptureSessionCreator interface {
+	CreateSession(ctx context.Context, in pcapbiz.CreateSessionInput) (*pcapbiz.SessionOutput, error)
 }
 
 type CapturePCAPTool struct {
@@ -55,6 +60,10 @@ type capturePCAPArgs struct {
 	Snaplen         int    `json:"snaplen"`
 	Promiscuous     bool   `json:"promiscuous"`
 	Reason          string `json:"reason"`
+	Targets         []struct {
+		DeviceID  uint64 `json:"device_id"`
+		Interface string `json:"interface"`
+	} `json:"targets"`
 }
 
 func NewCapturePCAPTool(uc PacketCaptureCreator, log *slog.Logger) *CapturePCAPTool {
@@ -74,7 +83,7 @@ func (t *CapturePCAPTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 		// artifact; it does not change the managed host configuration. Keeping
 		// it read-class avoids applying the SOP gate intended for restart and
 		// configuration changes to an explicit, time-bounded diagnostic request.
-		Class:       "read",
+		Class: "read",
 	}, nil
 }
 
@@ -93,6 +102,25 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 		source = pcapbiz.SourceWorkflow
 	case basetool.ArtifactSourceChat:
 		source = pcapbiz.SourceChat
+	}
+	if len(in.Targets) > 0 {
+		sessionCreator, ok := t.uc.(PacketCaptureSessionCreator)
+		if !ok {
+			return "", fmt.Errorf("%s: packet capture sessions are not configured", ToolNameCapturePCAP)
+		}
+		targets := make([]pcapbiz.SessionTarget, 0, len(in.Targets))
+		for _, target := range in.Targets {
+			targets = append(targets, pcapbiz.SessionTarget{DeviceID: target.DeviceID, Interface: strings.TrimSpace(target.Interface)})
+		}
+		out, err := sessionCreator.CreateSession(ctx, pcapbiz.CreateSessionInput{Targets: targets, Filter: strings.TrimSpace(in.Filter), DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: "Multi-edge packet capture", Description: strings.TrimSpace(in.Reason), Source: source, CreatedBy: resolved.UserID})
+		if err != nil {
+			return "", err
+		}
+		body, err := json.Marshal(map[string]any{"session": out.Session, "captures": out.Captures, "member_errors": out.MemberErrors, "waited": false})
+		if err != nil {
+			return "", fmt.Errorf("%s: marshal session response: %w", ToolNameCapturePCAP, err)
+		}
+		return string(body), nil
 	}
 	out, err := t.uc.Create(ctx, pcapbiz.CreateInput{
 		DeviceID:        in.DeviceID,

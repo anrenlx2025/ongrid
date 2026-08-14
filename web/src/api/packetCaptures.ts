@@ -22,6 +22,7 @@ export type PacketCapture = {
   state: PacketCaptureState;
   edge_id: number;
   device_id: number;
+	  session_id?: number;
   interface_name: string;
   canonical_filter: string;
   direction: string;
@@ -44,6 +45,25 @@ export type PacketCapture = {
   finished_at?: string;
   created_at: string;
   updated_at: string;
+};
+
+export type PacketCaptureSession = {
+  id: string;
+  state: 'collecting' | 'ready' | 'partial' | 'failed';
+  title: string;
+  description: string;
+  canonical_filter: string;
+  duration_seconds: number;
+  planned_start_at: string;
+  clock_quality: string;
+  analysis?: PacketCaptureSessionAnalysis;
+  created_at: string;
+  updated_at: string;
+};
+export type PacketCaptureSessionAnalysis = {
+  summary: { capture_count: number; ready_count: number; flow_count: number; event_count: number; clock_quality: string; warning: string };
+  flows: Array<{ id: string; protocol: string; endpoints: string[]; edge_ids: number[]; missing_edge_ids?: number[]; packets: number; first_seen_at: string; last_seen_at: string }>;
+  timeline: Array<{ capture_id: number; artifact_id: string; edge_id: number; device_id: number; timestamp: string; source: string; destination: string; protocol: string; length: number; info: string; flow_id: string }>;
 };
 
 export type PacketCaptureAnalysis = {
@@ -144,6 +164,10 @@ export function getPacketCaptureArtifact(artifactID: string) {
 export function refreshPacketCapture(id: number) {
   return request<PacketCapture>('POST', `/packet-captures/${id}/refresh`, {});
 }
+
+export function listPacketCaptureSessions() { return request<{ items: PacketCaptureSession[]; total: number }>('GET', '/packet-capture-sessions'); }
+export function getPacketCaptureSession(id: string) { return request<{ session: PacketCaptureSession; captures: PacketCapture[] }>('GET', `/packet-capture-sessions/${encodeURIComponent(id)}`); }
+export function refreshPacketCaptureSession(id: string) { return request<{ session: PacketCaptureSession; captures: PacketCapture[] }>('POST', `/packet-capture-sessions/${encodeURIComponent(id)}/refresh`, {}); }
 
 export function packetCaptureArtifactID(capture: Pick<PacketCapture, 'id' | 'artifact_id'>) {
   return capture.artifact_id || `pcap-${capture.id}`;

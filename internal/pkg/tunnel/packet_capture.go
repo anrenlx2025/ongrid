@@ -27,6 +27,9 @@ type PacketCaptureStartRequest struct {
 	MaxPackets      int    `json:"max_packets,omitempty"`
 	Snaplen         int    `json:"snaplen,omitempty"`
 	Promiscuous     bool   `json:"promiscuous,omitempty"`
+	// StartAt is manager-coordinated UTC time. Edges schedule locally and still
+	// report their actual StartedAt so analysis can surface clock uncertainty.
+	StartAt *time.Time `json:"start_at,omitempty"`
 }
 
 // PacketCaptureGetRequest identifies one edge-local capture task.
@@ -66,14 +69,15 @@ type PacketCaptureTask struct {
 // PacketCaptureWireIn echoes the normalized edge request without any
 // manager-only metadata.
 type PacketCaptureWireIn struct {
-	CaptureID       string `json:"capture_id"`
-	Interface       string `json:"interface"`
-	Filter          string `json:"filter,omitempty"`
-	DurationSeconds int    `json:"duration_seconds"`
-	MaxBytes        int64  `json:"max_bytes"`
-	MaxPackets      int    `json:"max_packets"`
-	Snaplen         int    `json:"snaplen"`
-	Promiscuous     bool   `json:"promiscuous"`
+	CaptureID       string     `json:"capture_id"`
+	Interface       string     `json:"interface"`
+	Filter          string     `json:"filter,omitempty"`
+	DurationSeconds int        `json:"duration_seconds"`
+	MaxBytes        int64      `json:"max_bytes"`
+	MaxPackets      int        `json:"max_packets"`
+	Snaplen         int        `json:"snaplen"`
+	Promiscuous     bool       `json:"promiscuous"`
+	StartAt         *time.Time `json:"start_at,omitempty"`
 }
 
 // PacketCaptureResult describes the completed capture. No file path is
