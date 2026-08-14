@@ -91,6 +91,13 @@ type UserAgentManager interface {
 	Delete(ctx context.Context, caller svc.Caller, name string) error
 }
 
+type OperationReader interface {
+	GetOwned(ctx context.Context, id string, userID uint64, admin bool) (*model.Operation, error)
+	ListArtifacts(ctx context.Context, operationID string) ([]*model.OperationArtifact, error)
+}
+
+type OperationActionExecutor func(ctx context.Context, operation *model.Operation, action string) (*model.Operation, error)
+
 // Handler bundles the aiops service with HTTP-layer state.
 type Handler struct {
 	svc        AIOpsService
@@ -99,6 +106,8 @@ type Handler struct {
 	agents     AgentLister
 	userAgents UserAgentManager
 	llmClient  llm.Client // for /v1/aiops/query-translate; nil = endpoint 503
+	operations OperationReader
+	opAction   OperationActionExecutor
 }
 
 // NewHandler builds the handler. mentions / catalog may be nil; see
@@ -127,6 +136,10 @@ func (h *Handler) SetAgentLister(a AgentLister) { h.agents = a }
 // 503.
 func (h *Handler) SetUserAgentManager(m UserAgentManager) { h.userAgents = m }
 
+func (h *Handler) SetOperationActions(operations OperationReader, execute OperationActionExecutor) {
+	h.operations, h.opAction = operations, execute
+}
+
 // Register attaches aiops routes on r.
 func (h *Handler) Register(r chi.Router) {
 	r.Post("/v1/chat/sessions", h.createSession)
@@ -147,12 +160,66 @@ func (h *Handler) Register(r chi.Router) {
 	r.Post("/v1/agents/custom", h.createUserAgent)
 	r.Patch("/v1/agents/custom/{name}", h.updateUserAgent)
 	r.Delete("/v1/agents/custom/{name}", h.deleteUserAgent)
+	r.Get("/v1/operations/{id}", h.getOperation)
+	r.Post("/v1/operations/{id}/actions/{action}", h.executeOperationAction)
 	// Generic delete: works on any non-builtin / non-default agent.
 	// Disk-source agents (loaded from agents/*.md) get session-scoped
 	// removal — the in-memory registry drops them, but the .md file
 	// stays and they re-appear on restart. User-source agents go
 	// through the userAgents service (DB row removal).
 	r.Delete("/v1/agents/{name}", h.deleteAgent)
+}
+
+// @Summary Get an asynchronous operation
+// @Router /api/v1/operations/{id} [get]
+// @Success 200 {object} model.Operation
+func (h *Handler) getOperation(w http.ResponseWriter, r *http.Request) {
+	caller, ok := callerFromCtx(r.Context())
+	if !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	if h.operations == nil {
+		writeErr(w, errs.ErrNotWiredYet)
+		return
+	}
+	op, err := h.operations.GetOwned(r.Context(), chi.URLParam(r, "id"), caller.UserID, caller.Role == "admin")
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	artifacts, err := h.operations.ListArtifacts(r.Context(), op.ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"operation": op, "artifacts": artifacts})
+}
+
+// @Summary Execute a user-visible operation action
+// @Router /api/v1/operations/{id}/actions/{action} [post]
+// @Success 200 {object} model.Operation
+func (h *Handler) executeOperationAction(w http.ResponseWriter, r *http.Request) {
+	caller, ok := callerFromCtx(r.Context())
+	if !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	if h.operations == nil || h.opAction == nil {
+		writeErr(w, errs.ErrNotWiredYet)
+		return
+	}
+	op, err := h.operations.GetOwned(r.Context(), chi.URLParam(r, "id"), caller.UserID, caller.Role == "admin")
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	updated, err := h.opAction(r.Context(), op, strings.TrimSpace(chi.URLParam(r, "action")))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 // --------- DTOs ---------

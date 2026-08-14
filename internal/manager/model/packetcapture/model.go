@@ -100,6 +100,9 @@ type Session struct {
 	// ChatSessionID binds a chat-created capture to its originating
 	// conversation so terminal capture state can be reported after restart.
 	ChatSessionID string `gorm:"column:chat_session_id;type:char(36);not null;default:'';index" json:"-"`
+	// OperationID links this domain session to the generic user-visible task.
+	// Empty values preserve readability for sessions created before Operation.
+	OperationID string `gorm:"column:operation_id;type:char(36);not null;default:'';index" json:"-"`
 	// CompletionNotifiedAt is a durable idempotency marker for the chat
 	// continuation worker. NULL means the terminal event has not been emitted.
 	CompletionNotifiedAt *time.Time `gorm:"column:completion_notified_at;index" json:"-"`

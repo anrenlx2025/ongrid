@@ -18,6 +18,10 @@ type fakePacketCaptureCreator struct {
 	refresh   func(*pcapmodel.Capture) *pcapmodel.Capture
 }
 
+func fakePacketCaptureOperation(context.Context, PacketCaptureOperationInput) (PacketCaptureOperation, error) {
+	return PacketCaptureOperation{ID: "operation-test", State: "running", Summary: "1 capture member(s) are being collected"}, nil
+}
+
 func (f *fakePacketCaptureCreator) Create(_ context.Context, in pcapbiz.CreateInput) (*pcapbiz.CreateOutput, error) {
 	f.in = in
 	return &pcapbiz.CreateOutput{
@@ -68,7 +72,7 @@ func TestGetPacketCaptureSessionToolReturnsSessionAnalysis(t *testing.T) {
 }
 
 func TestCapturePCAPToolInfoIsReadSpecialty(t *testing.T) {
-	tool := NewCapturePCAPTool(&fakePacketCaptureCreator{}, nil)
+	tool := NewCapturePCAPTool(&fakePacketCaptureCreator{}, nil, fakePacketCaptureOperation)
 	info, err := tool.Info(context.Background())
 	if err != nil {
 		t.Fatalf("Info: %v", err)
@@ -83,7 +87,7 @@ func TestCapturePCAPToolInfoIsReadSpecialty(t *testing.T) {
 
 func TestCapturePCAPToolInvokesUsecase(t *testing.T) {
 	creator := &fakePacketCaptureCreator{}
-	tool := NewCapturePCAPTool(creator, nil)
+	tool := NewCapturePCAPTool(creator, nil, fakePacketCaptureOperation)
 
 	out, err := tool.InvokableRun(context.Background(), `{
 		"device_id": 24,
@@ -91,7 +95,7 @@ func TestCapturePCAPToolInvokesUsecase(t *testing.T) {
 		"filter": "tcp and port 443",
 		"duration_seconds": 20,
 		"reason": "debug checkout timeout"
-	}`)
+	}`, basetool.WithUserText("confirm device_id=24"))
 	if err != nil {
 		t.Fatalf("InvokableRun: %v", err)
 	}
@@ -123,16 +127,28 @@ func TestCapturePCAPToolInvokesUsecase(t *testing.T) {
 	}
 }
 
+func TestCapturePCAPToolRequiresExplicitOrStructuredTargetConfirmation(t *testing.T) {
+	creator := &fakePacketCaptureCreator{}
+	tool := NewCapturePCAPTool(creator, nil, fakePacketCaptureOperation)
+	args := `{"device_id":24,"interface":"eth0"}`
+	if _, err := tool.InvokableRun(context.Background(), args); err == nil {
+		t.Fatal("capture without user confirmation unexpectedly succeeded")
+	}
+	if _, err := tool.InvokableRun(context.Background(), args, basetool.WithConfirmedDeviceIDs([]uint64{24})); err != nil {
+		t.Fatalf("structured device selection should permit capture: %v", err)
+	}
+}
+
 func TestCapturePCAPToolCreatesRepeatedMembersInOneSession(t *testing.T) {
 	creator := &fakePacketCaptureCreator{}
-	tool := NewCapturePCAPTool(creator, nil)
+	tool := NewCapturePCAPTool(creator, nil, fakePacketCaptureOperation)
 
 	_, err := tool.InvokableRun(context.Background(), `{
 		"device_id": 24,
 		"interface": "eth0",
 		"repeat_count": 2,
 		"title": "HTTPS investigation"
-	}`)
+	}`, basetool.WithUserText("confirm device_id=24"))
 	if err != nil {
 		t.Fatalf("InvokableRun: %v", err)
 	}
@@ -151,10 +167,10 @@ func TestCapturePCAPToolCreatesRepeatedMembersInOneSession(t *testing.T) {
 
 func TestCapturePCAPToolUsesWorkflowSourceFromContext(t *testing.T) {
 	creator := &fakePacketCaptureCreator{}
-	tool := NewCapturePCAPTool(creator, nil)
+	tool := NewCapturePCAPTool(creator, nil, fakePacketCaptureOperation)
 	ctx := basetool.WithArtifactSource(context.Background(), basetool.ArtifactSourceWorkflow)
 
-	_, err := tool.InvokableRun(ctx, `{"device_id":24,"interface":"eth0"}`)
+	_, err := tool.InvokableRun(ctx, `{"device_id":24,"interface":"eth0"}`, basetool.WithUserText("confirm device_id=24"))
 	if err != nil {
 		t.Fatalf("InvokableRun: %v", err)
 	}

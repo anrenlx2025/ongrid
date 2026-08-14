@@ -134,6 +134,7 @@ import (
 	managersettingdata "github.com/ongridio/ongrid/internal/manager/data/setting/store"
 	managerwebshelldata "github.com/ongridio/ongrid/internal/manager/data/webshell/store"
 	managerimbridgemodel "github.com/ongridio/ongrid/internal/manager/model/imbridge"
+	managerpacketcapturemodel "github.com/ongridio/ongrid/internal/manager/model/packetcapture"
 	settingmodel "github.com/ongridio/ongrid/internal/manager/model/setting"
 	wsmodel "github.com/ongridio/ongrid/internal/manager/model/webshell"
 	managerserverimbridge "github.com/ongridio/ongrid/internal/manager/server/imbridge"
@@ -1229,7 +1230,8 @@ func main() {
 	// default 0=unlimited) drives an llm.InMemoryBudget that the graph-layer
 	// callback chain checks before each ChatModel turn — see Phase 4 cbDeps
 	// build below where the checker is set when the limit > 0.
-	aiopsRepo := manageraiopsdata.NewBizRepo(db)
+	aiopsRepo := manageraiopsdata.NewSessionRepo(db)
+	operationUC := managerbizaiops.NewOperationUsecase(aiopsRepo)
 	mutatingProposalRepo := manageraiopsdata.NewMutatingProposalRepo(db)
 	// PromQuerier is the interface tools/registry takes; passing a typed-nil
 	// *Client would yield a non-nil interface and bypass the conditional
@@ -1288,6 +1290,25 @@ func main() {
 	}
 	packetCaptureHandler := managerserverpacketcapture.NewHandler(packetCaptureUC)
 	toolsReg.SetPacketCaptureCreator(packetCaptureUC)
+	toolsReg.SetPacketCaptureOperationCreator(func(ctx context.Context, in aiopstools.PacketCaptureOperationInput) (aiopstools.PacketCaptureOperation, error) {
+		op, err := operationUC.Create(ctx, managerbizaiops.CreateOperationInput{
+			ChatSessionID: in.ChatSessionID,
+			CreatedBy:     in.CreatedBy,
+			Kind:          "packet_capture_session",
+			Title:         in.Title,
+			Summary:       fmt.Sprintf("%d capture member(s) are being collected", in.MemberCount),
+			Input:         map[string]any{"packet_capture_session_id": in.SessionID},
+			Actions:       []managerbizaiops.OperationAction{{Kind: "cancel", Label: "Stop", Enabled: true}},
+			DetailURL:     "/artifacts/packet-sessions/" + in.SessionID,
+		})
+		if err != nil {
+			return aiopstools.PacketCaptureOperation{}, err
+		}
+		if err := operationUC.Transition(ctx, op.ID, []string{manageraiopsmodel.OperationStateCreated}, manageraiopsmodel.OperationStateRunning, op.Summary, []managerbizaiops.OperationAction{{Kind: "cancel", Label: "Stop", Enabled: true}}, "created", map[string]any{"packet_capture_session_id": in.SessionID}); err != nil {
+			return aiopstools.PacketCaptureOperation{}, err
+		}
+		return aiopstools.PacketCaptureOperation{ID: op.ID, State: manageraiopsmodel.OperationStateRunning, Summary: op.Summary}, nil
+	})
 	toolsReg.SetPluginConfigLister(pluginConfigUC)
 	toolsReg.SetConfigManager(manageraiopsconfig.NewAlertRuleManager(alertSvc))
 	toolsReg.SetK8sSnapshotReader(k8sSvc)
@@ -1326,9 +1347,9 @@ func main() {
 	})
 	aiopsUsage := managerbizaiops.NewUsageUsecase(aiopsRepo, log)
 
-	// PR-9 of optional new graph-based agent kernel. Default
-	// stays "legacy" so chat behaviour is unchanged out of the box;
-	// operators opt into the new path via ONGRID_AGENT_KERNEL=graph.
+	// The graph-based AgentLoop is the default execution path. Operators can
+	// set ONGRID_AGENT_KERNEL=legacy for an explicit rollback while migration
+	// issues are investigated.
 	// When the env is set we build:
 	//   - RoutingChatModel (PR-1) wrapping the existing llmRouter, one
 	//     per provider id ("openai" | "anthropic" | "zhipu" | "gemini").
@@ -1531,6 +1552,28 @@ func main() {
 	aiopsSvc := managersvcaiops.NewWithKernel(aiopsAgent, aiopsRuntime, kernel, aiopsRepo, aiopsUsage, log)
 	aiopsSvc.SetMutatingProposalRepo(mutatingProposalRepo)
 	aiopsHandler := managerserveraiops.NewHandler(aiopsSvc)
+	aiopsHandler.SetOperationActions(operationUC, func(ctx context.Context, operation *manageraiopsmodel.Operation, action string) (*manageraiopsmodel.Operation, error) {
+		if operation == nil || action != "cancel" || operation.Kind != "packet_capture_session" {
+			return nil, errs.ErrNotFound
+		}
+		var input struct {
+			SessionID string `json:"packet_capture_session_id"`
+		}
+		if err := json.Unmarshal([]byte(operation.InputJSON), &input); err != nil {
+			return nil, fmt.Errorf("decode operation input: %w", err)
+		}
+		if strings.TrimSpace(input.SessionID) == "" {
+			return nil, errs.ErrInvalid
+		}
+		actions := []managerbizaiops.OperationAction{{Kind: "cancel", Label: "Stop", Enabled: false}}
+		if err := operationUC.Transition(ctx, operation.ID, []string{manageraiopsmodel.OperationStateCreated, manageraiopsmodel.OperationStateQueued, manageraiopsmodel.OperationStateRunning}, manageraiopsmodel.OperationStateCanceling, "Cancellation requested", actions, "cancel_requested", map[string]any{"packet_capture_session_id": input.SessionID}); err != nil && !errors.Is(err, errs.ErrConflict) {
+			return nil, err
+		}
+		if _, err := packetCaptureUC.CancelSession(ctx, input.SessionID); err != nil {
+			return nil, err
+		}
+		return operationUC.GetOwned(ctx, operation.ID, operation.CreatedBy, true)
+	})
 
 	// IM bridge: multi-turn chat via Feishu (S1) / DingTalk
 	// (S2 follow-up). Inbound webhooks land outside the bearer-auth
@@ -2602,12 +2645,29 @@ func main() {
 		})
 	}
 
-	// Packet captures outlive the HTTP/SSE turn that created them. Reconcile
-	// their edge state here and continue the originating chat when a bound
-	// session reaches a terminal result. The worker shares the manager root
-	// context, so it is stopped and restarted with the manager process.
+	// Packet captures outlive the HTTP/SSE turn that created them. Register
+	// their domain reconciler with the generic Operation coordinator; future
+	// operation kinds share this scheduler instead of adding another loop.
 	eg.Go(func() error {
 		notify := func(ctx context.Context, event managerbizpacketcapture.CompletionEvent) error {
+			if event.Session != nil && event.Session.OperationID != "" {
+				state := manageraiopsmodel.OperationStateSucceeded
+				if event.Session.State == managerpacketcapturemodel.SessionStateFailed {
+					state = manageraiopsmodel.OperationStateFailed
+				}
+				summary := fmt.Sprintf("%d/%d capture artifact(s) available", event.Analysis.Summary.ReadyCount, event.Analysis.Summary.CaptureCount)
+				if _, err := operationUC.AddArtifact(ctx, event.Session.OperationID, managerbizaiops.OperationArtifactInput{
+					Kind: "analysis", Title: event.Session.Title, URL: "/artifacts/packet-sessions/" + event.Session.PublicID,
+					Metadata: map[string]any{"session_state": event.Session.State, "ready_count": event.Analysis.Summary.ReadyCount},
+				}); err != nil && !errors.Is(err, errs.ErrConflict) {
+					return fmt.Errorf("create operation artifact: %w", err)
+				}
+				if err := operationUC.Transition(ctx, event.Session.OperationID,
+					[]string{manageraiopsmodel.OperationStateCreated, manageraiopsmodel.OperationStateQueued, manageraiopsmodel.OperationStateRunning, manageraiopsmodel.OperationStateCanceling},
+					state, summary, nil, "completed", map[string]any{"packet_capture_session_id": event.Session.PublicID, "session_state": event.Session.State}); err != nil && !errors.Is(err, errs.ErrConflict) {
+					return fmt.Errorf("update operation completion: %w", err)
+				}
+			}
 			body := packetCaptureCompletionMessage(event)
 			message := &manageraiopsmodel.Message{
 				ID:        uuid.NewSHA1(uuid.NameSpaceURL, []byte("packet-capture-completion:"+event.Session.PublicID)).String(),
@@ -2621,22 +2681,13 @@ func main() {
 			}
 			return nil
 		}
-		run := func() {
-			if err := packetCaptureUC.ReconcileActiveSessions(egCtx, 50, notify); err != nil && !errors.Is(err, context.Canceled) {
-				log.Warn("packet capture: async reconcile failed", slog.Any("err", err))
-			}
+		coordinator := managerbizaiops.NewOperationCoordinator(5*time.Second, log.With(slog.String("comp", "operation-coordinator")))
+		if err := coordinator.Register(operationReconcilerFunc{kind: "packet_capture_session", reconcile: func(ctx context.Context) error {
+			return packetCaptureUC.ReconcileActiveSessions(ctx, 50, notify)
+		}}); err != nil {
+			return err
 		}
-		run()
-		t := time.NewTicker(5 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-egCtx.Done():
-				return nil
-			case <-t.C:
-				run()
-			}
-		}
+		return coordinator.Run(egCtx)
 	})
 
 	// RCA investigator inflight gauge — samples concurrency cap usage.
@@ -5584,6 +5635,15 @@ func packetCaptureCompletionMessage(event managerbizpacketcapture.CompletionEven
 		event.Session.PublicID,
 	)
 }
+
+type operationReconcilerFunc struct {
+	kind      string
+	reconcile func(context.Context) error
+}
+
+func (r operationReconcilerFunc) Kind() string { return r.kind }
+
+func (r operationReconcilerFunc) Reconcile(ctx context.Context) error { return r.reconcile(ctx) }
 
 // seedInfrastructureMenuDefaults is a one-time upgrade migration. Fresh
 // installs never call it; existing installations receive a conservative

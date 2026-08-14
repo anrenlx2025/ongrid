@@ -13,6 +13,9 @@ const (
 	// edge-local capture. The edge still never returns a filesystem path; this
 	// is a manager-only follow-up used before private parser ingestion.
 	MethodReadPacketCapture = "packet_capture.read"
+	// MethodCancelPacketCapture requests cancellation of a queued or running
+	// edge-local capture. Partial data remains readable when available.
+	MethodCancelPacketCapture = "packet_capture.cancel"
 )
 
 // PacketCaptureStartRequest is the manager-to-edge request for a bounded
@@ -34,6 +37,10 @@ type PacketCaptureStartRequest struct {
 
 // PacketCaptureGetRequest identifies one edge-local capture task.
 type PacketCaptureGetRequest struct {
+	CaptureID string `json:"capture_id"`
+}
+
+type PacketCaptureCancelRequest struct {
 	CaptureID string `json:"capture_id"`
 }
 

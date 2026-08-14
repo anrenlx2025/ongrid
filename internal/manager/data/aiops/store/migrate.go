@@ -22,5 +22,8 @@ func Migrate(db *gorm.DB) error {
 		&model.ToolCall{},
 		&model.MutatingProposal{},
 		&model.UserAgent{},
+		&model.Operation{},
+		&model.OperationEvent{},
+		&model.OperationArtifact{},
 	)
 }

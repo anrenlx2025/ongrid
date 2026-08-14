@@ -153,6 +153,11 @@ type invokeConfig struct {
 	// as an explicit invoke option because nested Eino ToolsNode contexts do
 	// not reliably preserve manager context values.
 	HostWriteAllowed bool
+
+	// ConfirmedDeviceIDs are explicit @device selections from the current
+	// user turn. They are execution evidence, unlike a device discovered by
+	// a preceding tool call or inferred by the model.
+	ConfirmedDeviceIDs []uint64
 }
 
 // WithTenant sets the tenant identifier on the invoke config.
@@ -179,6 +184,12 @@ func WithUserText(text string) InvokeOption {
 	return func(c *invokeConfig) { c.UserText = text }
 }
 
+// WithConfirmedDeviceIDs carries structured UI selections into tools that
+// require an unambiguous host target.
+func WithConfirmedDeviceIDs(ids []uint64) InvokeOption {
+	return func(c *invokeConfig) { c.ConfirmedDeviceIDs = append([]uint64(nil), ids...) }
+}
+
 // WithHostWritePermission carries the resolved admin write gate to host-side
 // tools. When enabled, host_bash uses the edge's unrestricted execution path;
 // mutating commands still require the separate approval flow.
@@ -202,11 +213,12 @@ func ResolveOptions(opts []InvokeOption) Resolved {
 		}
 	}
 	return Resolved{
-		Tenant:           c.Tenant,
-		UserID:           c.UserID,
-		DeviceID:         c.DeviceID,
-		UserText:         c.UserText,
-		HostWriteAllowed: c.HostWriteAllowed,
+		Tenant:             c.Tenant,
+		UserID:             c.UserID,
+		DeviceID:           c.DeviceID,
+		UserText:           c.UserText,
+		HostWriteAllowed:   c.HostWriteAllowed,
+		ConfirmedDeviceIDs: append([]uint64(nil), c.ConfirmedDeviceIDs...),
 	}
 }
 
@@ -214,9 +226,10 @@ func ResolveOptions(opts []InvokeOption) Resolved {
 // returned by ResolveOptions. Decorators read fields directly.
 // — the resolved per-call context.
 type Resolved struct {
-	Tenant           string
-	UserID           uint64
-	DeviceID         *uint64
-	UserText         string
-	HostWriteAllowed bool
+	Tenant             string
+	UserID             uint64
+	DeviceID           *uint64
+	UserText           string
+	HostWriteAllowed   bool
+	ConfirmedDeviceIDs []uint64
 }

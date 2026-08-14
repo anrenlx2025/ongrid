@@ -60,6 +60,24 @@ func (a *Agent) handleGetPacketCapture(_ context.Context, body []byte) ([]byte, 
 	return jsonEncode(task, nil)
 }
 
+func (a *Agent) handleCancelPacketCapture(_ context.Context, body []byte) ([]byte, error) {
+	var in tunnel.PacketCaptureCancelRequest
+	if err := json.Unmarshal(body, &in); err != nil {
+		return nil, err
+	}
+	if a.packetCaptureErr != nil {
+		return nil, fmt.Errorf("cancel_packet_capture unavailable: %w", a.packetCaptureErr)
+	}
+	if a.packetCapture == nil {
+		return nil, fmt.Errorf("cancel_packet_capture unavailable")
+	}
+	task, err := a.packetCapture.Cancel(strings.TrimSpace(in.CaptureID))
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(toTunnelPacketCaptureTask(task))
+}
+
 func (a *Agent) handleReadPacketCapture(_ context.Context, body []byte) ([]byte, error) {
 	var in tunnel.PacketCaptureReadRequest
 	if err := jsonDecode(body, &in); err != nil {

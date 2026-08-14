@@ -24,13 +24,13 @@ func TestKernelEnvParsing(t *testing.T) {
 		setEnv bool
 		want   managersvcaiops.Kernel
 	}{
-		{"unset", "", false, managersvcaiops.KernelLegacy},
-		{"empty_string", "", true, managersvcaiops.KernelLegacy},
+		{"unset", "", false, managersvcaiops.KernelGraph},
+		{"empty_string", "", true, managersvcaiops.KernelGraph},
 		{"graph_lower", "graph", true, managersvcaiops.KernelGraph},
 		{"graph_upper", "GRAPH", true, managersvcaiops.KernelGraph},
 		{"graph_padded", "  graph  ", true, managersvcaiops.KernelGraph},
 		{"legacy_explicit", "legacy", true, managersvcaiops.KernelLegacy},
-		{"garbage", "this-is-not-a-kernel", true, managersvcaiops.KernelLegacy},
+		{"garbage", "this-is-not-a-kernel", true, managersvcaiops.KernelGraph},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -61,6 +61,29 @@ type SessionRepo interface {
 	MarkSessionCompletionNotified(ctx context.Context, id uint64, at time.Time) (bool, error)
 }
 
+type OperationSessionRepo interface {
+	SetSessionOperation(ctx context.Context, id uint64, operationID string) error
+}
+
+// BindSessionOperation records the generic task after the caller has created
+// it. Keeping the link on the domain session lets restart-safe reconciliation
+// update the operation without parsing a chat tool result.
+func (u *Usecase) BindSessionOperation(ctx context.Context, publicID, operationID string) error {
+	sessions, ok := u.repo.(SessionRepo)
+	if !ok {
+		return errs.ErrNotWiredYet
+	}
+	operations, ok := u.repo.(OperationSessionRepo)
+	if !ok {
+		return errs.ErrNotWiredYet
+	}
+	session, err := sessions.GetSession(ctx, publicID)
+	if err != nil {
+		return err
+	}
+	return operations.SetSessionOperation(ctx, session.ID, operationID)
+}
+
 type EdgeCaller interface {
 	Call(ctx context.Context, edgeID uint64, method string, body []byte) ([]byte, error)
 }
@@ -337,7 +360,7 @@ func (u *Usecase) Create(ctx context.Context, in CreateInput) (*CreateOutput, er
 		startFields["finished_at"] = *edgeTask.FinishedAt
 	}
 	state := mapEdgeState(edgeTask.State)
-	if state == model.StateFailed || state == model.StateCancelled {
+	if state == model.StateFailed {
 		u.discardFailedCapture(ctx, capture, errors.New(edgeTask.Error))
 		return nil, fmt.Errorf("packet capture: edge completed without artifact: %w", errs.ErrInvalid)
 	}
@@ -450,7 +473,7 @@ func (u *Usecase) Refresh(ctx context.Context, id uint64) (*model.Capture, error
 		fields["finished_at"] = *edgeTask.FinishedAt
 	}
 	nextState := mapEdgeState(edgeTask.State)
-	if nextState == model.StateFailed || nextState == model.StateCancelled {
+	if nextState == model.StateFailed {
 		u.discardFailedCapture(ctx, capture, errors.New(edgeTask.Error))
 		return nil, fmt.Errorf("packet capture: edge completed without artifact: %w", errs.ErrInvalid)
 	}
@@ -469,7 +492,80 @@ func (u *Usecase) Refresh(ctx context.Context, id uint64) (*model.Capture, error
 			return nil, fmt.Errorf("packet capture: publish artifact: %w", processErr)
 		}
 	}
+	if nextState == model.StateCancelled && edgeTask.Result.FileBytes > 0 {
+		// Cancellation is not a data-integrity failure. The edge may have
+		// already flushed a useful prefix of the trace, which remains available
+		// for the parent session and later analysis.
+		if processed, processErr := u.ingestCancelledCapture(ctx, refreshed); processErr == nil && processed != nil {
+			return processed, nil
+		} else if processErr != nil {
+			u.log.Warn("packet capture: retain cancelled partial artifact", slog.Uint64("capture_id", refreshed.ID), slog.Any("err", processErr))
+		}
+	}
 	return refreshed, nil
+}
+
+// Cancel asks the owning edge to stop a queued or active capture. The capture
+// row is retained so a session can still surface any partial evidence the edge
+// managed to produce before observing cancellation.
+func (u *Usecase) Cancel(ctx context.Context, id uint64) (*model.Capture, error) {
+	if u == nil || u.repo == nil || u.caller == nil {
+		return nil, errs.ErrNotWiredYet
+	}
+	capture, err := u.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	edgeCaptureID := edgeCaptureIDFromResolved(capture.ResolvedTargetJSON)
+	if edgeCaptureID == "" {
+		return nil, fmt.Errorf("%w: edge capture id missing", errs.ErrInvalid)
+	}
+	body, err := json.Marshal(tunnel.PacketCaptureCancelRequest{CaptureID: edgeCaptureID})
+	if err != nil {
+		return nil, fmt.Errorf("packet capture: marshal cancel request: %w", err)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	respBody, err := u.caller.Call(callCtx, capture.EdgeID, tunnel.MethodCancelPacketCapture, body)
+	if err != nil {
+		return nil, fmt.Errorf("packet capture: cancel edge capture: %w", err)
+	}
+	var edgeTask tunnel.PacketCaptureTask
+	if err := json.Unmarshal(respBody, &edgeTask); err != nil {
+		return nil, fmt.Errorf("packet capture: decode cancel response: %w", err)
+	}
+	fields := map[string]any{"error_detail": edgeTask.Error}
+	if edgeTask.FinishedAt != nil {
+		fields["finished_at"] = *edgeTask.FinishedAt
+	}
+	if err := u.repo.Transition(ctx, capture.ID, refreshableStates(), mapEdgeState(edgeTask.State), fields); err != nil && !errors.Is(err, errs.ErrConflict) {
+		return nil, err
+	}
+	return u.repo.Get(ctx, capture.ID)
+}
+
+// ingestCancelledCapture reuses the validated completion parser for a partial
+// file, then restores the fact that the user cancelled the operation.
+func (u *Usecase) ingestCancelledCapture(ctx context.Context, capture *model.Capture) (*model.Capture, error) {
+	if capture == nil || capture.RawObjectKey != "" || u.rawStore == nil {
+		return capture, nil
+	}
+	if err := u.repo.Transition(ctx, capture.ID, []string{model.StateCancelled}, model.StateReady, nil); err != nil {
+		return nil, err
+	}
+	ready, err := u.repo.Get(ctx, capture.ID)
+	if err != nil {
+		return nil, err
+	}
+	processed, err := u.ingestCompletedCapture(ctx, ready)
+	if err != nil {
+		_ = u.repo.Transition(ctx, capture.ID, []string{model.StateReady, model.StateParsing}, model.StateCancelled, nil)
+		return nil, err
+	}
+	if err := u.repo.Transition(ctx, processed.ID, []string{model.StateReady}, model.StateCancelled, nil); err != nil {
+		return nil, err
+	}
+	return u.repo.Get(ctx, capture.ID)
 }
 
 func (u *Usecase) ingestCompletedCapture(ctx context.Context, capture *model.Capture) (*model.Capture, error) {

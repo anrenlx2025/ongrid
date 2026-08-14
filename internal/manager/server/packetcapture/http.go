@@ -40,6 +40,7 @@ func (h *Handler) Register(r chi.Router) {
 	r.With(h.requireWriter).Post("/v1/packet-captures/{id}/refresh", h.refresh)
 	r.With(h.requireWriter).Post("/v1/packet-capture-sessions", h.createSession)
 	r.With(h.requireWriter).Post("/v1/packet-capture-sessions/{publicID}/refresh", h.refreshSession)
+	r.With(h.requireWriter).Post("/v1/packet-capture-sessions/{publicID}/cancel", h.cancelSession)
 }
 
 // @Summary Get packet capture artifact
@@ -459,6 +460,24 @@ func (h *Handler) refreshSession(w http.ResponseWriter, r *http.Request) {
 	dto := toSessionDTO(detail.Session)
 	dto.Analysis = detail.Analysis
 	writeJSON(w, http.StatusOK, map[string]any{"session": dto, "captures": members})
+}
+
+// @Summary Cancel packet capture session
+// @Router /api/v1/packet-capture-sessions/{publicID}/cancel [post]
+// @Success 200 {object} sessionDTO
+func (h *Handler) cancelSession(w http.ResponseWriter, r *http.Request) {
+	if !h.authed(w, r) {
+		return
+	}
+	detail, err := h.uc.CancelSession(r.Context(), chi.URLParam(r, "publicID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	dto := toSessionDTO(detail.Session)
+	dto.PCAPCount = len(detail.Captures)
+	dto.Analysis = detail.Analysis
+	writeJSON(w, http.StatusOK, dto)
 }
 
 func (h *Handler) authed(w http.ResponseWriter, r *http.Request) bool {

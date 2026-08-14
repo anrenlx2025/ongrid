@@ -132,10 +132,11 @@ type Registry struct {
 
 	// k8sSnapshot feeds query_k8s_snapshot. It reads manager DB snapshots,
 	// not the live Kubernetes API.
-	k8sSnapshot         K8sSnapshotReader
-	k8sActionProposer   K8sActionProposer
-	legacyK8sActionTool *ExecuteK8sActionTool
-	packetCapture       PacketCaptureCreator
+	k8sSnapshot           K8sSnapshotReader
+	k8sActionProposer     K8sActionProposer
+	legacyK8sActionTool   *ExecuteK8sActionTool
+	packetCapture         PacketCaptureCreator
+	packetOperationCreate PacketCaptureOperationCreator
 
 	log   *slog.Logger
 	tools map[string]Tool
@@ -165,6 +166,13 @@ func (r *Registry) SetIMMessageSender(s IMMessageSender) { r.imMessageSender = s
 
 // SetPageStore wires serve_page → hosted-pages store.
 func (r *Registry) SetPageStore(p PageStore) { r.pageStore = p }
+
+// SetPacketCaptureOperationCreator wires durable Operation creation into the
+// BaseTool path. It is intentionally post-construction: packet capture and
+// the AIOps store are assembled at different points in main.
+func (r *Registry) SetPacketCaptureOperationCreator(create PacketCaptureOperationCreator) {
+	r.packetOperationCreate = create
+}
 
 // SetK8sSnapshotReader wires query_k8s_snapshot. Call after NewRegistry
 // because the Kubernetes service is assembled before, but kept out of

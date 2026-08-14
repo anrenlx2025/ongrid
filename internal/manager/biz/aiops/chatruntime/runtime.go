@@ -41,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -591,6 +592,20 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	if reply, handled := rt.tryApplyConfirmedConfigDraft(ctx, req, sess, history, emit); handled {
 		return reply, nil
 	}
+	// Resolve and Decide run before the LLM tool loop. This prevents a model
+	// from turning a candidate discovered during reasoning into an executable
+	// capture target. The reply is persisted and streamed like any other turn.
+	turnPlan, clarification := resolveTurn(req)
+	if turnPlan.Decision == DecisionClarify {
+		message := &aiopsmodel.Message{SessionID: sess.ID, Role: aiopsmodel.RoleAssistant, Content: &clarification, CreatedAt: time.Now().UTC()}
+		if err := rt.cfg.Sessions.AppendMessage(ctx, message); err != nil {
+			return nil, fmt.Errorf("chatruntime: persist clarification: %w", err)
+		}
+		emit(Event{Type: EventAssistant, Assistant: &AssistantEvent{MessageID: message.ID, Content: clarification, CreatedAt: message.CreatedAt}})
+		reply := &Reply{Message: message}
+		emit(Event{Type: EventDone, Done: reply})
+		return reply, nil
+	}
 
 	// 5. Resolve active skills + compose the system prompt.
 	policy := Policy{AllowedClasses: []string{"*"}}
@@ -774,6 +789,9 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	// — these get inlined into the per-turn
 	//    <system-reminder> block by graph.assembleMessages.
 	dynamicHints := rt.calcDynamicHints(history)
+	if turnPlan.Phase == PhaseAct || turnPlan.Phase == PhaseOperate || turnPlan.Phase == PhasePropose {
+		dynamicHints = append(dynamicHints, turnPlan.ModelBoundary())
+	}
 	// AgentReminder is populated when the session is pinned to a
 	// persona (Phase 2). — anti-drift reminder gets
 	// inlined into the per-turn <system-reminder> block. Worker spawns
@@ -801,6 +819,7 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 		compose.WithToolOption(
 			graph.WithInvokeOpts(
 				basetool.WithUserText(req.UserText),
+				basetool.WithConfirmedDeviceIDs(confirmedDeviceIDs(req.Mentions)),
 				basetool.WithHostWritePermission(writeEnabled && !viewerOnly),
 			),
 			graph.WithToolInvocationPersistence(toolPersistence),
@@ -923,6 +942,34 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	// exactly once at terminal success".
 	emit(Event{Type: EventDone, Done: reply})
 	return reply, nil
+}
+
+func confirmedDeviceIDs(mentions []Mention) []uint64 {
+	ids := make([]uint64, 0, len(mentions))
+	for _, mention := range mentions {
+		if !strings.EqualFold(strings.TrimSpace(mention.Type), "device") {
+			continue
+		}
+		id, err := strconv.ParseUint(strings.TrimSpace(mention.ID), 10, 64)
+		if err == nil && id != 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func resolveTurn(req *Request) (TurnPlan, string) {
+	if req == nil {
+		return PlanTurn(ResolvedFacts{Permitted: false, Reason: "nil request"}), ""
+	}
+	text := strings.ToLower(req.UserText)
+	captureIntent := strings.Contains(text, "pcap") || strings.Contains(text, "packet capture") || strings.Contains(req.UserText, "抓包") || (strings.Contains(req.UserText, "抓") && strings.Contains(req.UserText, "流量"))
+	hasTarget := len(confirmedDeviceIDs(req.Mentions)) > 0 || strings.Contains(text, "device_id")
+	plan := PlanTurn(ResolvedFacts{Missing: captureIntent && !hasTarget, Permitted: req.Role != "viewer", LongRunning: captureIntent})
+	if plan.Decision == DecisionClarify {
+		return plan, "要开始抓包，请先选择目标设备（使用 @ 选择设备），或明确提供 `device_id` 和网卡接口。"
+	}
+	return plan, ""
 }
 
 // toCallbackEmitter adapts a chatruntime.Emit into the

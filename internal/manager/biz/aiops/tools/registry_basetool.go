@@ -202,7 +202,7 @@ func (r *Registry) BuildBaseTools() *ToolBag {
 		out = append(out, NewRestartServiceTool(r.caller, r.edges, r.devices, r.log))
 	}
 	if r.packetCapture != nil {
-		out = append(out, NewCapturePCAPTool(r.packetCapture, r.log))
+		out = append(out, NewCapturePCAPTool(r.packetCapture, r.log, r.packetOperationCreate))
 		out = append(out, NewGetPacketCaptureSessionTool(r.packetCapture))
 	}
 

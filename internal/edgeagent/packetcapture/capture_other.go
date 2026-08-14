@@ -70,6 +70,10 @@ func (*Service) Start(Request) (Task, error) {
 
 func (*Service) Get(string) (Task, bool) { return Task{}, false }
 
+func (*Service) Cancel(string) (Task, error) {
+	return Task{}, errors.New("packet capture: supported on linux only")
+}
+
 func (*Service) Read(string, uint64) (RawObject, error) {
 	return RawObject{}, errors.New("packet capture: supported on linux only")
 }

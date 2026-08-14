@@ -9,7 +9,6 @@ import {
   ChevronRight,
   ExternalLink,
   Loader2,
-  Network,
   ShieldAlert,
   Wrench,
   X,
@@ -21,6 +20,7 @@ import { cn } from '@/lib/cn';
 import { isConfigDraftConfirmationMessage } from '@/lib/configDraftConfirmation';
 import { useI18n } from '@/i18n/locale';
 import { Button } from '@/components/ui';
+import { executeOperationAction } from '@/api/operations';
 
 export type ConfigDraftResult = {
   kind: 'config_draft';
@@ -48,8 +48,8 @@ type OperationCardData = {
   state: string;
   summary?: string;
   detailURL?: string;
-  filter?: string;
-  memberCount: number;
+  links?: Record<string, string>;
+  actions: { kind: string; label: string; enabled: boolean }[];
 };
 
 type Props = {
@@ -190,9 +190,7 @@ function ToolCallSummaryBlock({
   if (approval) {
     return <PendingApprovalCard approvalID={approval.id} kind={approval.kind} command={argCommandText(call.arguments)} />;
   }
-  const operation = !isError
-    ? asOperation(call.result) ?? (isPending ? pendingPacketCaptureOperation(call.name, call.arguments) : null)
-    : null;
+  const operation = !isError ? asOperation(call.result) : null;
   if (operation) return <OperationCard operation={operation} />;
   const configDraft = !isError ? asConfigDraft(call.result) : null;
   return (
@@ -278,92 +276,61 @@ function asOperation(result: unknown): OperationCardData | null {
   const operation = record.operation && typeof record.operation === 'object'
     ? record.operation as Record<string, unknown>
     : null;
-  if (operation?.kind === 'packet_capture_session') {
+  if (operation) {
     const id = typeof operation.id === 'string' ? operation.id : '';
     const links = operation.links && typeof operation.links === 'object'
       ? operation.links as Record<string, unknown>
       : {};
     return {
-      kind: 'packet_capture_session',
+      kind: typeof operation.kind === 'string' ? operation.kind : 'operation',
       id,
-      title: typeof operation.title === 'string' && operation.title ? operation.title : 'Packet capture',
-      state: typeof operation.state === 'string' ? operation.state : 'collecting',
+      title: typeof operation.title === 'string' && operation.title ? operation.title : 'Operation',
+      state: typeof operation.state === 'string' ? operation.state : 'running',
       summary: typeof operation.summary === 'string' ? operation.summary : undefined,
       detailURL: typeof links.detail === 'string' ? links.detail : undefined,
-      memberCount: Array.isArray(record.captures) ? record.captures.length : 0,
+      links: Object.fromEntries(Object.entries(links).filter(([, value]) => typeof value === 'string')) as Record<string, string>,
+      actions: Array.isArray(operation.actions) ? operation.actions.filter((a): a is { kind: string; label: string; enabled: boolean } => !!a && typeof a === 'object' && typeof (a as { kind?: unknown }).kind === 'string' && typeof (a as { label?: unknown }).label === 'string' && typeof (a as { enabled?: unknown }).enabled === 'boolean') : [],
     };
   }
-
-  return asLegacyPacketCaptureOperation(record);
+  return asLegacyOperation(record);
 }
 
-function asLegacyPacketCaptureOperation(record: Record<string, unknown>): OperationCardData | null {
+// Read-only compatibility adapter for assistant messages persisted before
+// Operation envelopes existed. It deliberately exposes no action: historic
+// records cannot be controlled through the new generic action API.
+function asLegacyOperation(record: Record<string, unknown>): OperationCardData | null {
   if (!record.session || typeof record.session !== 'object') return null;
   const session = record.session as Record<string, unknown>;
-  const id = typeof session.public_id === 'string'
-    ? session.public_id
-    : typeof session.id === 'string'
-      ? session.id
-      : '';
+  const id = typeof session.public_id === 'string' ? session.public_id : '';
   if (!id.startsWith('pcap-session-')) return null;
-  const nested = record.result && typeof record.result === 'object'
-    ? record.result as Record<string, unknown>
-    : {};
-  const capture = nested.capture && typeof nested.capture === 'object'
-    ? nested.capture as Record<string, unknown>
-    : null;
-
-  return {
-    kind: 'packet_capture_session',
-    id,
-    title: typeof session.title === 'string' && session.title ? session.title : 'Packet capture',
-    state: typeof session.state === 'string'
-      ? session.state
-      : typeof capture?.state === 'string'
-        ? capture.state
-        : 'collecting',
-    filter: typeof session.canonical_filter === 'string' ? session.canonical_filter : undefined,
-    memberCount: Array.isArray(record.captures) ? record.captures.length : capture ? 1 : 0,
-    detailURL: `/artifacts/packet-sessions/${encodeURIComponent(id)}`,
-  };
-}
-
-function pendingPacketCaptureOperation(
-  toolName: string,
-  argumentsValue: unknown,
-): OperationCardData | null {
-  if (toolName !== 'capture_pcap') return null;
-  const args = typeof argumentsValue === 'string' ? safeParse(argumentsValue) : argumentsValue;
-  if (!args || typeof args !== 'object') return null;
-  const record = args as Record<string, unknown>;
-  const repeatCount = typeof record.repeat_count === 'number' ? record.repeat_count : 1;
   return {
     kind: 'packet_capture_session',
     id: '',
-    title: typeof record.title === 'string' && record.title ? record.title : 'Packet capture',
-    state: 'creating',
-    filter: typeof record.filter === 'string' ? record.filter : undefined,
-    memberCount: repeatCount,
+    title: typeof session.title === 'string' && session.title ? session.title : 'Packet capture',
+    state: typeof session.state === 'string' ? session.state : 'collecting',
+    summary: typeof session.canonical_filter === 'string' ? session.canonical_filter : undefined,
+    detailURL: `/artifacts/packet-sessions/${encodeURIComponent(id)}`,
+    actions: [],
   };
 }
 
 function OperationCard({ operation }: { operation: OperationCardData }) {
   const { tr } = useI18n();
-  const presentation = operationPresentation(operation.state, tr);
+  const [state, setState] = useState(operation.state);
+  const presentation = operationPresentation(state, tr);
+  const [cancelling, setCancelling] = useState(false);
 
   return (
     <section className="overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-900/40 text-xs">
       <div className="flex items-center gap-2 border-b border-zinc-800/80 px-3 py-2.5">
-        <Network size={14} className="text-sky-400" />
-        <span className="font-medium text-zinc-100">{tr('抓包会话', 'Packet capture')}</span>
+        <Wrench size={14} className="text-sky-400" />
+        <span className="font-medium text-zinc-100">{operation.kind === 'packet_capture_session' ? tr('抓包会话', 'Packet capture') : tr('任务', 'Operation')}</span>
         <span className={`ml-auto ${presentation.className}`}>{presentation.label}</span>
       </div>
       <div className="grid gap-2 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
         <div className="min-w-0">
           <div className="truncate font-medium text-zinc-200">{operation.title}</div>
-          <div className="mt-1 font-mono text-[11px] text-zinc-500">
-            {operation.filter || tr('全部流量', 'all traffic')} · {operation.memberCount} {tr('个采集点', 'capture points')}
-          </div>
+          {operation.summary && <div className="mt-1 text-[11px] text-zinc-500">{operation.summary}</div>}
         </div>
         {operation.detailURL && (
           <a
@@ -374,6 +341,18 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
             {tr('打开调查', 'Open investigation')}
           </a>
         )}
+        {operation.actions.filter((action) => action.enabled).map((action) => (
+          <Button key={action.kind} variant="ghost" disabled={cancelling || !operation.id} onClick={async () => {
+            setCancelling(true);
+            try {
+              const updated = await executeOperationAction(operation.id, action.kind);
+              if (updated.state) setState(updated.state);
+            } finally { setCancelling(false); }
+          }}>
+            {action.kind === 'cancel' && <X size={13} />}
+            {cancelling && action.kind === 'cancel' ? tr('停止中', 'Stopping') : action.label}
+          </Button>
+        ))}
       </div>
     </section>
   );
@@ -384,11 +363,14 @@ function operationPresentation(state: string, tr: (zh: string, en: string) => st
     case 'creating':
       return { label: tr('正在创建', 'Creating'), className: 'text-sky-400' };
     case 'ready':
+    case 'succeeded':
       return { label: tr('已完成', 'Ready'), className: 'text-emerald-400' };
     case 'partial':
       return { label: tr('部分完成', 'Partial'), className: 'text-amber-400' };
     case 'failed':
       return { label: tr('失败', 'Failed'), className: 'text-red-400' };
+	case 'cancelled':
+		return { label: tr('已停止', 'Stopped'), className: 'text-zinc-400' };
     default:
       return { label: tr('采集中', 'Capturing'), className: 'text-sky-400' };
   }

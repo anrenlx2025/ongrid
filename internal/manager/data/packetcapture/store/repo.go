@@ -247,6 +247,17 @@ func (r *Repo) MarkSessionCompletionNotified(ctx context.Context, id uint64, at 
 	return res.RowsAffected == 1, nil
 }
 
+func (r *Repo) SetSessionOperation(ctx context.Context, id uint64, operationID string) error {
+	res := r.db.WithContext(ctx).Model(&model.Session{}).Where("id = ?", id).Update("operation_id", strings.TrimSpace(operationID))
+	if res.Error != nil {
+		return fmt.Errorf("packet capture: set session operation: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
 func (r *Repo) Delete(ctx context.Context, id uint64) error {
 	if id == 0 {
 		return fmt.Errorf("packet capture: delete input: %w", errs.ErrInvalid)

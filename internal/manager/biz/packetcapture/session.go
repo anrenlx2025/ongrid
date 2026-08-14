@@ -189,7 +189,7 @@ func (u *Usecase) RefreshSession(ctx context.Context, publicID string) (*Session
 		return nil, err
 	}
 	for _, capture := range detail.Captures {
-		if capture.State == model.StateReady && capture.ParsedJSON != "" {
+		if capture.ParsedJSON != "" {
 			continue
 		}
 		if capture.State == model.StateFailed || capture.State == model.StateCancelled {
@@ -197,6 +197,25 @@ func (u *Usecase) RefreshSession(ctx context.Context, publicID string) (*Session
 		}
 		if _, refreshErr := u.Refresh(ctx, capture.ID); refreshErr != nil {
 			u.log.Warn("packet capture: refresh session member", "session", publicID, "capture_id", capture.ID, "err", refreshErr)
+		}
+	}
+	return u.updateSessionAnalysis(ctx, publicID)
+}
+
+// CancelSession stops every non-terminal member of a coordinated capture.
+// Cancellation is best-effort across members: unavailable edges leave their
+// last state intact and the returned session remains inspectable.
+func (u *Usecase) CancelSession(ctx context.Context, publicID string) (*SessionDetail, error) {
+	detail, err := u.GetSession(ctx, publicID)
+	if err != nil {
+		return nil, err
+	}
+	for _, capture := range detail.Captures {
+		if capture.State == model.StateReady || capture.State == model.StateFailed || capture.State == model.StateCancelled || capture.State == model.StateExpired || capture.State == model.StateDeleted {
+			continue
+		}
+		if _, cancelErr := u.Cancel(ctx, capture.ID); cancelErr != nil {
+			u.log.Warn("packet capture: cancel session member", "session", publicID, "capture_id", capture.ID, "err", cancelErr)
 		}
 	}
 	return u.updateSessionAnalysis(ctx, publicID)

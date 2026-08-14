@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ongridio/ongrid/internal/manager/biz/aiops/tools/basetool"
 	pcapbiz "github.com/ongridio/ongrid/internal/manager/biz/packetcapture"
@@ -88,9 +89,33 @@ type PacketCaptureSessionCreator interface {
 	CreateSession(ctx context.Context, in pcapbiz.CreateSessionInput) (*pcapbiz.SessionOutput, error)
 }
 
+// PacketCaptureOperationCreator keeps the tool package independent from the
+// durable Operation implementation while making the long-running commitment
+// explicit at the tool boundary.
+type PacketCaptureOperationCreator func(context.Context, PacketCaptureOperationInput) (PacketCaptureOperation, error)
+
+type PacketCaptureOperationInput struct {
+	ChatSessionID string
+	CreatedBy     uint64
+	Title         string
+	SessionID     string
+	MemberCount   int
+}
+
+type PacketCaptureOperation struct {
+	ID      string
+	State   string
+	Summary string
+}
+
+type PacketCaptureOperationBinder interface {
+	BindSessionOperation(ctx context.Context, publicID, operationID string) error
+}
+
 type CapturePCAPTool struct {
-	uc  PacketCaptureCreator
-	log *slog.Logger
+	uc              PacketCaptureCreator
+	operationCreate PacketCaptureOperationCreator
+	log             *slog.Logger
 }
 
 type capturePCAPArgs struct {
@@ -111,11 +136,15 @@ type capturePCAPArgs struct {
 	} `json:"targets"`
 }
 
-func NewCapturePCAPTool(uc PacketCaptureCreator, log *slog.Logger) *CapturePCAPTool {
+func NewCapturePCAPTool(uc PacketCaptureCreator, log *slog.Logger, operationCreate ...PacketCaptureOperationCreator) *CapturePCAPTool {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &CapturePCAPTool{uc: uc, log: log}
+	tool := &CapturePCAPTool{uc: uc, log: log}
+	if len(operationCreate) != 0 {
+		tool.operationCreate = operationCreate[0]
+	}
+	return tool
 }
 
 func (t *CapturePCAPTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
@@ -159,6 +188,11 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 	if len(targets) == 0 {
 		targets = append(targets, pcapbiz.SessionTarget{DeviceID: in.DeviceID, Interface: strings.TrimSpace(in.Interface)})
 	}
+	for _, target := range targets {
+		if !captureTargetExplicitlyConfirmed(resolved.UserText, resolved.ConfirmedDeviceIDs, target.DeviceID) {
+			return "", fmt.Errorf("%s: device_id=%d was not explicitly confirmed by the user; ask the user to select or confirm the target device before capturing", ToolNameCapturePCAP, target.DeviceID)
+		}
+	}
 	repeatCount := in.RepeatCount
 	if repeatCount == 0 {
 		repeatCount = 1
@@ -191,13 +225,32 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 	if len(out.Captures) == 0 {
 		return "", fmt.Errorf("%s: packet capture session has no created members", ToolNameCapturePCAP)
 	}
+	if t.operationCreate == nil {
+		return "", fmt.Errorf("%s: operation runtime is not configured", ToolNameCapturePCAP)
+	}
+	op, err := t.operationCreate(ctx, PacketCaptureOperationInput{
+		ChatSessionID: basetool.SessionIDFromContext(ctx),
+		CreatedBy:     resolved.UserID,
+		Title:         out.Session.Title,
+		SessionID:     out.Session.PublicID,
+		MemberCount:   len(out.Captures),
+	})
+	if err != nil {
+		return "", fmt.Errorf("%s: create operation: %w", ToolNameCapturePCAP, err)
+	}
+	if binder, ok := t.uc.(PacketCaptureOperationBinder); ok {
+		if err := binder.BindSessionOperation(ctx, out.Session.PublicID, op.ID); err != nil {
+			return "", fmt.Errorf("%s: bind session operation: %w", ToolNameCapturePCAP, err)
+		}
+	}
 	operation := basetool.Operation{
 		Kind:    "packet_capture_session",
-		ID:      out.Session.PublicID,
-		State:   string(out.Session.State),
+		ID:      op.ID,
+		State:   op.State,
 		Title:   out.Session.Title,
-		Summary: fmt.Sprintf("%d capture member(s)", len(out.Captures)),
+		Summary: op.Summary,
 		Links:   map[string]string{"detail": "/artifacts/packet-sessions/" + out.Session.PublicID},
+		Actions: []basetool.OperationAction{{Kind: "cancel", Label: "Stop", Enabled: true}},
 	}
 	body, err := json.Marshal(map[string]any{"operation": operation, "session": out.Session, "captures": out.Captures, "member_errors": out.MemberErrors, "result": capturePCAPResult(out.Captures[0], nil, false)})
 	if err != nil {
@@ -206,47 +259,21 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 	return string(body), nil
 }
 
-const (
-	capturePollInterval = time.Second
-	maxCaptureWait      = 45 * time.Second
-)
-
-// waitForCapture keeps a chat turn coherent for ordinary short captures. The
-// bounded wait prevents a long forensic capture from occupying an agent turn.
-func (t *CapturePCAPTool) waitForCapture(ctx context.Context, capture *pcapmodel.Capture) (*pcapmodel.Capture, bool) {
-	if capture == nil || capture.ID == 0 {
-		return capture, false
+// captureTargetExplicitlyConfirmed is a hard execution gate, not a prompt
+// hint. A model may discover a similarly named device while resolving a
+// request, but it must not turn that candidate into a packet capture unless
+// the current user turn explicitly confirms the numeric device identifier.
+func captureTargetExplicitlyConfirmed(userText string, confirmedDeviceIDs []uint64, deviceID uint64) bool {
+	if deviceID == 0 {
+		return false
 	}
-	waitFor := time.Duration(capture.DurationSecs)*time.Second + 20*time.Second
-	if waitFor < 20*time.Second {
-		waitFor = 20 * time.Second
+	for _, confirmed := range confirmedDeviceIDs {
+		if confirmed == deviceID {
+			return true
+		}
 	}
-	if waitFor > maxCaptureWait {
-		waitFor = maxCaptureWait
-	}
-	waitCtx, cancel := context.WithTimeout(ctx, waitFor)
-	defer cancel()
-
-	current := capture
-	for {
-		if current.State == pcapmodel.StateReady && current.ParsedJSON != "" {
-			return current, true
-		}
-		if current.State == pcapmodel.StateFailed || current.State == pcapmodel.StateCancelled {
-			return current, true
-		}
-		select {
-		case <-waitCtx.Done():
-			return current, false
-		case <-time.After(capturePollInterval):
-		}
-		refreshed, err := t.uc.Refresh(waitCtx, current.ID)
-		if err != nil {
-			t.log.Warn("packet capture: wait refresh failed", slog.Uint64("capture_id", current.ID), slog.Any("err", err))
-			continue
-		}
-		current = refreshed
-	}
+	quotedID := regexp.QuoteMeta(strconv.FormatUint(deviceID, 10))
+	return regexp.MustCompile(`(?i)\bdevice_id\s*[=:]\s*` + quotedID + `\b`).MatchString(userText)
 }
 
 func capturePCAPResult(capture *pcapmodel.Capture, edge any, waited bool) map[string]any {
