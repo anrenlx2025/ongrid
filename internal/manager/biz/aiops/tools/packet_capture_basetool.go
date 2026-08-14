@@ -13,7 +13,10 @@ import (
 	pcapmodel "github.com/ongridio/ongrid/internal/manager/model/packetcapture"
 )
 
-const ToolNameCapturePCAP = "capture_pcap"
+const (
+	ToolNameCapturePCAP    = "capture_pcap"
+	ToolNameGetPCAPSession = "get_packet_capture_session"
+)
 
 const capturePCAPDescription = "Start a bounded packet capture on one host device, or a coordinated capture session across multiple edge-hosted devices using targets. For short captures, waits for parsing and returns durable packet artifacts or a session id. Captures are audited and must be explicitly requested by the operator."
 
@@ -39,6 +42,44 @@ var CapturePCAPSchema = json.RawMessage(`{
 type PacketCaptureCreator interface {
 	Create(ctx context.Context, in pcapbiz.CreateInput) (*pcapbiz.CreateOutput, error)
 	Refresh(ctx context.Context, id uint64) (*pcapmodel.Capture, error)
+	GetSession(ctx context.Context, publicID string) (*pcapbiz.SessionDetail, error)
+}
+
+var GetPacketCaptureSessionSchema = json.RawMessage(`{
+  "type":"object",
+  "properties":{"session_id":{"type":"string","description":"Opaque packet capture session id, pcap-session-..."}},
+  "required":["session_id"]
+}`)
+
+type GetPacketCaptureSessionTool struct{ uc PacketCaptureCreator }
+
+func NewGetPacketCaptureSessionTool(uc PacketCaptureCreator) *GetPacketCaptureSessionTool {
+	return &GetPacketCaptureSessionTool{uc: uc}
+}
+
+func (t *GetPacketCaptureSessionTool) Info(context.Context) (*basetool.ToolInfo, error) {
+	return &basetool.ToolInfo{Name: ToolNameGetPCAPSession, Description: "Read a coordinated multi-edge packet capture session for diagnosis. Returns member capture status, normalized cross-edge flows, and merged packet metadata timeline; never returns raw PCAP payloads.", WhenToUse: "Use when the user asks to analyze, compare, or explain a packet capture session. Call this before making network-loss or latency claims.", Parameters: GetPacketCaptureSessionSchema, Class: "read"}, nil
+}
+
+func (t *GetPacketCaptureSessionTool) InvokableRun(ctx context.Context, argsJSON string, _ ...basetool.InvokeOption) (string, error) {
+	if t.uc == nil {
+		return "", fmt.Errorf("%s: packet capture usecase not configured", ToolNameGetPCAPSession)
+	}
+	var in struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil {
+		return "", fmt.Errorf("%s: bad args: %w", ToolNameGetPCAPSession, err)
+	}
+	detail, err := t.uc.GetSession(ctx, strings.TrimSpace(in.SessionID))
+	if err != nil {
+		return "", err
+	}
+	body, err := json.Marshal(map[string]any{"session": detail.Session, "captures": detail.Captures, "analysis": detail.Analysis})
+	if err != nil {
+		return "", fmt.Errorf("%s: marshal response: %w", ToolNameGetPCAPSession, err)
+	}
+	return string(body), nil
 }
 
 type PacketCaptureSessionCreator interface {
@@ -224,3 +265,4 @@ func capturePCAPResult(capture *pcapmodel.Capture, edge any, waited bool) map[st
 }
 
 var _ basetool.BaseTool = (*CapturePCAPTool)(nil)
+var _ basetool.BaseTool = (*GetPacketCaptureSessionTool)(nil)

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/ongridio/ongrid/internal/manager/biz/aiops/tools/basetool"
@@ -35,6 +36,18 @@ func (f *fakePacketCaptureCreator) Refresh(_ context.Context, id uint64) (*pcapm
 		capture = f.refresh(capture)
 	}
 	return capture, nil
+}
+
+func (f *fakePacketCaptureCreator) GetSession(_ context.Context, id string) (*pcapbiz.SessionDetail, error) {
+	return &pcapbiz.SessionDetail{Session: &pcapmodel.Session{PublicID: id}, Analysis: pcapbiz.SessionAnalysis{}}, nil
+}
+
+func TestGetPacketCaptureSessionToolReturnsSessionAnalysis(t *testing.T) {
+	tool := NewGetPacketCaptureSessionTool(&fakePacketCaptureCreator{})
+	out, err := tool.InvokableRun(context.Background(), `{"session_id":"pcap-session-123"}`)
+	if err != nil || !strings.Contains(out, "pcap-session-123") {
+		t.Fatalf("out=%s err=%v", out, err)
+	}
 }
 
 func TestCapturePCAPToolInfoIsReadSpecialty(t *testing.T) {

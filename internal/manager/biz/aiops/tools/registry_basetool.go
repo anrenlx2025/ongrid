@@ -203,6 +203,7 @@ func (r *Registry) BuildBaseTools() *ToolBag {
 	}
 	if r.packetCapture != nil {
 		out = append(out, NewCapturePCAPTool(r.packetCapture, r.log))
+		out = append(out, NewGetPacketCaptureSessionTool(r.packetCapture))
 	}
 
 	// 19-20: topology graph tools. expand_topology does a
