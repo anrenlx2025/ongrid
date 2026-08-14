@@ -24,6 +24,7 @@ import { executeOperationAction } from '@/api/operations';
 
 export type ConfigDraftResult = {
   kind: 'config_draft';
+	proposal?: { kind: 'proposal'; type: string; state: string; title: string; summary?: string; actions: { kind: string; label: string; enabled: boolean }[] };
   domain?: string;
   action?: string;
   summary?: string;
@@ -390,12 +391,14 @@ function ConfigDraftCard({
   const payload = payloadSummary(draft.payload);
   const scope = scopeSummary(draft.scope, tr, !draft.confirmation_prompt);
   const disabled = state !== 'idle' || !onConfirm;
+	const proposal = draft.proposal;
 
   return (
     <div className="border-t border-zinc-800/80 bg-zinc-950/30 px-3 py-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
+			{proposal && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-300">{tr('提案', 'Proposal')}</span>}
             <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-300">
               {domainLabel(draft.domain, tr)}
             </span>
@@ -406,9 +409,9 @@ function ConfigDraftCard({
               <span className="truncate text-[11px] text-zinc-500">{draft.target.name}</span>
             )}
           </div>
-          <div className="text-sm font-medium text-zinc-100">
-            {draft.summary || tr('配置草案', 'Configuration draft')}
-          </div>
+		  <div className="text-sm font-medium text-zinc-100">
+			{proposal?.title || draft.summary || tr('配置草案', 'Configuration draft')}
+		  </div>
           {scope && <div className="text-[11px] leading-5 text-zinc-300">{scope}</div>}
           {draft.confirmation_prompt && (
             <div className="text-[11px] leading-5 text-zinc-400">{draft.confirmation_prompt}</div>
