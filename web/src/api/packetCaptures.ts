@@ -49,6 +49,8 @@ export type PacketCapture = {
 
 export type PacketCaptureSession = {
   id: string;
+  source: string;
+  pcap_count: number;
   state: 'collecting' | 'ready' | 'partial' | 'failed';
   title: string;
   description: string;

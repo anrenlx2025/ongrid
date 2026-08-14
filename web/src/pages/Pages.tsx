@@ -9,7 +9,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { AppWindow, Bot, Check, Download, ExternalLink, Eye, FileBarChart, FileCode2, Loader2, Search, Share2, Trash2, Workflow } from 'lucide-react';
 
 import { deletePage, fetchPageHTML, listPages, sharePage, type HostedPage } from '@/api/pages';
-import { downloadPacketCapture, listPacketCaptures, listPacketCaptureSessions, packetCaptureArtifactID, type PacketCapture, type PacketCapturePacket, type PacketCaptureSession, type PacketProtocolNode } from '@/api/packetCaptures';
+import { downloadPacketCapture, listPacketCaptureSessions, packetCaptureArtifactID, type PacketCapture, type PacketCapturePacket, type PacketCaptureSession, type PacketProtocolNode } from '@/api/packetCaptures';
 import { cn } from '@/lib/cn';
 import { useI18n } from '@/i18n/locale';
 import { useAuth } from '@/store/auth';
@@ -408,7 +408,7 @@ function PacketCaptureSessionsView() {
   useEffect(()=>{void refresh();},[refresh]);
   return <div>
     {error&&<div className="mb-4 rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">{error}</div>}
-    {loading?<div className="py-16 text-center text-xs text-zinc-500">{tr('加载中…','Loading…')}</div>:items.length===0?<EmptyState icon={Workflow} title={tr('暂无抓包会话','No capture sessions')} hint={tr('让助理对多个 Edge 发起抓包后，会话会在这里汇总单机产物、关联流和时间线。','Ask the assistant to capture on multiple edges; sessions summarize member artifacts, correlated flows, and timelines here.')} className="py-20"/>:<section className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/40"><div className="divide-y divide-zinc-800">{items.map(item=><button key={item.id} type="button" onClick={()=>navigate(`/artifacts/packet-sessions/${encodeURIComponent(item.id)}`)} className="flex w-full flex-wrap items-center gap-x-5 gap-y-1 px-4 py-3 text-left text-xs transition-colors hover:bg-zinc-800/60"><span className="min-w-[220px] font-medium text-zinc-100">{item.title||item.id}<span className="mt-1 block font-mono text-[11px] text-zinc-500">{item.id}</span></span><span className="text-zinc-400">{item.canonical_filter||tr('全部流量','all traffic')}</span><span className="ml-auto text-zinc-400">{item.analysis?.summary.ready_count??0}/{item.analysis?.summary.capture_count??0} {tr('成员就绪','members ready')}</span><span className="text-zinc-500">{item.analysis?.summary.flow_count??0} {tr('条流','flows')}</span><span className="text-zinc-500">{relativeTime(item.created_at)}</span></button>)}</div></section>}
+    {loading?<div className="py-16 text-center text-xs text-zinc-500">{tr('加载中…','Loading…')}</div>:items.length===0?<EmptyState title={tr('暂无抓包会话','No capture sessions')} hint={tr('让助理对多个 Edge 发起抓包后，会话会在这里汇总成员 PCAP、关联流和时间线。','Ask the assistant to capture on multiple edges; sessions summarize member PCAPs, correlated flows, and timelines here.')} className="py-20"/>:<section className="overflow-hidden border border-zinc-800 bg-zinc-900/40"><table className="w-full min-w-[780px] text-left text-xs"><thead className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] uppercase tracking-wide text-zinc-500"><tr><th className="px-4 py-3 font-medium">{tr('会话','Session')}</th><th className="px-4 py-3 font-medium">{tr('来源','Source')}</th><th className="px-4 py-3 font-medium">PCAP</th><th className="px-4 py-3 font-medium">{tr('状态','Status')}</th><th className="px-4 py-3 font-medium">{tr('创建时间','Created')}</th></tr></thead><tbody className="divide-y divide-zinc-800">{items.map(item=><tr key={item.id} role="button" tabIndex={0} onClick={()=>navigate(`/artifacts/packet-sessions/${encodeURIComponent(item.id)}`)} onKeyDown={e=>{if(e.key==='Enter'){navigate(`/artifacts/packet-sessions/${encodeURIComponent(item.id)}`)}}} className="cursor-pointer text-zinc-300 transition-colors hover:bg-zinc-800/60"><td className="px-4 py-3"><div className="font-medium text-zinc-100">{item.title||item.id}</div><div className="mt-1 font-mono text-[11px] text-zinc-500">{item.canonical_filter||tr('全部流量','all traffic')}</div></td><td className="px-4 py-3 text-zinc-400">{packetSourceLabel(item.source,tr)}</td><td className="px-4 py-3 text-zinc-300">{item.pcap_count}</td><td className="px-4 py-3 text-zinc-400">{item.analysis?.summary.ready_count??0}/{item.pcap_count} {tr('已就绪','ready')}</td><td className="px-4 py-3 text-zinc-500">{relativeTime(item.created_at)}</td></tr>)}</tbody></table></section>}
   </div>;
 }
 
@@ -431,136 +431,10 @@ function ReportsTabView() {
 }
 
 function PacketArtifactsTabView() {
-  const { tr } = useI18n();
-  const navigate = useNavigate();
-  const [items, setItems] = useState<PacketCapture[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [downloadingId, setDownloadingId] = useState<number | null>(null);
-  const [sessions, setSessions] = useState<PacketCaptureSession[]>([]);
-
-  const refresh = useCallback(async () => {
-    try {
-      const [captures, sessionList] = await Promise.all([listPacketCaptures({ limit: 100 }), listPacketCaptureSessions()]);
-      setItems(captures.items ?? []);
-      setSessions(sessionList.items ?? []);
-      setError('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  const downloadOne = useCallback(async (capture: PacketCapture) => {
-    setDownloadingId(capture.id);
-    try {
-      await downloadPacketCapture(capture);
-      setError('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDownloadingId(null);
-    }
-  }, []);
-
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
       <div className="flex-1 overflow-y-auto px-6 py-4">
-        {error && <div className="mb-4 rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-400">{error}</div>}
-        {loading ? (
-          <div className="py-16 text-center text-xs text-zinc-500">{tr('加载中…', 'Loading…')}</div>
-        ) : items.length === 0 && sessions.length === 0 ? (
-          <EmptyState
-            icon={FileCode2}
-            title={tr('暂无数据包产物', 'No packet artifacts')}
-            hint={tr('让助理或工作流调用 capture_pcap，完成后会在这里形成可查看的数据包产物。', 'Let an assistant or workflow call capture_pcap; completed captures appear here as packet artifacts.')}
-            className="flex flex-col items-center gap-2 py-20 text-center"
-          />
-        ) : (
-          <div className="space-y-4">
-            <section>
-              <div className="mb-2 text-xs font-medium text-zinc-300">{tr('抓包会话', 'Capture sessions')}</div>
-              <PacketCaptureSessionsView />
-            </section>
-            <section className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/40">
-              <div className="border-b border-zinc-800 px-4 py-3 text-xs font-medium text-zinc-300">{tr('独立数据包', 'Standalone packet artifacts')}</div>
-              <div className="max-h-[600px] overflow-auto">
-                <table className="w-full min-w-[820px] text-left text-xs">
-                  <thead className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] uppercase tracking-wide text-zinc-500">
-                    <tr>
-                      <th className="px-4 py-3 font-medium">{tr('数据包', 'Packet artifact')}</th>
-                      <th className="px-4 py-3 font-medium">{tr('来源', 'Source')}</th>
-                      <th className="px-4 py-3 font-medium">{tr('采集结果', 'Capture result')}</th>
-                      <th className="px-4 py-3 font-medium">{tr('创建时间', 'Created')}</th>
-                      <th className="sticky right-0 z-20 border-l border-zinc-800 bg-zinc-950 px-4 py-3 text-right font-medium">{tr('操作', 'Actions')}</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-800/80">
-                    {items.map((item) => {
-                          return (
-                            <tr
-                              key={item.id}
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => navigate(`/artifacts/packets/${encodeURIComponent(packetCaptureArtifactID(item))}`)}
-                              onKeyDown={(event) => {
-                                if (event.key === 'Enter' || event.key === ' ') {
-                                  event.preventDefault();
-                                  navigate(`/artifacts/packets/${encodeURIComponent(packetCaptureArtifactID(item))}`);
-                                }
-                              }}
-                              className={cn(
-                                'cursor-pointer bg-zinc-900/20 text-zinc-300 transition-colors hover:bg-zinc-800/50 focus:outline-none focus-visible:bg-zinc-800/70',
-                              )}
-                            >
-                              <td className="max-w-[360px] px-4 py-3">
-                                <div className="flex min-w-0 items-center gap-2">
-                                  <PcapFileIcon size={15} className="text-sky-500" />
-                                  <span className="truncate font-medium text-zinc-100" title={item.title}>{item.title || packetCaptureArtifactID(item)}</span>
-                                </div>
-                            <div className="mt-1 truncate font-mono text-[11px] text-zinc-500">{packetCaptureArtifactID(item)} · {item.interface_name}</div>
-                          </td>
-                          <td className="px-4 py-3 text-zinc-400">{packetSourceLabel(item.source, tr)}</td>
-                          <td className="px-4 py-3 text-zinc-400">
-                            {formatCount(item.captured_packets)} {tr('个包', 'packets')} · {formatBytes(item.captured_bytes)}
-                          </td>
-                          <td className="whitespace-nowrap px-4 py-3 text-zinc-500">{relativeTime(item.created_at)}</td>
-                          <td className="sticky right-0 z-10 border-l border-zinc-800 bg-zinc-900 px-4 py-3 text-right" onClick={(event) => event.stopPropagation()}>
-                            <div className="inline-flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => navigate(`/artifacts/packets/${encodeURIComponent(packetCaptureArtifactID(item))}`)}
-                                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 text-xs text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800"
-                              >
-                                <Eye size={13} />
-                                {tr('查看', 'Open')}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void downloadOne(item)}
-                                disabled={!item.raw_available || downloadingId === item.id}
-                                title={!item.raw_available ? tr('原始 PCAP 暂不可用', 'Raw PCAP is not available yet') : tr('下载 PCAP', 'Download PCAP')}
-                                className="inline-flex h-8 items-center justify-center rounded-md border border-zinc-700 px-2 text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
-                              >
-                                {downloadingId === item.id ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
-                                <span className="sr-only">{tr('下载 PCAP', 'Download PCAP')}</span>
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          </div>
-        )}
+        <PacketCaptureSessionsView />
       </div>
     </div>
   );

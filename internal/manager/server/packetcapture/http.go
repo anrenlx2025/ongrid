@@ -140,6 +140,8 @@ type createSessionReq struct {
 
 type sessionDTO struct {
 	ID              string    `json:"id"`
+	Source          string    `json:"source"`
+	PCAPCount       int       `json:"pcap_count"`
 	State           string    `json:"state"`
 	Title           string    `json:"title"`
 	Description     string    `json:"description"`
@@ -156,7 +158,7 @@ func toSessionDTO(s *model.Session) sessionDTO {
 	if s == nil {
 		return sessionDTO{}
 	}
-	dto := sessionDTO{ID: s.PublicID, State: s.State, Title: s.Title, Description: s.Description, CanonicalFilter: s.CanonicalFilter, DurationSeconds: s.DurationSecs, PlannedStartAt: s.PlannedStartAt, ClockQuality: s.ClockQuality, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
+	dto := sessionDTO{ID: s.PublicID, Source: s.Source, State: s.State, Title: s.Title, Description: s.Description, CanonicalFilter: s.CanonicalFilter, DurationSeconds: s.DurationSecs, PlannedStartAt: s.PlannedStartAt, ClockQuality: s.ClockQuality, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
 	if s.AnalysisJSON != "" {
 		// A malformed stored analysis must not make the session list unavailable;
 		// the detail endpoint recomputes analysis from member artifacts.
@@ -224,7 +226,14 @@ func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]sessionDTO, 0, len(items))
 	for _, item := range items {
-		out = append(out, toSessionDTO(item))
+		dto := toSessionDTO(item)
+		detail, detailErr := h.uc.GetSession(r.Context(), item.PublicID)
+		if detailErr != nil {
+			writeErr(w, detailErr)
+			return
+		}
+		dto.PCAPCount = len(detail.Captures)
+		out = append(out, dto)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": out, "total": total})
 }
@@ -246,6 +255,7 @@ func (h *Handler) getSession(w http.ResponseWriter, r *http.Request) {
 		members = append(members, toDTO(capture))
 	}
 	dto := toSessionDTO(detail.Session)
+	dto.PCAPCount = len(detail.Captures)
 	dto.Analysis = detail.Analysis
 	writeJSON(w, http.StatusOK, map[string]any{"session": dto, "captures": members})
 }
