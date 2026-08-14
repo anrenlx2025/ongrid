@@ -85,8 +85,9 @@ type toolSearchEntry struct {
 // envelope minimal — `tools` plus a `query` echo so the LLM can
 // reference what it asked for in subsequent turns.
 type toolSearchResponse struct {
-	Query string            `json:"query"`
-	Tools []toolSearchEntry `json:"tools"`
+	Query       string            `json:"query"`
+	Tools       []toolSearchEntry `json:"tools"`
+	Instruction string            `json:"instruction,omitempty"`
 }
 
 // ToolSearchTool is the always-loaded entry point for deferred schema
@@ -156,6 +157,9 @@ func (t *ToolSearchTool) InvokableRun(ctx context.Context, argsJSON string, _ ..
 	matches := matchTools(ctx, searchSet, args.Query, maxResults)
 
 	resp := toolSearchResponse{Query: args.Query, Tools: matches}
+	if len(matches) == 0 {
+		resp.Instruction = "No matching executable tool schema is available in this turn. Do not retry ToolSearch with synonyms. Use an available routing tool such as AgentTool for a multi-step task, or answer that this capability is unavailable."
+	}
 	out, err := json.Marshal(resp)
 	if err != nil {
 		return "", fmt.Errorf("%s: marshal response: %w", ToolSearchToolName, err)

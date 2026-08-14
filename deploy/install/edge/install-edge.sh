@@ -323,20 +323,23 @@ for tool in promtail otelcol-contrib node_exporter process_exporter mysqld_expor
     fi
 done
 
-# 1b) state dir writable by the service user. On systemd < 235 (CentOS/RHEL 7)
-# the unit's StateDirectory= is silently ignored, so this probe catches the
-# "online but no data" failure: without a writable /var/lib/ongrid-edge every
-# collector plugin fails `configure` with EACCES.
-if command -v runuser >/dev/null 2>&1; then
-    SVC_W=(runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR")
+# 1b) State dir writable by the runtime identity. A blank User= means root.
+# On systemd < 235 (CentOS/RHEL 7) StateDirectory= is silently ignored, so
+# this catches the "online but no data" failure before collector setup does.
+RUNTIME_USER=$(systemctl show -p User --value ongrid-edge 2>/dev/null || true)
+RUNTIME_USER=${RUNTIME_USER:-root}
+if [[ "$RUNTIME_USER" == "root" ]]; then
+    SVC_W=(test -w "$STATE_DIR")
+elif command -v runuser >/dev/null 2>&1; then
+    SVC_W=(runuser -u "$RUNTIME_USER" -- test -w "$STATE_DIR")
 else
-    SVC_W=(sudo -u "$SERVICE_USER" test -w "$STATE_DIR")
+    SVC_W=(sudo -u "$RUNTIME_USER" test -w "$STATE_DIR")
 fi
 if [[ -d "$STATE_DIR" ]] && "${SVC_W[@]}" 2>/dev/null; then
-    log_info "state dir writable by $SERVICE_USER: $STATE_DIR"
+    log_info "state dir writable by $RUNTIME_USER: $STATE_DIR"
 else
-    log_error "$SERVICE_USER cannot write $STATE_DIR — every collector plugin will fail; edge will be online with no data"
-    log_error "  fix: mkdir -p $STATE_DIR; chown $SERVICE_USER:$SERVICE_GROUP $STATE_DIR; chmod 0755 $STATE_DIR; systemctl restart ongrid-edge"
+    log_error "$RUNTIME_USER cannot write $STATE_DIR — every collector plugin will fail; edge will be online with no data"
+    log_error "  fix: mkdir -p $STATE_DIR; chmod 0755 $STATE_DIR; systemctl restart ongrid-edge"
     SELFCHECK_FAIL=1
 fi
 

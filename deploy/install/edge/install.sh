@@ -359,10 +359,9 @@ Description=ongrid edge agent
 After=network-online.target
 Wants=network-online.target
 # ADR-024 remote upgrade: the privileged "apply staged bundle + rollback
-# check" step runs as the separate root oneshot ongrid-edge-upgrade.service
-# (this unit is sandboxed + non-root and cannot write /usr/local). Wants=
-# pulls it on every (re)start incl. Restart=always; After= guarantees the
-# swap lands before the agent execs.
+# check" step runs as the separate root oneshot ongrid-edge-upgrade.service.
+# Wants= pulls it on every (re)start incl. Restart=always; After= guarantees
+# the swap lands before the agent execs.
 Wants=ongrid-edge-upgrade.service
 After=ongrid-edge-upgrade.service
 
@@ -372,17 +371,18 @@ EnvironmentFile=/etc/ongrid-edge/ongrid-edge.env
 ExecStart=/usr/local/bin/ongrid-edge
 Restart=always
 RestartSec=5
-User=ongrid-edge
-Group=ongrid-edge
+# Root execution is required for explicitly approved host maintenance such as
+# Docker cleanup. Unapproved commands still use the edge read-only cmdpolicy;
+# only the manager-approved Unrestricted request bypasses that sandbox.
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-# StateDirectory auto-creates /var/lib/ongrid-edge (mode 0755 owned by
-# User=) at start and implicitly adds it to ReadWritePaths. Without
-# this, ProtectSystem=strict makes /var/lib read-only and the agent's
-# runtime mkdir of /var/lib/ongrid-edge/.upgrade fails EROFS.
+# StateDirectory auto-creates /var/lib/ongrid-edge at start and implicitly
+# adds it to ReadWritePaths. Without this, ProtectSystem=strict makes /var/lib
+# read-only and the agent's runtime mkdir of /var/lib/ongrid-edge/.upgrade
+# fails EROFS.
 #
 # StateDirectory= needs systemd >= 235. On 233/234 ProtectSystem=strict and
 # ReadWritePaths= are honored but StateDirectory= is not, so its implicit
@@ -482,16 +482,21 @@ done
 # (CentOS/RHEL 7) the unit's StateDirectory= is silently ignored, so this is
 # the probe that catches the "online but no data" failure: without a writable
 # /var/lib/ongrid-edge every collector plugin fails `configure` with EACCES.
-if command -v runuser >/dev/null 2>&1; then
-    SVC_W=(runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR")
+# A blank User= means systemd runs the agent as root.
+RUNTIME_USER=$(systemctl show -p User --value ongrid-edge 2>/dev/null || true)
+RUNTIME_USER=${RUNTIME_USER:-root}
+if [[ "$RUNTIME_USER" == "root" ]]; then
+    SVC_W=(test -w "$STATE_DIR")
+elif command -v runuser >/dev/null 2>&1; then
+    SVC_W=(runuser -u "$RUNTIME_USER" -- test -w "$STATE_DIR")
 else
-    SVC_W=(sudo -u "$SERVICE_USER" test -w "$STATE_DIR")
+    SVC_W=(sudo -u "$RUNTIME_USER" test -w "$STATE_DIR")
 fi
 if [[ -d "$STATE_DIR" ]] && "${SVC_W[@]}" 2>/dev/null; then
-    log_ok "state dir writable by ${SERVICE_USER}: ${STATE_DIR}"
+    log_ok "state dir writable by ${RUNTIME_USER}: ${STATE_DIR}"
 else
-    log_error "${SERVICE_USER} cannot write ${STATE_DIR} — every collector plugin will fail; edge will be online with no data"
-    log_error "  fix: mkdir -p ${STATE_DIR}; chown ${SERVICE_USER}:${SERVICE_GROUP} ${STATE_DIR}; chmod 0755 ${STATE_DIR}; systemctl restart ongrid-edge"
+    log_error "${RUNTIME_USER} cannot write ${STATE_DIR} — every collector plugin will fail; edge will be online with no data"
+    log_error "  fix: mkdir -p ${STATE_DIR}; chmod 0755 ${STATE_DIR}; systemctl restart ongrid-edge"
     SELFCHECK_FAIL=1
 fi
 if command -v runuser >/dev/null 2>&1; then

@@ -3,11 +3,10 @@ Description=ongrid edge agent
 After=network-online.target
 Wants=network-online.target
 # C11 Phase-B / ADR-024 remote upgrade. The privileged "apply staged bundle"
-# step runs as a SEPARATE root oneshot (ongrid-edge-upgrade.service) because
-# this unit runs sandboxed (ProtectSystem=strict) and non-root (User=) and so
-# cannot write the binary paths under /usr/local. Wants= pulls the oneshot on
-# every (re)start of this unit — including Restart=always auto-restarts — and
-# After= guarantees the swap lands before the agent execs.
+# step runs as a separate root oneshot so the binary replacement is isolated
+# from the long-running agent. Wants= pulls the oneshot on every (re)start of
+# this unit — including Restart=always auto-restarts — and After= guarantees
+# the swap lands before the agent execs.
 #
 # This replaces the old `ExecStartPre=-+.../apply-pending-upgrade.sh`, whose
 # `+` root-exec prefix is unsupported on systemd < 231 (CentOS 7 = 219) and
@@ -21,8 +20,10 @@ EnvironmentFile=/etc/ongrid-edge/ongrid-edge.env
 ExecStart=/usr/local/bin/ongrid-edge
 Restart=always
 RestartSec=5
-User=ongrid-edge
-Group=ongrid-edge
+# The agent runs as root so an explicitly approved host_bash write command can
+# perform privileged host maintenance, including Docker cleanup. The manager
+# approval flow and the edge read-only cmdpolicy remain the command boundary:
+# only BashExecRequest.Unrestricted reaches the raw execution path.
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -33,12 +34,11 @@ PrivateTmp=true
 # access to their own state files. /run/ongrid-edge is not enough — we
 # need persistent state across restarts (promtail positions etc.).
 #
-# StateDirectory= makes systemd create /var/lib/ongrid-edge at start
-# (mode 0755, owned by User= / Group=) and implicitly adds it to the
-# ReadWritePaths whitelist. Without this, ProtectSystem=strict makes the
-# parent /var/lib read-only and the agent's runtime mkdir of
-# /var/lib/ongrid-edge/.upgrade fails EROFS — discovered on VM-0-3
-# during ADR-024 E2E.
+# StateDirectory= makes systemd create /var/lib/ongrid-edge at start and
+# implicitly adds it to the ReadWritePaths whitelist. Without this,
+# ProtectSystem=strict makes the parent /var/lib read-only and the agent's
+# runtime mkdir of /var/lib/ongrid-edge/.upgrade fails EROFS — discovered on
+# VM-0-3 during ADR-024 E2E.
 #
 # But StateDirectory= needs systemd >= 235. On 233/234 ProtectSystem=strict
 # and ReadWritePaths= are honored while StateDirectory= is not, so its

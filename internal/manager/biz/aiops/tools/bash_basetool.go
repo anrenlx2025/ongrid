@@ -381,12 +381,27 @@ func isHostBashWriteCommand(cmd string) bool {
 	if slices.Contains(writeBins, first) {
 		return true
 	}
+	if first == "docker" {
+		return isDockerWriteCommand(fields[1:])
+	}
 	if first == "systemctl" {
 		for _, f := range fields[1:] {
 			switch f {
 			case "start", "stop", "restart", "reload", "try-restart", "enable", "disable", "mask", "unmask", "kill", "reset-failed", "daemon-reload", "edit":
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func isDockerWriteCommand(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "image", "container", "volume", "network", "system", "builder":
+			continue
+		case "prune", "rm", "rmi", "remove", "run", "create", "start", "stop", "restart", "kill", "pause", "unpause", "exec", "cp", "commit", "load", "import", "tag", "push", "pull", "build":
+			return true
 		}
 	}
 	return false

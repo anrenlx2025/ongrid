@@ -130,6 +130,37 @@ func TestBashTool_MutatingCommandUsesApprovalInsteadOfDispatch(t *testing.T) {
 	}
 }
 
+func TestBashTool_DockerCleanupCommandUsesApprovalInsteadOfDispatch(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+	}{
+		{"image prune", "docker image prune -a -f"},
+		{"system prune", "docker system prune -af"},
+		{"container remove", "docker container rm deadbeef"},
+		{"volume prune", "docker volume prune -f"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &fakeCaller{respBody: mustMarshal(tunnel.BashExecResponse{Allowed: true})}
+			prop := &recHostBashProposer{}
+			tool := &BashTool{caller: fc, resolver: &fakeHostFilesResolver{mapping: map[uint64]uint64{1: 7}}, proposer: prop}
+			ctx := basetool.WithHostWriteAllowed(context.Background(), true)
+
+			_, err := tool.InvokableRun(ctx, `{"device_ids":[1],"cmd":"`+tc.cmd+`"}`)
+			if err != nil {
+				t.Fatalf("InvokableRun: %v", err)
+			}
+			if !prop.called {
+				t.Fatalf("docker cleanup command %q should require approval", tc.cmd)
+			}
+			if fc.lastName != "" {
+				t.Fatalf("docker cleanup command must not dispatch before approval, dispatched %q", fc.lastName)
+			}
+		})
+	}
+}
+
 func TestBashTool_ReadCommandWithShellSyntaxDoesNotUseApproval(t *testing.T) {
 	fc := &fakeCaller{respBody: mustMarshal(tunnel.BashExecResponse{Allowed: false, Reason: "unsupported shell operator"})}
 	prop := &recHostBashProposer{}

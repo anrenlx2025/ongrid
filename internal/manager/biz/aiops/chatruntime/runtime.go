@@ -673,6 +673,11 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 				slog.String("agent_id", personaName))
 		}
 	}
+	// Apply the per-turn intent filter before adding redirect stubs. A
+	// complex request keeps only the control surface, then receives stubs
+	// for the direct tools it deliberately delegated. This lets ToolSearch
+	// return a callable routing hint instead of an unreachable real schema.
+	sessionToolBag = filterCoordinatorToolsForIntent(sessionToolBag, req.UserText, isCoordinator)
 	// Coordinator gets the redirect-stub overlay: same-name shadows
 	// for hallucination-prone tool names that hand the LLM a
 	// "dispatch to specialist-X via AgentTool" message instead of
@@ -701,7 +706,6 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 			sessionToolBag = append(sessionToolBag, stub)
 		}
 	}
-	sessionToolBag = filterCoordinatorToolsForIntent(sessionToolBag, req.UserText, isCoordinator)
 	// AgentID="default" is the virtual top-level persona — same wiring
 	// as the no-agent coordinator (BasePrompt + full toolBag + agent
 	// catalog), but the session keeps "default" so the SPA shows the
@@ -802,10 +806,10 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 			graph.WithToolInvocationPersistence(toolPersistence),
 		),
 	))
-	// Thread the persona-filtered tool view onto ctx so ToolSearch
-	// (which runs inside the graph) only returns tools the current
-	// persona is allowed to see. Must happen BEFORE the coordinator-
-	// stub append so stubs don't leak into the filtered view.
+	// Thread the final per-turn tool view onto ctx so ToolSearch only
+	// returns tools callable in this graph. Coordinator routing stubs are
+	// deliberately included: a deferred schema lookup must return a
+	// callable handoff, never an unreachable direct tool schema.
 	ctx = basetool.WithFilteredTools(ctx, sessionToolBag)
 	// Thread the UI locale onto ctx so AgentTool can pick it up and
 	// forward it into the sub-agent's SpawnRequest. Without this, a
