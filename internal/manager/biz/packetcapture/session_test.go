@@ -89,6 +89,27 @@ func TestCreateSessionSchedulesMembersAtCommonTime(t *testing.T) {
 	}
 }
 
+func TestCreateSessionSupportsSingleCaptureTask(t *testing.T) {
+	repo := &sessionTestRepo{fakeRepo: newFakeRepo(), sessions: map[string]*model.Session{}}
+	caller := &fakeCaller{}
+	uc := New(repo, caller, sessionResolver{101: 11}, nil)
+
+	out, err := uc.CreateSession(context.Background(), CreateSessionInput{
+		Targets: []SessionTarget{{DeviceID: 101, Interface: "eth0"}},
+		Filter:  "tcp",
+		Source:  SourceChat,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if out.Session == nil || len(out.Captures) != 1 {
+		t.Fatalf("output=%+v", out)
+	}
+	if out.Captures[0].SessionID != out.Session.ID {
+		t.Fatalf("capture session=%d want %d", out.Captures[0].SessionID, out.Session.ID)
+	}
+}
+
 func TestAnalyzeSessionCorrelatesBidirectionalFlowAcrossEdges(t *testing.T) {
 	started := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
 	captures := []*model.Capture{

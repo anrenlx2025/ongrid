@@ -30,6 +30,21 @@ func (f *fakePacketCaptureCreator) Create(_ context.Context, in pcapbiz.CreateIn
 	}, nil
 }
 
+func (f *fakePacketCaptureCreator) CreateSession(ctx context.Context, in pcapbiz.CreateSessionInput) (*pcapbiz.SessionOutput, error) {
+	if len(in.Targets) == 0 {
+		return nil, nil
+	}
+	created, err := f.Create(ctx, pcapbiz.CreateInput{
+		DeviceID: in.Targets[0].DeviceID, Interface: in.Targets[0].Interface,
+		Filter: in.Filter, DurationSeconds: in.DurationSeconds, Source: in.Source, CreatedBy: in.CreatedBy,
+	})
+	if err != nil {
+		return nil, err
+	}
+	created.Capture.SessionID = 4
+	return &pcapbiz.SessionOutput{Session: &pcapmodel.Session{ID: 4, PublicID: "pcap-session-test"}, Captures: []*pcapmodel.Capture{created.Capture}}, nil
+}
+
 func (f *fakePacketCaptureCreator) Refresh(_ context.Context, id uint64) (*pcapmodel.Capture, error) {
 	capture := &pcapmodel.Capture{ID: id, State: pcapmodel.StateReady, ArtifactID: "pcap-11111111-1111-1111-1111-111111111111", ParsedJSON: `{"packets":[{"number":1,"source":"10.0.0.1","destination":"10.0.0.2","protocol":"TCP"}]}`}
 	if f.refresh != nil {
@@ -82,24 +97,26 @@ func TestCapturePCAPToolInvokesUsecase(t *testing.T) {
 		t.Fatalf("input = %+v", creator.in)
 	}
 	var decoded struct {
-		Capture struct {
-			ID uint64 `json:"id"`
-		} `json:"capture"`
-		Edge struct {
-			State string `json:"state"`
-		} `json:"edge"`
-		Waited   bool `json:"waited"`
-		Artifact struct {
-			ID           string `json:"id"`
-			FirstPackets []struct {
-				Source string `json:"source"`
-			} `json:"first_packets"`
-		} `json:"artifact"`
+		Session struct {
+			PublicID string `json:"public_id"`
+		} `json:"session"`
+		Result struct {
+			Capture struct {
+				ID uint64 `json:"id"`
+			} `json:"capture"`
+			Waited   bool `json:"waited"`
+			Artifact struct {
+				ID           string `json:"id"`
+				FirstPackets []struct {
+					Source string `json:"source"`
+				} `json:"first_packets"`
+			} `json:"artifact"`
+		} `json:"result"`
 	}
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
 		t.Fatalf("decode output: %v", err)
 	}
-	if decoded.Capture.ID != 12 || decoded.Edge.State != "running" || !decoded.Waited || decoded.Artifact.ID == "" || len(decoded.Artifact.FirstPackets) != 1 {
+	if decoded.Session.PublicID == "" || decoded.Result.Capture.ID != 12 || !decoded.Result.Waited || decoded.Result.Artifact.ID == "" || len(decoded.Result.Artifact.FirstPackets) != 1 {
 		t.Fatalf("output = %s", out)
 	}
 }

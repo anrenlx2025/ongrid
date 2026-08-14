@@ -144,43 +144,26 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 	case basetool.ArtifactSourceChat:
 		source = pcapbiz.SourceChat
 	}
-	if len(in.Targets) > 0 {
-		sessionCreator, ok := t.uc.(PacketCaptureSessionCreator)
-		if !ok {
-			return "", fmt.Errorf("%s: packet capture sessions are not configured", ToolNameCapturePCAP)
-		}
-		targets := make([]pcapbiz.SessionTarget, 0, len(in.Targets))
-		for _, target := range in.Targets {
-			targets = append(targets, pcapbiz.SessionTarget{DeviceID: target.DeviceID, Interface: strings.TrimSpace(target.Interface)})
-		}
-		out, err := sessionCreator.CreateSession(ctx, pcapbiz.CreateSessionInput{Targets: targets, Filter: strings.TrimSpace(in.Filter), DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: "Multi-edge packet capture", Description: strings.TrimSpace(in.Reason), Source: source, CreatedBy: resolved.UserID})
-		if err != nil {
-			return "", err
-		}
-		body, err := json.Marshal(map[string]any{"session": out.Session, "captures": out.Captures, "member_errors": out.MemberErrors, "waited": false})
-		if err != nil {
-			return "", fmt.Errorf("%s: marshal session response: %w", ToolNameCapturePCAP, err)
-		}
-		return string(body), nil
+	sessionCreator, ok := t.uc.(PacketCaptureSessionCreator)
+	if !ok {
+		return "", fmt.Errorf("%s: packet capture sessions are not configured", ToolNameCapturePCAP)
 	}
-	out, err := t.uc.Create(ctx, pcapbiz.CreateInput{
-		DeviceID:        in.DeviceID,
-		Interface:       strings.TrimSpace(in.Interface),
-		Filter:          strings.TrimSpace(in.Filter),
-		DurationSeconds: in.DurationSeconds,
-		MaxBytes:        in.MaxBytes,
-		MaxPackets:      in.MaxPackets,
-		Snaplen:         in.Snaplen,
-		Promiscuous:     in.Promiscuous,
-		Description:     strings.TrimSpace(in.Reason),
-		Source:          source,
-		CreatedBy:       resolved.UserID,
-	})
+	targets := make([]pcapbiz.SessionTarget, 0, len(in.Targets)+1)
+	for _, target := range in.Targets {
+		targets = append(targets, pcapbiz.SessionTarget{DeviceID: target.DeviceID, Interface: strings.TrimSpace(target.Interface)})
+	}
+	if len(targets) == 0 {
+		targets = append(targets, pcapbiz.SessionTarget{DeviceID: in.DeviceID, Interface: strings.TrimSpace(in.Interface)})
+	}
+	out, err := sessionCreator.CreateSession(ctx, pcapbiz.CreateSessionInput{Targets: targets, Filter: strings.TrimSpace(in.Filter), DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: "Packet capture", Description: strings.TrimSpace(in.Reason), Source: source, CreatedBy: resolved.UserID})
 	if err != nil {
 		return "", err
 	}
-	capture, waited := t.waitForCapture(ctx, out.Capture)
-	body, err := json.Marshal(capturePCAPResult(capture, out.Edge, waited))
+	if len(out.Captures) == 0 {
+		return "", fmt.Errorf("%s: packet capture session has no created members", ToolNameCapturePCAP)
+	}
+	capture, waited := t.waitForCapture(ctx, out.Captures[0])
+	body, err := json.Marshal(map[string]any{"session": out.Session, "member_errors": out.MemberErrors, "result": capturePCAPResult(capture, nil, waited)})
 	if err != nil {
 		return "", fmt.Errorf("%s: marshal response: %w", ToolNameCapturePCAP, err)
 	}

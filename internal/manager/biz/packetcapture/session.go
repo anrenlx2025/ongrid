@@ -60,26 +60,17 @@ func (u *Usecase) CreateSession(ctx context.Context, in CreateSessionInput) (*Se
 	if !ok {
 		return nil, errs.ErrNotWiredYet
 	}
-	if len(in.Targets) < 2 {
-		return nil, fmt.Errorf("%w: at least two capture targets are required", errs.ErrInvalid)
+	if len(in.Targets) == 0 {
+		return nil, fmt.Errorf("%w: at least one capture target is required", errs.ErrInvalid)
 	}
-	seenDevices, seenEdges := map[uint64]struct{}{}, map[uint64]struct{}{}
 	for _, target := range in.Targets {
 		if target.DeviceID == 0 || strings.TrimSpace(target.Interface) == "" {
 			return nil, fmt.Errorf("%w: each session target needs device_id and interface", errs.ErrInvalid)
 		}
-		if _, exists := seenDevices[target.DeviceID]; exists {
-			return nil, fmt.Errorf("%w: duplicate device_id %d", errs.ErrInvalid, target.DeviceID)
-		}
-		seenDevices[target.DeviceID] = struct{}{}
 		edgeID, err := u.resolver.ResolveEdgeID(ctx, target.DeviceID)
 		if err != nil || edgeID == 0 {
 			return nil, fmt.Errorf("%w: resolve target device %d", errs.ErrInvalid, target.DeviceID)
 		}
-		if _, exists := seenEdges[edgeID]; exists {
-			return nil, fmt.Errorf("%w: session targets must use different edges", errs.ErrInvalid)
-		}
-		seenEdges[edgeID] = struct{}{}
 	}
 	probe, err := normalizeCreateInput(CreateInput{DeviceID: in.Targets[0].DeviceID, Interface: in.Targets[0].Interface, Filter: in.Filter, DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: in.Title, Description: in.Description, Source: in.Source, CreatedBy: in.CreatedBy})
 	if err != nil {

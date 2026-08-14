@@ -376,26 +376,28 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, errors.Join(errs.ErrInvalid, err))
 		return
 	}
-	out, err := h.uc.Create(r.Context(), bizpacketcapture.CreateInput{
-		DeviceID:              in.DeviceID,
-		Interface:             in.Interface,
-		Filter:                in.Filter,
-		DurationSeconds:       in.DurationSeconds,
-		MaxBytes:              in.MaxBytes,
-		MaxPackets:            in.MaxPackets,
-		Snaplen:               in.Snaplen,
-		Promiscuous:           in.Promiscuous,
-		Title:                 in.Title,
-		Description:           in.Description,
-		Source:                bizpacketcapture.SourceAPI,
-		CreatedBy:             t.UserID,
-		RequestIdempotencyKey: in.RequestIdempotencyKey,
+	out, err := h.uc.CreateSession(r.Context(), bizpacketcapture.CreateSessionInput{
+		Targets:         []bizpacketcapture.SessionTarget{{DeviceID: in.DeviceID, Interface: in.Interface}},
+		Filter:          in.Filter,
+		DurationSeconds: in.DurationSeconds,
+		MaxBytes:        in.MaxBytes,
+		MaxPackets:      in.MaxPackets,
+		Snaplen:         in.Snaplen,
+		Promiscuous:     in.Promiscuous,
+		Title:           in.Title,
+		Description:     in.Description,
+		Source:          bizpacketcapture.SourceAPI,
+		CreatedBy:       t.UserID,
 	})
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toDTO(out.Capture))
+	if len(out.Captures) == 0 {
+		writeErr(w, fmt.Errorf("packet capture session has no created members"))
+		return
+	}
+	writeJSON(w, http.StatusCreated, toDTO(out.Captures[0]))
 }
 
 // @Summary Create multi-edge packet capture session
