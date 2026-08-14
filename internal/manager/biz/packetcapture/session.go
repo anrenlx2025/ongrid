@@ -36,6 +36,7 @@ type CreateSessionInput struct {
 	Description     string          `json:"description"`
 	Source          string          `json:"source"`
 	CreatedBy       uint64          `json:"created_by"`
+	ChatSessionID   string          `json:"-"`
 }
 
 type SessionOutput struct {
@@ -78,7 +79,7 @@ func (u *Usecase) CreateSession(ctx context.Context, in CreateSessionInput) (*Se
 		return nil, err
 	}
 	plannedStart := u.now().UTC().Add(sessionStartLeadTime)
-	session := &model.Session{PublicID: "pcap-session-" + uuid.NewString(), CreatedBy: probe.CreatedBy, Source: probe.Source, State: model.SessionStateCollecting, Title: probe.Title, Description: probe.Description, CanonicalFilter: probe.Filter, DurationSecs: uint32(probe.DurationSeconds), PlannedStartAt: plannedStart, ClockQuality: "uncalibrated", AnalysisJSON: "{}"}
+	session := &model.Session{PublicID: "pcap-session-" + uuid.NewString(), CreatedBy: probe.CreatedBy, Source: probe.Source, State: model.SessionStateCollecting, ChatSessionID: strings.TrimSpace(in.ChatSessionID), Title: probe.Title, Description: probe.Description, CanonicalFilter: probe.Filter, DurationSecs: uint32(probe.DurationSeconds), PlannedStartAt: plannedStart, ClockQuality: "uncalibrated", AnalysisJSON: "{}"}
 	if err := sessions.CreateSession(ctx, session); err != nil {
 		return nil, err
 	}
@@ -105,6 +106,51 @@ func (u *Usecase) CreateSession(ctx context.Context, in CreateSessionInput) (*Se
 		}
 	}
 	return out, nil
+}
+
+// CompletionEvent is emitted once after a chat-bound capture session reaches
+// a terminal state. It carries only metadata; raw PCAP never enters chat.
+type CompletionEvent struct {
+	ChatSessionID string
+	Session       *model.Session
+	Analysis      SessionAnalysis
+}
+
+// ReconcileActiveSessions refreshes active sessions and emits terminal events
+// exactly once. The durable CAS marker makes retry and manager restart safe.
+func (u *Usecase) ReconcileActiveSessions(ctx context.Context, limit int, notify func(context.Context, CompletionEvent) error) error {
+	sessions, ok := u.repo.(SessionRepo)
+	if !ok {
+		return errs.ErrNotWiredYet
+	}
+	active, err := sessions.ListActiveSessions(ctx, limit)
+	if err != nil {
+		return err
+	}
+	for _, session := range active {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		detail, refreshErr := u.RefreshSession(ctx, session.PublicID)
+		if refreshErr != nil {
+			u.log.Warn("packet capture: reconcile session", "session", session.PublicID, "err", refreshErr)
+			continue
+		}
+		if detail.Session.State == model.SessionStateCollecting || strings.TrimSpace(detail.Session.ChatSessionID) == "" || notify == nil {
+			continue
+		}
+		if detail.Session.CompletionNotifiedAt != nil {
+			continue
+		}
+		if err := notify(ctx, CompletionEvent{ChatSessionID: detail.Session.ChatSessionID, Session: detail.Session, Analysis: detail.Analysis}); err != nil {
+			u.log.Error("packet capture: notify chat completion failed", "session", detail.Session.PublicID, "err", err)
+			continue
+		}
+		if _, err := sessions.MarkSessionCompletionNotified(ctx, detail.Session.ID, u.now().UTC()); err != nil {
+			return fmt.Errorf("packet capture: mark completion notification: %w", err)
+		}
+	}
+	return nil
 }
 
 func (u *Usecase) ListSessions(ctx context.Context, limit, offset int) ([]*model.Session, int64, error) {

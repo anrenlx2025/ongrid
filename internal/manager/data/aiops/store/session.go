@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -11,6 +12,11 @@ import (
 	model "github.com/ongridio/ongrid/internal/manager/model/aiops"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 )
+
+func isDuplicate(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate") || strings.Contains(msg, "unique constraint")
+}
 
 // SessionRepo is the GORM-backed biz/aiops.SessionRepo.
 type SessionRepo struct {
@@ -159,7 +165,13 @@ func (r *SessionRepo) AppendMessage(ctx context.Context, m *model.Message) error
 	if m == nil {
 		return errs.ErrInvalid
 	}
-	return r.db.WithContext(ctx).Create(m).Error
+	if err := r.db.WithContext(ctx).Create(m).Error; err != nil {
+		if isDuplicate(err) {
+			return errs.ErrConflict
+		}
+		return err
+	}
+	return nil
 }
 
 // ListMessages returns messages for sessionID ordered by created_at ASC.

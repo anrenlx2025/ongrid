@@ -184,7 +184,7 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 	if title == "" {
 		title = "Packet capture"
 	}
-	out, err := sessionCreator.CreateSession(ctx, pcapbiz.CreateSessionInput{Targets: targets, Filter: strings.TrimSpace(in.Filter), DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: title, Description: strings.TrimSpace(in.Reason), Source: source, CreatedBy: resolved.UserID})
+	out, err := sessionCreator.CreateSession(ctx, pcapbiz.CreateSessionInput{Targets: targets, Filter: strings.TrimSpace(in.Filter), DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: title, Description: strings.TrimSpace(in.Reason), Source: source, CreatedBy: resolved.UserID, ChatSessionID: basetool.SessionIDFromContext(ctx)})
 	if err != nil {
 		return "", err
 	}

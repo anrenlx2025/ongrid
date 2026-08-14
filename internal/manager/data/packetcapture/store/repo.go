@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -225,6 +226,25 @@ func (r *Repo) SetSessionAnalysis(ctx context.Context, id uint64, state, analysi
 		return errs.ErrNotFound
 	}
 	return nil
+}
+
+func (r *Repo) ListActiveSessions(ctx context.Context, limit int) ([]*model.Session, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var sessions []*model.Session
+	if err := r.db.WithContext(ctx).Where("state = ?", model.SessionStateCollecting).Order("created_at ASC, id ASC").Limit(limit).Find(&sessions).Error; err != nil {
+		return nil, fmt.Errorf("packet capture: list active sessions: %w", err)
+	}
+	return sessions, nil
+}
+
+func (r *Repo) MarkSessionCompletionNotified(ctx context.Context, id uint64, at time.Time) (bool, error) {
+	res := r.db.WithContext(ctx).Model(&model.Session{}).Where("id = ? AND completion_notified_at IS NULL", id).Update("completion_notified_at", at)
+	if res.Error != nil {
+		return false, fmt.Errorf("packet capture: mark completion notified: %w", res.Error)
+	}
+	return res.RowsAffected == 1, nil
 }
 
 func (r *Repo) Delete(ctx context.Context, id uint64) error {

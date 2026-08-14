@@ -56,6 +56,30 @@ func (r *sessionTestRepo) SetSessionAnalysis(_ context.Context, id uint64, state
 	return fmt.Errorf("not found")
 }
 
+func (r *sessionTestRepo) ListActiveSessions(_ context.Context, _ int) ([]*model.Session, error) {
+	out := make([]*model.Session, 0, len(r.sessions))
+	for _, session := range r.sessions {
+		if session.State == model.SessionStateCollecting {
+			out = append(out, session)
+		}
+	}
+	return out, nil
+}
+
+func (r *sessionTestRepo) MarkSessionCompletionNotified(_ context.Context, id uint64, at time.Time) (bool, error) {
+	for _, session := range r.sessions {
+		if session.ID != id {
+			continue
+		}
+		if session.CompletionNotifiedAt != nil {
+			return false, nil
+		}
+		session.CompletionNotifiedAt = &at
+		return true, nil
+	}
+	return false, fmt.Errorf("not found")
+}
+
 type sessionResolver map[uint64]uint64
 
 func (r sessionResolver) ResolveEdgeID(_ context.Context, deviceID uint64) (uint64, error) {
@@ -68,12 +92,15 @@ func TestCreateSessionSchedulesMembersAtCommonTime(t *testing.T) {
 	uc := New(repo, caller, sessionResolver{101: 11, 102: 12}, nil)
 	now := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
 	uc.now = func() time.Time { return now }
-	out, err := uc.CreateSession(context.Background(), CreateSessionInput{Targets: []SessionTarget{{DeviceID: 101, Interface: "eth0"}, {DeviceID: 102, Interface: "eth1"}}, Filter: "tcp and port 443", DurationSeconds: 10, Source: SourceChat})
+	out, err := uc.CreateSession(context.Background(), CreateSessionInput{Targets: []SessionTarget{{DeviceID: 101, Interface: "eth0"}, {DeviceID: 102, Interface: "eth1"}}, Filter: "tcp and port 443", DurationSeconds: 10, Source: SourceChat, ChatSessionID: "chat-session-1"})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	if len(out.Captures) != 2 || out.Session.PlannedStartAt != now.Add(sessionStartLeadTime) {
 		t.Fatalf("output=%+v", out)
+	}
+	if out.Session.ChatSessionID != "chat-session-1" {
+		t.Fatalf("chat session = %q", out.Session.ChatSessionID)
 	}
 	for _, capture := range out.Captures {
 		if capture.SessionID != out.Session.ID {

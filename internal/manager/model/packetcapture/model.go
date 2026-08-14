@@ -97,6 +97,12 @@ type Session struct {
 	CreatedBy uint64 `gorm:"column:created_by;not null;index" json:"created_by"`
 	Source    string `gorm:"column:source;type:varchar(32);not null;default:'';index" json:"source"`
 	State     string `gorm:"column:state;type:varchar(32);not null;default:'collecting';index" json:"state"`
+	// ChatSessionID binds a chat-created capture to its originating
+	// conversation so terminal capture state can be reported after restart.
+	ChatSessionID string `gorm:"column:chat_session_id;type:char(36);not null;default:'';index" json:"-"`
+	// CompletionNotifiedAt is a durable idempotency marker for the chat
+	// continuation worker. NULL means the terminal event has not been emitted.
+	CompletionNotifiedAt *time.Time `gorm:"column:completion_notified_at;index" json:"-"`
 
 	Title           string    `gorm:"column:title;type:varchar(255);not null;default:''" json:"title"`
 	Description     string    `gorm:"column:description;type:text;not null" json:"description"`

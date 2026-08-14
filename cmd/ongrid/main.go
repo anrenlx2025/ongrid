@@ -2278,6 +2278,7 @@ func main() {
 			log.Warn("mcp: list enabled servers failed", slog.Any("err", err))
 		}
 	}
+
 	if secretbox.KeyIsWeak() {
 		log.Warn("secret vault: ONGRID_SECRET_KEY unset — credentials encrypted with an INSECURE built-in key; set ONGRID_SECRET_KEY (32+ random chars) for real at-rest protection")
 	}
@@ -2600,6 +2601,43 @@ func main() {
 			}
 		})
 	}
+
+	// Packet captures outlive the HTTP/SSE turn that created them. Reconcile
+	// their edge state here and continue the originating chat when a bound
+	// session reaches a terminal result. The worker shares the manager root
+	// context, so it is stopped and restarted with the manager process.
+	eg.Go(func() error {
+		notify := func(ctx context.Context, event managerbizpacketcapture.CompletionEvent) error {
+			body := packetCaptureCompletionMessage(event)
+			message := &manageraiopsmodel.Message{
+				ID:        uuid.NewSHA1(uuid.NameSpaceURL, []byte("packet-capture-completion:"+event.Session.PublicID)).String(),
+				SessionID: event.ChatSessionID,
+				Role:      manageraiopsmodel.RoleAssistant,
+				Content:   &body,
+				CreatedAt: time.Now().UTC(),
+			}
+			if err := aiopsRepo.AppendMessage(ctx, message); err != nil && !errors.Is(err, errs.ErrConflict) {
+				return fmt.Errorf("append completion message: %w", err)
+			}
+			return nil
+		}
+		run := func() {
+			if err := packetCaptureUC.ReconcileActiveSessions(egCtx, 50, notify); err != nil && !errors.Is(err, context.Canceled) {
+				log.Warn("packet capture: async reconcile failed", slog.Any("err", err))
+			}
+		}
+		run()
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-egCtx.Done():
+				return nil
+			case <-t.C:
+				run()
+			}
+		}
+	})
 
 	// RCA investigator inflight gauge — samples concurrency cap usage.
 	// Same 15s cadence as the worker sampler; cheap channel-len read.
@@ -5523,6 +5561,28 @@ func runK8sTopologyReconcile(ctx context.Context, uc *managerbizk8s.Usecase, log
 			}
 		}
 	}
+}
+
+func packetCaptureCompletionMessage(event managerbizpacketcapture.CompletionEvent) string {
+	if event.Session == nil {
+		return "抓包任务已结束。"
+	}
+	state := "已完成"
+	if event.Session.State == "partial" {
+		state = "部分完成"
+	} else if event.Session.State == "failed" {
+		state = "失败"
+	}
+	return fmt.Sprintf(
+		"抓包会话“%s”%s：%d/%d 个 PCAP 已就绪，发现 %d 条关联流和 %d 个数据包事件。\n\n[打开抓包会话并分析](/artifacts/packet-sessions/%s)",
+		event.Session.Title,
+		state,
+		event.Analysis.Summary.ReadyCount,
+		event.Analysis.Summary.CaptureCount,
+		event.Analysis.Summary.FlowCount,
+		event.Analysis.Summary.EventCount,
+		event.Session.PublicID,
+	)
 }
 
 // seedInfrastructureMenuDefaults is a one-time upgrade migration. Fresh
