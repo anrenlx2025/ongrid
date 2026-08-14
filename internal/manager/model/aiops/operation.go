@@ -27,9 +27,9 @@ type Operation struct {
 	Kind          string         `gorm:"size:64;not null;index;column:kind"`
 	State         string         `gorm:"size:32;not null;index;column:state"`
 	Title         string         `gorm:"size:255;not null;column:title"`
-	Summary       string         `gorm:"type:text;not null;default:'';column:summary"`
+	Summary       string         `gorm:"type:text;not null;column:summary"`
 	InputJSON     string         `gorm:"type:text;not null;column:input_json"`
-	ActionsJSON   string         `gorm:"type:text;not null;default:'[]';column:actions_json"`
+	ActionsJSON   string         `gorm:"type:text;not null;column:actions_json"`
 	DetailURL     string         `gorm:"size:512;not null;default:'';column:detail_url"`
 	TerminalAt    *time.Time     `gorm:"index;column:terminal_at"`
 	CreatedAt     time.Time      `gorm:"autoCreateTime;column:created_at"`
@@ -73,7 +73,7 @@ type OperationArtifact struct {
 	Kind         string    `gorm:"size:64;not null;column:kind"`
 	Title        string    `gorm:"size:255;not null;column:title"`
 	URL          string    `gorm:"size:512;not null;uniqueIndex:idx_operation_artifact_url,priority:2;column:url"`
-	MetadataJSON string    `gorm:"type:text;not null;default:'{}';column:metadata_json"`
+	MetadataJSON string    `gorm:"type:text;not null;column:metadata_json"`
 	CreatedAt    time.Time `gorm:"autoCreateTime;column:created_at"`
 }
 
