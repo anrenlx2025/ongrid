@@ -131,7 +131,7 @@ func (s *Service) run(ctx context.Context, captureID string) {
 	}
 	started := time.Now().UTC()
 	s.mu.Lock()
-	state, ok := s.tasks[captureID]
+	state, ok = s.tasks[captureID]
 	if !ok {
 		s.mu.Unlock()
 		return
