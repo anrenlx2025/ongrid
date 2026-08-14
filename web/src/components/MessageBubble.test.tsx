@@ -220,6 +220,28 @@ describe('MessageBubble config draft card', () => {
     expect(screen.getByText('Create metric_raw rule')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /确认应用|Apply/ })).toBeInTheDocument();
   });
+
+  it('renders the generic proposal envelope on a persisted draft', () => {
+    const draft = {
+      ...draftFor('metric_raw'),
+      proposal: {
+        kind: 'proposal' as const,
+        type: 'config_change',
+        state: 'pending_confirmation',
+        title: 'Create metric_raw rule',
+        actions: [
+          { kind: 'confirm', label: 'Confirm', enabled: true },
+          { kind: 'cancel', label: 'Cancel', enabled: true },
+        ],
+      },
+    };
+
+    render(<MessageBubble message={toolCardMessage(draft)} onConfirmConfigDraft={vi.fn()} />);
+
+    expect(screen.getByText(/提案|Proposal/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /确认应用|Apply/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /取消|Cancel/ })).toBeInTheDocument();
+  });
 });
 
 describe('MessageBubble operation card', () => {

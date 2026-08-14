@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -56,6 +57,19 @@ func TestConfigDraftToolCallsAlertRuleManager(t *testing.T) {
 	}
 	if !strings.Contains(got, `"kind":"config_draft"`) {
 		t.Fatalf("unexpected result: %s", got)
+	}
+	var draft ConfigDraft
+	if err := json.Unmarshal([]byte(got), &draft); err != nil {
+		t.Fatalf("unmarshal tool result: %v", err)
+	}
+	if draft.Proposal == nil {
+		t.Fatalf("proposal = nil, want generic confirmation envelope")
+	}
+	if draft.Proposal.Kind != "proposal" || draft.Proposal.Type != "config_change" || draft.Proposal.State != "pending_confirmation" {
+		t.Fatalf("proposal = %+v, want pending config_change proposal", draft.Proposal)
+	}
+	if len(draft.Proposal.Actions) != 2 || draft.Proposal.Actions[0].Kind != "confirm" || draft.Proposal.Actions[1].Kind != "cancel" {
+		t.Fatalf("proposal actions = %+v, want confirm and cancel", draft.Proposal.Actions)
 	}
 }
 
