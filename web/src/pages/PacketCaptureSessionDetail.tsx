@@ -100,7 +100,7 @@ export default function PacketCaptureSessionDetailPage() {
               </div>
             )}
 
-            <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(360px,0.9fr)_minmax(520px,1.4fr)]">
+            <div className="min-h-0 space-y-4">
               <MemberCapturesCard captures={captures} tr={tr} />
               <CorrelatedFlowsCard flows={analysis?.flows ?? []} multipleEdges={multipleEdges} tr={tr} />
             </div>
@@ -130,35 +130,33 @@ function MemberCapturesCard({ captures, tr }: { captures: PacketCapture[]; tr: T
       {captures.length === 0 ? (
         <EmptyState title={tr('暂无成员采集', 'No member captures')} className="py-10" />
       ) : (
-        <div className="max-h-[560px] divide-y divide-zinc-800/60 overflow-y-auto">
+        <div className="max-h-[360px] divide-y divide-zinc-800/60 overflow-y-auto">
           {captures.map((capture, index) => (
-            <div key={capture.id} className="px-4 py-3">
-              <div className="flex min-w-0 items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-medium text-zinc-100">#{index + 1}</span>
-                    <Chip tone={stateTone(capture.state)} dense>{stateLabel(capture.state, tr)}</Chip>
-                    <span className="font-mono text-[11px] text-zinc-500">capture {capture.id}</span>
-                  </div>
-                  <div className="mt-2 truncate text-xs text-zinc-300">
-                    edge {capture.edge_id} · device {capture.device_id} · {capture.interface_name}
-                  </div>
-                  <div className="mt-1 truncate font-mono text-[11px] text-zinc-500">{capture.canonical_filter || tr('全部流量', 'all traffic')}</div>
+            <div key={capture.id} className="grid gap-3 px-4 py-3 lg:grid-cols-[minmax(260px,1fr)_minmax(280px,0.9fr)_auto] lg:items-center">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium text-zinc-100">#{index + 1}</span>
+                  <Chip tone={stateTone(capture.state)} dense>{stateLabel(capture.state, tr)}</Chip>
+                  <span className="font-mono text-[11px] text-zinc-500">capture {capture.id}</span>
                 </div>
-                {capture.artifact_id && (
-                  <Link
-                    className="inline-flex shrink-0 items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-                    to={`/artifacts/packets/${encodeURIComponent(packetCaptureArtifactID(capture))}`}
-                  >
-                    <ExternalLink size={12} /> {tr('查看', 'Open')}
-                  </Link>
-                )}
+                <div className="mt-2 truncate text-xs text-zinc-300">
+                  edge {capture.edge_id} · device {capture.device_id} · {capture.interface_name}
+                </div>
+                <div className="mt-1 truncate font-mono text-[11px] text-zinc-500">{capture.canonical_filter || tr('全部流量', 'all traffic')}</div>
               </div>
-              <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+              <div className="grid grid-cols-3 gap-2 text-[11px]">
                 <SmallStat label={tr('包数', 'Packets')} value={String(capture.captured_packets ?? 0)} />
                 <SmallStat label={tr('大小', 'Bytes')} value={formatBytes(capture.captured_bytes ?? 0)} />
                 <SmallStat label={tr('耗时', 'Duration')} value={formatDuration(capture)} />
               </div>
+              {capture.artifact_id && (
+                <Link
+                  className="inline-flex w-fit shrink-0 items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 lg:justify-self-end"
+                  to={`/artifacts/packets/${encodeURIComponent(packetCaptureArtifactID(capture))}`}
+                >
+                  <ExternalLink size={12} /> {tr('查看', 'Open')}
+                </Link>
+              )}
             </div>
           ))}
         </div>
@@ -177,14 +175,14 @@ function CorrelatedFlowsCard({ flows, multipleEdges, tr }: { flows: Flow[]; mult
       {flows.length === 0 ? (
         <EmptyState title={tr('等待解析结果', 'Waiting for parsed captures')} className="py-10" />
       ) : (
-        <div className="max-h-[560px] overflow-auto">
-          <table className="w-full min-w-[760px] table-fixed text-left text-xs">
+        <div className="max-h-[560px] overflow-y-auto">
+          <table className="w-full table-fixed text-left text-xs">
             <colgroup>
-              <col className="w-[92px]" />
+              <col className="w-[96px]" />
               <col />
-              <col className="w-[150px]" />
-              {multipleEdges && <col className="w-[150px]" />}
-              <col className="w-[84px]" />
+              <col className="w-[180px]" />
+              {multipleEdges && <col className="w-[160px]" />}
+              <col className="w-[88px]" />
             </colgroup>
             <thead className="sticky top-0 z-10 border-b border-zinc-800/60 bg-zinc-900 text-[11px] text-zinc-500">
               <tr>
