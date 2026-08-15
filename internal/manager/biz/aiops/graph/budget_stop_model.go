@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -43,6 +44,9 @@ func pruneToolCallsForBudget(history []*schema.Message, msg *schema.Message) *sc
 	if msg == nil || len(msg.ToolCalls) == 0 {
 		return msg
 	}
+	if guarded := guardUnresolvedDeviceTarget(history, msg); guarded != nil {
+		return guarded
+	}
 	perToolCounts, total := priorToolCounts(history)
 	kept := make([]schema.ToolCall, 0, len(msg.ToolCalls))
 	for _, call := range msg.ToolCalls {
@@ -73,6 +77,71 @@ func pruneToolCallsForBudget(history []*schema.Message, msg *schema.Message) *sc
 		cp.Content = budgetPrunedFinalContent(history, tool)
 	}
 	return &cp
+}
+
+func guardUnresolvedDeviceTarget(history []*schema.Message, msg *schema.Message) *schema.Message {
+	target := currentNamedDeviceTarget(history)
+	if target == "" || !currentTurnHasEmptyDeviceLookup(history) || !containsHostScopedToolCall(msg.ToolCalls) {
+		return nil
+	}
+	cp := *msg
+	cp.ToolCalls = nil
+	if wantsEnglishResponse(history) {
+		cp.Content = "I could not find device `" + target + "` in the fleet. I will not substitute another online device automatically. Please confirm the correct device or select it with @ before I run host-level checks."
+	} else {
+		cp.Content = "没有在设备清单中找到 `" + target + "`。我不会自动改用其他在线设备执行主机检查；请确认正确设备，或使用 @ 选择目标设备后我再继续。"
+	}
+	return &cp
+}
+
+var namedDeviceTargetRe = regexp.MustCompile(`(?i)\b(?:edge|vm|node|host|server|device)-[a-z0-9_.-]+\b`)
+
+func currentNamedDeviceTarget(messages []*schema.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg == nil || msg.Role != schema.User || isSystemReminderMessage(msg.Content) {
+			continue
+		}
+		if strings.Contains(strings.ToLower(msg.Content), "device_id") || strings.Contains(msg.Content, "@") {
+			return ""
+		}
+		return namedDeviceTargetRe.FindString(msg.Content)
+	}
+	return ""
+}
+
+func currentTurnHasEmptyDeviceLookup(messages []*schema.Message) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg == nil {
+			continue
+		}
+		if msg.Role == schema.User && !isSystemReminderMessage(msg.Content) {
+			break
+		}
+		if msg.Role != schema.Tool || msg.ToolName != "query_devices" {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(msg.Content), &payload); err != nil {
+			continue
+		}
+		count, ok := jsonNumber(payload["count"])
+		if ok && count == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func containsHostScopedToolCall(calls []schema.ToolCall) bool {
+	for _, call := range calls {
+		switch strings.TrimSpace(call.Function.Name) {
+		case "get_host_load", "get_host_processes", "host_bash", "host_find_large_files", "host_du_summary", "host_stat_file", "host_restart_service", "capture_pcap":
+			return true
+		}
+	}
+	return false
 }
 
 func priorToolCounts(messages []*schema.Message) (map[string]int, int) {

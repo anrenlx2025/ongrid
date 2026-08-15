@@ -374,6 +374,31 @@ func TestBudgetStopModel_PruneAllReturnsEvidenceSummary(t *testing.T) {
 	}
 }
 
+func TestBudgetStopModel_BlocksHostToolAfterEmptyNamedDeviceLookup(t *testing.T) {
+	t.Parallel()
+	inner := newScriptedChatModel(&schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{{
+			ID:       "call_processes",
+			Function: schema.FunctionCall{Name: "get_host_processes", Arguments: `{"device_ids":[1],"top_n":5}`},
+		}},
+	})
+	wrapped := wrapBudgetStopModel(inner)
+	got, err := wrapped.Generate(context.Background(), []*schema.Message{
+		schema.UserMessage("找 edge-001 最占内存的进程"),
+		schema.ToolMessage(`{"count":0,"items":[]}`, "call_devices", schema.WithToolName("query_devices")),
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(got.ToolCalls) != 0 {
+		t.Fatalf("tool calls = %d, want blocked", len(got.ToolCalls))
+	}
+	if !strings.Contains(got.Content, "edge-001") || !strings.Contains(got.Content, "不会自动改用其他在线设备") {
+		t.Fatalf("content = %q, want explicit no-fallback clarification", got.Content)
+	}
+}
+
 func TestBuildReActGraph_NilModelFails(t *testing.T) {
 	t.Parallel()
 	if _, err := BuildReActGraph(nil, nil, Config{}); err == nil {

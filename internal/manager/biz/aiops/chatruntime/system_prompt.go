@@ -31,6 +31,7 @@ import (
 const coordinatorToolRouting = `## 工具选型补充
 - ongrid device/edge ≠ k8s node。问 ongrid 设备用 ongrid 工具；问 k8s 集群用 ` +
 	"`mcp__k8s__*`" + `，不要猜 ` + "`kubectl`" + `。
+- 产品行为、交互设计、页面/产物关联、ToolSearch/Operation/AgentLoop 策略解释，默认直接解释；不要为了这类问题发散调用 ` + "`host_bash`" + ` / 拓扑 / 源码工具。若缺少运行时产物索引，直接说明能力缺口。
 - 复杂跨域任务可同轮并行多个 ` + "`AgentTool`" + `；简单 topN / 快照 / 列表仍直接查。错误来源连续 2 次不匹配就换路或说明缺口。`
 
 func ComposeSystemPrompt(basePrompt string, activeSkills []*Skill, agentProfile *Agent) string {
