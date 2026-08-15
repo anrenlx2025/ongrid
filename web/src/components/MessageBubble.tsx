@@ -44,7 +44,7 @@ export type ConfigDraftResult = {
 
 type ConfirmConfigDraft = (draft: ConfigDraftResult) => boolean | void | Promise<boolean | void>;
 
-type OperationCardData = {
+export type OperationCardData = {
   kind: string;
   id: string;
   title: string;
@@ -59,13 +59,14 @@ type OperationCardData = {
 type Props = {
   message: ChatMessage;
   onConfirmConfigDraft?: ConfirmConfigDraft;
+  hideActiveOperations?: boolean;
 };
 
-export function MessageBubble({ message, onConfirmConfigDraft }: Props) {
+export function MessageBubble({ message, onConfirmConfigDraft, hideActiveOperations }: Props) {
   if (message.kind === 'tool_card' && message.tool_call) {
-    return <ToolCallSummaryBlock call={fromSummary(message.tool_call)} onConfirmConfigDraft={onConfirmConfigDraft} />;
+    return <ToolCallSummaryBlock call={fromSummary(message.tool_call)} onConfirmConfigDraft={onConfirmConfigDraft} hideActiveOperations={hideActiveOperations} />;
   }
-  if (message.role === 'tool') return <ToolBubble message={message} onConfirmConfigDraft={onConfirmConfigDraft} />;
+  if (message.role === 'tool') return <ToolBubble message={message} onConfirmConfigDraft={onConfirmConfigDraft} hideActiveOperations={hideActiveOperations} />;
   if (message.role === 'user') return <UserBubble message={message} />;
   // Tool-only assistant rows (empty content + has tool_calls) shouldn't
   // appear during streaming; on history reload they would, so suppress.
@@ -76,7 +77,7 @@ export function MessageBubble({ message, onConfirmConfigDraft }: Props) {
   ) {
     return null;
   }
-  return <AssistantBubble message={message} onConfirmConfigDraft={onConfirmConfigDraft} />;
+  return <AssistantBubble message={message} onConfirmConfigDraft={onConfirmConfigDraft} hideActiveOperations={hideActiveOperations} />;
 }
 
 // fromSummary maps the wire-level ToolCallSummary (server SSE shape) to
@@ -126,7 +127,7 @@ function compactUserContent(
   return tr('确认创建这条告警规则', 'Confirm creating this alert rule');
 }
 
-function AssistantBubble({ message, onConfirmConfigDraft }: Props) {
+function AssistantBubble({ message, onConfirmConfigDraft, hideActiveOperations }: Props) {
   // Codex-style: no rounded card around assistant prose. Render markdown
   // flush against the column so headings/lists/code blocks read like a
   // document. Tool calls (when attached) appear as their own rows inside
@@ -143,13 +144,13 @@ function AssistantBubble({ message, onConfirmConfigDraft }: Props) {
         </div>
       )}
       {message.tool_calls?.map((tc, i) => (
-        <ToolCallSummaryBlock key={`${tc.name}-${i}`} call={tc} onConfirmConfigDraft={onConfirmConfigDraft} />
+        <ToolCallSummaryBlock key={`${tc.name}-${i}`} call={tc} onConfirmConfigDraft={onConfirmConfigDraft} hideActiveOperations={hideActiveOperations} />
       ))}
     </div>
   );
 }
 
-function ToolBubble({ message, onConfirmConfigDraft }: Props) {
+function ToolBubble({ message, onConfirmConfigDraft, hideActiveOperations }: Props) {
   // History-reload path: the message persisted by the agent loop only
   // carries the tool name + JSON result string. We don't have args for
   // these (would need to join chat_tool_calls); show what we have.
@@ -162,6 +163,7 @@ function ToolBubble({ message, onConfirmConfigDraft }: Props) {
         status: 'success',
         result,
       }}
+      hideActiveOperations={hideActiveOperations}
     />
   );
 }
@@ -169,6 +171,7 @@ function ToolBubble({ message, onConfirmConfigDraft }: Props) {
 function ToolCallSummaryBlock({
   call,
   onConfirmConfigDraft,
+  hideActiveOperations,
 }: {
   call: {
     name: string;
@@ -180,6 +183,7 @@ function ToolCallSummaryBlock({
     error?: string;
 	  };
 	  onConfirmConfigDraft?: ConfirmConfigDraft;
+    hideActiveOperations?: boolean;
 	}) {
   const { tr } = useI18n();
   const [open, setOpen] = useState(false);
@@ -194,8 +198,11 @@ function ToolCallSummaryBlock({
   if (approval) {
     return <PendingApprovalCard approvalID={approval.id} kind={approval.kind} command={argCommandText(call.arguments)} />;
   }
-  const operation = !isError ? asOperation(call.result) : null;
-  if (operation) return <OperationCard operation={operation} />;
+  const operation = !isError ? operationFromToolResult(call.result) : null;
+  if (operation) {
+    if (hideActiveOperations && !isTerminalOperationState(operation.state)) return null;
+    return <OperationCard operation={operation} />;
+  }
   const configDraft = !isError ? asConfigDraft(call.result) : null;
   return (
     <div
@@ -273,7 +280,7 @@ function ToolCallSummaryBlock({
   );
 }
 
-function asOperation(result: unknown): OperationCardData | null {
+export function operationFromToolResult(result: unknown): OperationCardData | null {
   const value = typeof result === 'string' ? safeParse(result) : result;
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
@@ -319,7 +326,7 @@ function asLegacyOperation(record: Record<string, unknown>): OperationCardData |
   };
 }
 
-function OperationCard({ operation }: { operation: OperationCardData }) {
+export function OperationCard({ operation, onTerminal }: { operation: OperationCardData; onTerminal?: (id: string) => void }) {
   const { tr } = useI18n();
   const [state, setState] = useState(operation.state);
   const [summary, setSummary] = useState(operation.summary);
@@ -345,6 +352,11 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
     setDetailURL(operation.detailURL);
     setActions(operation.actions);
   }, [operation.id, operation.legacySessionID, operation.state, operation.summary, operation.detailURL, operation.actions]);
+
+  useEffect(() => {
+    if (!terminal) return;
+    onTerminal?.(operation.id || operation.legacySessionID || '');
+  }, [operation.id, operation.legacySessionID, onTerminal, terminal]);
 
   useEffect(() => {
     if ((!operation.id && !operation.legacySessionID) || terminal) return;
@@ -499,7 +511,7 @@ function parseOperationActions(raw?: string): OperationCardData['actions'] {
   }
 }
 
-function isTerminalOperationState(state: string) {
+export function isTerminalOperationState(state: string) {
   return state === 'ready' || state === 'partial' || state === 'succeeded' || state === 'failed' || state === 'cancelled';
 }
 
