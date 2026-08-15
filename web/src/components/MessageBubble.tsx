@@ -21,6 +21,7 @@ import { isConfigDraftConfirmationMessage } from '@/lib/configDraftConfirmation'
 import { useI18n } from '@/i18n/locale';
 import { Button } from '@/components/ui';
 import { executeOperationAction, getOperation, type Operation } from '@/api/operations';
+import { getPacketCaptureSession } from '@/api/packetCaptures';
 
 export type ConfigDraftResult = {
   kind: 'config_draft';
@@ -49,6 +50,7 @@ type OperationCardData = {
   state: string;
   summary?: string;
   detailURL?: string;
+  legacySessionID?: string;
   links?: Record<string, string>;
   actions: { kind: string; label: string; enabled: boolean }[];
 };
@@ -307,6 +309,7 @@ function asLegacyOperation(record: Record<string, unknown>): OperationCardData |
   return {
     kind: 'packet_capture_session',
     id: '',
+    legacySessionID: id,
     title: typeof session.title === 'string' && session.title ? session.title : 'Packet capture',
     state: typeof session.state === 'string' ? session.state : 'collecting',
     summary: typeof session.canonical_filter === 'string' ? session.canonical_filter : undefined,
@@ -330,16 +333,27 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
     setSummary(operation.summary);
     setDetailURL(operation.detailURL);
     setActions(operation.actions);
-  }, [operation.id, operation.state, operation.summary, operation.detailURL, operation.actions]);
+  }, [operation.id, operation.legacySessionID, operation.state, operation.summary, operation.detailURL, operation.actions]);
 
   useEffect(() => {
-    if (!operation.id || terminal) return;
+    if ((!operation.id && !operation.legacySessionID) || terminal) return;
     let cancelled = false;
     const refresh = async () => {
       try {
-        const detail = await getOperation(operation.id);
-        if (cancelled || !detail.operation) return;
-        applyOperationUpdate(detail.operation, detail.artifacts?.[0]?.url);
+        if (operation.id) {
+          const detail = await getOperation(operation.id);
+          if (cancelled || !detail.operation) return;
+          applyOperationUpdate(detail.operation, detail.artifacts?.[0]?.url);
+          return;
+        }
+        if (operation.legacySessionID) {
+          const detail = await getPacketCaptureSession(operation.legacySessionID);
+          if (cancelled || !detail.session) return;
+          setState(detail.session.state);
+          setSummary(sessionSummary(detail.session.pcap_count, detail.session.canonical_filter, tr));
+          setDetailURL(`/artifacts/packet-sessions/${encodeURIComponent(operation.legacySessionID)}`);
+          setActions([]);
+        }
       } catch {
         // Keep the last known state. The chat history poll will still refresh
         // appended completion messages if this point lookup is temporarily down.
@@ -352,7 +366,7 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
       window.clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [operation.id, terminal]);
+  }, [operation.id, operation.legacySessionID, terminal, tr]);
 
   function applyOperationUpdate(updated: Operation, artifactURL?: string) {
     if (updated.state) setState(updated.state);
@@ -418,7 +432,20 @@ function parseOperationActions(raw?: string): OperationCardData['actions'] {
 }
 
 function isTerminalOperationState(state: string) {
-  return state === 'succeeded' || state === 'failed' || state === 'cancelled';
+  return state === 'ready' || state === 'partial' || state === 'succeeded' || state === 'failed' || state === 'cancelled';
+}
+
+function sessionSummary(
+  pcapCount: number | undefined,
+  filter: string | undefined,
+  tr: (zh: string, en: string) => string,
+) {
+  const parts: string[] = [];
+  if (typeof pcapCount === 'number') {
+    parts.push(tr(`${pcapCount} 个 PCAP`, `${pcapCount} PCAP${pcapCount === 1 ? '' : 's'}`));
+  }
+  if (filter) parts.push(filter);
+  return parts.join(' · ') || undefined;
 }
 
 function operationPresentation(state: string, tr: (zh: string, en: string) => string) {

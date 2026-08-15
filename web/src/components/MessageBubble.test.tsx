@@ -5,10 +5,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MessageBubble, type ConfigDraftResult } from './MessageBubble';
 import type { ChatMessage } from '@/api/chat';
 import { executeOperationAction, getOperation } from '@/api/operations';
+import { getPacketCaptureSession } from '@/api/packetCaptures';
 
 vi.mock('@/api/operations', () => ({
   executeOperationAction: vi.fn(),
   getOperation: vi.fn(),
+}));
+vi.mock('@/api/packetCaptures', () => ({
+  getPacketCaptureSession: vi.fn(),
 }));
 
 afterEach(() => {
@@ -350,5 +354,45 @@ describe('MessageBubble operation card', () => {
       'href',
       '/artifacts/packet-sessions/pcap-session-7d5a7c7e',
     );
+  });
+
+  it('hydrates a legacy packet capture session card from the session API', async () => {
+    vi.mocked(getPacketCaptureSession).mockResolvedValue({
+      session: {
+        id: 'pcap-session-7d5a7c7e',
+        source: 'chat',
+        pcap_count: 1,
+        state: 'ready',
+        title: 'Checkout latency investigation',
+        description: '',
+        canonical_filter: 'tcp port 443',
+        duration_seconds: 60,
+        planned_start_at: '',
+        clock_quality: 'uncalibrated',
+        created_at: '',
+        updated_at: '',
+      },
+      captures: [],
+    });
+    const message: ChatMessage = {
+      id: 'packet-capture-result',
+      role: 'tool',
+      tool_name: 'get_packet_capture_session',
+      content: JSON.stringify({
+        session: {
+          public_id: 'pcap-session-7d5a7c7e',
+          title: 'Checkout latency investigation',
+          state: 'collecting',
+          canonical_filter: 'tcp port 443',
+        },
+      }),
+    };
+
+    render(<MessageBubble message={message} />);
+
+    expect(screen.getByText('采集中')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('已完成')).toBeInTheDocument());
+    expect(screen.getByText('1 个 PCAP · tcp port 443')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Stop|停止/ })).not.toBeInTheDocument();
   });
 });
