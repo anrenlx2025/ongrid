@@ -349,8 +349,10 @@ func TestBudgetStopModel_PruneAllReturnsEvidenceSummary(t *testing.T) {
 		history = append(history, schema.ToolMessage(`{"count":0}`, "call_pad_"+string(rune('a'+i)), schema.WithToolName("query_logql")))
 	}
 	history = append(history,
+		schema.ToolMessage(`{"query":"select:host_du_summary","tools":[{"name":"host_du_summary","parameters":{"type":"object"}}]}`, "call_search", schema.WithToolName("ToolSearch")),
 		schema.ToolMessage(`{"count":1,"incidents":[{"title":"disk_high root filesystem over 90%","severity":"warning"}]}`, "call_incident", schema.WithToolName("query_incidents")),
 		schema.ToolMessage(`{"device_id":1,"results":[{"path":"/","subpaths":[{"subpath":"/var","size_human":"12.7 GiB"}]}]}`, "call_du", schema.WithToolName("host_du_summary")),
+		schema.ToolMessage(`{"device_id":1,"results":[{"files":[{"path":"/swap.img","size_human":"1.9 GiB"}]}]}`, "call_files", schema.WithToolName("host_find_large_files")),
 	)
 
 	got, err := wrapped.Generate(context.Background(), history)
@@ -360,8 +362,11 @@ func TestBudgetStopModel_PruneAllReturnsEvidenceSummary(t *testing.T) {
 	if len(got.ToolCalls) != 0 {
 		t.Fatalf("tool calls = %d, want 0", len(got.ToolCalls))
 	}
-	if !strings.Contains(got.Content, "disk_high") || !strings.Contains(got.Content, "/var=12.7 GiB") {
+	if !strings.Contains(got.Content, "disk_high") || !strings.Contains(got.Content, "/var=12.7 GiB") || !strings.Contains(got.Content, "/swap.img=1.9 GiB") {
 		t.Fatalf("content missing evidence summary: %q", got.Content)
+	}
+	if strings.Contains(got.Content, "select:host_du_summary") {
+		t.Fatalf("content leaked ToolSearch schema evidence: %q", got.Content)
 	}
 	if !strings.Contains(got.Content, "下一步") {
 		t.Fatalf("content missing next-step guidance: %q", got.Content)

@@ -113,7 +113,7 @@ func budgetPrunedFinalContent(messages []*schema.Message, tool string) string {
 	if evidence == "" {
 		return "我已在执行前停止继续调用 `" + tool + "`，因为本轮已经达到工具预算。当前证据还不足以形成可靠结论；请在下一条消息补充更明确的目标或时间窗，我再继续。"
 	}
-	return "我已在执行前停止继续调用 `" + tool + "`，因为本轮已经达到工具预算。\n\n基于本轮已经拿到的证据：\n" + evidence + "\n\n下一步：先按这些发现作为当前结论处理；如果需要更深的证据，请在下一条消息指定更窄的目标或时间窗。"
+	return "我已在执行前停止继续调用 `" + tool + "`，因为本轮已经达到工具预算。\n\n当前结论先按本轮已经拿到的证据处理：\n" + evidence + "\n\n下一步：优先处理上述最明确的异常点；如果需要更深的证据，请在下一条消息指定更窄的目标或时间窗。"
 }
 
 func summarizeRecentToolEvidence(messages []*schema.Message) string {
@@ -149,6 +149,9 @@ func summarizeToolMessage(toolName, content string) string {
 	if toolName == "" {
 		toolName = "tool"
 	}
+	if toolName == "ToolSearch" {
+		return ""
+	}
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(content), &payload); err == nil {
 		switch toolName {
@@ -158,6 +161,8 @@ func summarizeToolMessage(toolName, content string) string {
 			return summarizeCorrelationPayload(toolName, payload)
 		case "host_du_summary":
 			return summarizeDiskUsagePayload(toolName, payload)
+		case "host_find_large_files":
+			return summarizeLargeFilesPayload(toolName, payload)
 		}
 		if count, ok := jsonNumber(payload["count"]); ok {
 			return toolName + ": 返回 " + formatNumber(count) + " 条结果。"
@@ -260,6 +265,41 @@ func summarizeDiskUsagePayload(toolName string, payload map[string]any) string {
 		return toolName + ": 返回磁盘占用分析结果。"
 	}
 	return toolName + ": " + strings.Join(parts, "；")
+}
+
+func summarizeLargeFilesPayload(toolName string, payload map[string]any) string {
+	results, _ := payload["results"].([]any)
+	parts := make([]string, 0, 5)
+	for _, item := range results {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		files, _ := obj["files"].([]any)
+		for _, file := range files {
+			fileObj, ok := file.(map[string]any)
+			if !ok {
+				continue
+			}
+			path, _ := fileObj["path"].(string)
+			size, _ := fileObj["size_human"].(string)
+			if path == "" {
+				continue
+			}
+			if size != "" {
+				parts = append(parts, path+"="+size)
+			} else {
+				parts = append(parts, path)
+			}
+			if len(parts) >= 5 {
+				return toolName + ": 大文件 " + strings.Join(parts, "；")
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return toolName + ": 返回大文件扫描结果。"
+	}
+	return toolName + ": 大文件 " + strings.Join(parts, "；")
 }
 
 func jsonNumber(value any) (float64, bool) {
