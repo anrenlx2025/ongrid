@@ -639,6 +639,12 @@ export default function ChatThreadPage() {
 function collectActiveOperations(messages: ChatMessage[]): OperationCardData[] {
   const byKey = new Map<string, OperationCardData>();
   for (const message of messages) {
+    const fromToolContent = message.role === 'tool' && message.content
+      ? operationFromToolResult(message.content)
+      : null;
+    if (fromToolContent && !isTerminalOperationState(fromToolContent.state)) {
+      byKey.set(operationKey(fromToolContent), fromToolContent);
+    }
     const direct = message.tool_call ? operationFromToolResult(message.tool_call.result ?? message.tool_call.result_raw) : null;
     if (direct && !isTerminalOperationState(direct.state)) byKey.set(operationKey(direct), direct);
     for (const call of message.tool_calls ?? []) {
