@@ -290,6 +290,50 @@ func TestBudgetStopModel_IgnoresPriorTurnToolBudget(t *testing.T) {
 	}
 }
 
+func TestBudgetStopModel_PrunesSameBatchRepeatedToolCalls(t *testing.T) {
+	t.Parallel()
+	calls := make([]schema.ToolCall, 0, maxCallsForTool("query_k8s_snapshot")+3)
+	for i := 0; i < maxCallsForTool("query_k8s_snapshot")+3; i++ {
+		calls = append(calls, schema.ToolCall{
+			ID:       "call_k8s_" + string(rune('a'+i)),
+			Function: schema.FunctionCall{Name: "query_k8s_snapshot", Arguments: `{}`},
+		})
+	}
+	inner := newScriptedChatModel(&schema.Message{Role: schema.Assistant, ToolCalls: calls})
+	wrapped := wrapBudgetStopModel(inner)
+	got, err := wrapped.Generate(context.Background(), []*schema.Message{
+		schema.UserMessage("找 Kubernetes 异常 Pod"),
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(got.ToolCalls) != maxCallsForTool("query_k8s_snapshot") {
+		t.Fatalf("tool calls = %d, want %d", len(got.ToolCalls), maxCallsForTool("query_k8s_snapshot"))
+	}
+}
+
+func TestBudgetStopModel_PrunesSameBatchAtTotalBudget(t *testing.T) {
+	t.Parallel()
+	calls := make([]schema.ToolCall, 0, maxTotalToolCallsPerRun+3)
+	for i := 0; i < maxTotalToolCallsPerRun+3; i++ {
+		calls = append(calls, schema.ToolCall{
+			ID:       "call_tool_" + string(rune('a'+i)),
+			Function: schema.FunctionCall{Name: "tool_" + string(rune('a'+i)), Arguments: `{}`},
+		})
+	}
+	inner := newScriptedChatModel(&schema.Message{Role: schema.Assistant, ToolCalls: calls})
+	wrapped := wrapBudgetStopModel(inner)
+	got, err := wrapped.Generate(context.Background(), []*schema.Message{
+		schema.UserMessage("做一次宽排查"),
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(got.ToolCalls) != maxTotalToolCallsPerRun {
+		t.Fatalf("tool calls = %d, want total budget %d", len(got.ToolCalls), maxTotalToolCallsPerRun)
+	}
+}
+
 func TestBuildReActGraph_NilModelFails(t *testing.T) {
 	t.Parallel()
 	if _, err := BuildReActGraph(nil, nil, Config{}); err == nil {

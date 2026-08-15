@@ -24,7 +24,11 @@ func (m *budgetStopModel) Generate(ctx context.Context, input []*schema.Message,
 	if msg, ok := finalAnswerAfterToolBudget(input); ok {
 		return msg, nil
 	}
-	return m.inner.Generate(ctx, input, opts...)
+	msg, err := m.inner.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return pruneToolCallsForBudget(input, msg), nil
 }
 
 func (m *budgetStopModel) Stream(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
@@ -32,6 +36,76 @@ func (m *budgetStopModel) Stream(ctx context.Context, input []*schema.Message, o
 		return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 	}
 	return m.inner.Stream(ctx, input, opts...)
+}
+
+func pruneToolCallsForBudget(history []*schema.Message, msg *schema.Message) *schema.Message {
+	if msg == nil || len(msg.ToolCalls) == 0 {
+		return msg
+	}
+	perToolCounts, total := priorToolCounts(history)
+	kept := make([]schema.ToolCall, 0, len(msg.ToolCalls))
+	for _, call := range msg.ToolCalls {
+		name := strings.TrimSpace(call.Function.Name)
+		if name == "" {
+			continue
+		}
+		if total >= maxTotalToolCallsPerRun {
+			continue
+		}
+		if perToolCounts[name] >= maxCallsForTool(name) {
+			continue
+		}
+		perToolCounts[name]++
+		total++
+		kept = append(kept, call)
+	}
+	if len(kept) == len(msg.ToolCalls) {
+		return msg
+	}
+	cp := *msg
+	cp.ToolCalls = kept
+	if len(kept) == 0 {
+		tool := "tool"
+		if len(msg.ToolCalls) > 0 {
+			tool = strings.TrimSpace(msg.ToolCalls[0].Function.Name)
+		}
+		cp.Content = budgetPrunedFinalContent(history, tool)
+	}
+	return &cp
+}
+
+func priorToolCounts(messages []*schema.Message) (map[string]int, int) {
+	counts := make(map[string]int)
+	total := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg == nil {
+			continue
+		}
+		if msg.Role == schema.User && !isSystemReminderMessage(msg.Content) {
+			break
+		}
+		if msg.Role != schema.Tool {
+			continue
+		}
+		name := strings.TrimSpace(msg.ToolName)
+		if name == "" {
+			continue
+		}
+		counts[name]++
+		total++
+	}
+	return counts, total
+}
+
+func budgetPrunedFinalContent(messages []*schema.Message, tool string) string {
+	if strings.TrimSpace(tool) == "" {
+		tool = "tool"
+	}
+	if wantsEnglishResponse(messages) {
+		return "I stopped additional `" + tool + "` calls before execution because this turn has reached its tool budget. I will answer from the evidence already collected; if that evidence is insufficient, send a narrower target or time window in the next message."
+	}
+	return "我已在执行前停止继续调用 `" + tool + "`，避免同一轮里批量重复查工具。我会基于已经拿到的证据回答；如果证据不足，请在下一条消息补充更明确的目标或时间窗。"
 }
 
 func (m *budgetStopModel) WithTools(tools []*schema.ToolInfo) (einomodel.ToolCallingChatModel, error) {

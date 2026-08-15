@@ -109,7 +109,7 @@ const (
 // limit is intentionally small and evidence tools have a stricter limit.
 const maxToolCallsPerRun = 6
 
-const maxTotalToolCallsPerRun = 10
+const maxTotalToolCallsPerRun = 8
 
 func maxCallsForTool(name string) int {
 	switch name {
