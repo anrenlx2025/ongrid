@@ -149,7 +149,7 @@ func summarizeToolMessage(toolName, content string) string {
 	if toolName == "" {
 		toolName = "tool"
 	}
-	if toolName == "ToolSearch" {
+	if toolName == "ToolSearch" || toolName == "get_edge_summary" {
 		return ""
 	}
 	var payload map[string]any
