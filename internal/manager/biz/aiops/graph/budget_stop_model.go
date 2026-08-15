@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	einomodel "github.com/cloudwego/eino/components/model"
@@ -102,10 +103,191 @@ func budgetPrunedFinalContent(messages []*schema.Message, tool string) string {
 	if strings.TrimSpace(tool) == "" {
 		tool = "tool"
 	}
+	evidence := summarizeRecentToolEvidence(messages)
 	if wantsEnglishResponse(messages) {
-		return "I stopped additional `" + tool + "` calls before execution because this turn has reached its tool budget. I will answer from the evidence already collected; if that evidence is insufficient, send a narrower target or time window in the next message."
+		if evidence == "" {
+			return "I stopped additional `" + tool + "` calls before execution because this turn reached its tool budget. The evidence collected so far is not enough for a confident conclusion; send a narrower target or time window and I can continue in the next message."
+		}
+		return "I stopped additional `" + tool + "` calls before execution because this turn reached its tool budget.\n\nBased on the evidence already collected:\n" + evidence + "\n\nNext step: use these findings as the current conclusion. If you need deeper proof, continue with a narrower target or time window."
 	}
-	return "我已在执行前停止继续调用 `" + tool + "`，避免同一轮里批量重复查工具。我会基于已经拿到的证据回答；如果证据不足，请在下一条消息补充更明确的目标或时间窗。"
+	if evidence == "" {
+		return "我已在执行前停止继续调用 `" + tool + "`，因为本轮已经达到工具预算。当前证据还不足以形成可靠结论；请在下一条消息补充更明确的目标或时间窗，我再继续。"
+	}
+	return "我已在执行前停止继续调用 `" + tool + "`，因为本轮已经达到工具预算。\n\n基于本轮已经拿到的证据：\n" + evidence + "\n\n下一步：先按这些发现作为当前结论处理；如果需要更深的证据，请在下一条消息指定更窄的目标或时间窗。"
+}
+
+func summarizeRecentToolEvidence(messages []*schema.Message) string {
+	lines := make([]string, 0, 6)
+	for i := len(messages) - 1; i >= 0 && len(lines) < 6; i-- {
+		msg := messages[i]
+		if msg == nil {
+			continue
+		}
+		if msg.Role == schema.User && !isSystemReminderMessage(msg.Content) {
+			break
+		}
+		if msg.Role != schema.Tool {
+			continue
+		}
+		line := summarizeToolMessage(msg.ToolName, msg.Content)
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
+		lines[i], lines[j] = lines[j], lines[i]
+	}
+	return "- " + strings.Join(lines, "\n- ")
+}
+
+func summarizeToolMessage(toolName, content string) string {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		toolName = "tool"
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(content), &payload); err == nil {
+		switch toolName {
+		case "query_incidents":
+			return summarizeIncidentPayload(toolName, payload)
+		case "correlate_incident":
+			return summarizeCorrelationPayload(toolName, payload)
+		case "host_du_summary":
+			return summarizeDiskUsagePayload(toolName, payload)
+		}
+		if count, ok := jsonNumber(payload["count"]); ok {
+			return toolName + ": 返回 " + formatNumber(count) + " 条结果。"
+		}
+	}
+	compact := strings.Join(strings.Fields(content), " ")
+	if compact == "" {
+		return ""
+	}
+	if len(compact) > 180 {
+		compact = compact[:180] + "..."
+	}
+	return toolName + ": " + compact
+}
+
+func summarizeIncidentPayload(toolName string, payload map[string]any) string {
+	count, _ := jsonNumber(payload["count"])
+	incidents, _ := payload["incidents"].([]any)
+	titles := make([]string, 0, 3)
+	for _, item := range incidents {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		title, _ := obj["title"].(string)
+		if title == "" {
+			continue
+		}
+		titles = append(titles, trimRunes(title, 72))
+		if len(titles) >= 3 {
+			break
+		}
+	}
+	if len(titles) == 0 {
+		return toolName + ": 返回 " + formatNumber(count) + " 条告警。"
+	}
+	return toolName + ": 返回 " + formatNumber(count) + " 条告警，代表项：" + strings.Join(titles, "；")
+}
+
+func summarizeCorrelationPayload(toolName string, payload map[string]any) string {
+	results, _ := payload["results"].([]any)
+	parts := make([]string, 0, 3)
+	for _, item := range results {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := jsonNumber(obj["incident_id"])
+		bundle, _ := obj["bundle"].(map[string]any)
+		incident, _ := bundle["incident"].(map[string]any)
+		title, _ := incident["title"].(string)
+		value, hasValue := jsonNumber(incident["value"])
+		part := "incident " + formatNumber(id)
+		if title != "" {
+			part += " " + trimRunes(title, 56)
+		}
+		if hasValue {
+			part += "，value=" + formatNumber(value)
+		}
+		parts = append(parts, part)
+		if len(parts) >= 3 {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return toolName + ": 返回关联分析结果。"
+	}
+	return toolName + ": " + strings.Join(parts, "；")
+}
+
+func summarizeDiskUsagePayload(toolName string, payload map[string]any) string {
+	results, _ := payload["results"].([]any)
+	parts := make([]string, 0, 4)
+	for _, item := range results {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		path, _ := obj["path"].(string)
+		subpaths, _ := obj["subpaths"].([]any)
+		if path == "" || len(subpaths) == 0 {
+			continue
+		}
+		top, _ := subpaths[0].(map[string]any)
+		subpath, _ := top["subpath"].(string)
+		size, _ := top["size_human"].(string)
+		if subpath == "" {
+			continue
+		}
+		if size != "" {
+			parts = append(parts, path+" 最大项 "+subpath+"="+size)
+		} else {
+			parts = append(parts, path+" 最大项 "+subpath)
+		}
+		if len(parts) >= 4 {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return toolName + ": 返回磁盘占用分析结果。"
+	}
+	return toolName + ": " + strings.Join(parts, "；")
+}
+
+func jsonNumber(value any) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		n, err := v.Float64()
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func formatNumber(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+func trimRunes(value string, max int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= max {
+		return string(runes)
+	}
+	return string(runes[:max]) + "..."
 }
 
 func (m *budgetStopModel) WithTools(tools []*schema.ToolInfo) (einomodel.ToolCallingChatModel, error) {

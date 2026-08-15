@@ -334,6 +334,40 @@ func TestBudgetStopModel_PrunesSameBatchAtTotalBudget(t *testing.T) {
 	}
 }
 
+func TestBudgetStopModel_PruneAllReturnsEvidenceSummary(t *testing.T) {
+	t.Parallel()
+	inner := newScriptedChatModel(&schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{{
+			ID:       "call_extra",
+			Function: schema.FunctionCall{Name: "host_du_summary", Arguments: `{}`},
+		}},
+	})
+	wrapped := wrapBudgetStopModel(inner)
+	history := []*schema.Message{schema.UserMessage("对当前告警做一次深入 RCA")}
+	for i := 0; i < maxTotalToolCallsPerRun-2; i++ {
+		history = append(history, schema.ToolMessage(`{"count":0}`, "call_pad_"+string(rune('a'+i)), schema.WithToolName("query_logql")))
+	}
+	history = append(history,
+		schema.ToolMessage(`{"count":1,"incidents":[{"title":"disk_high root filesystem over 90%","severity":"warning"}]}`, "call_incident", schema.WithToolName("query_incidents")),
+		schema.ToolMessage(`{"device_id":1,"results":[{"path":"/","subpaths":[{"subpath":"/var","size_human":"12.7 GiB"}]}]}`, "call_du", schema.WithToolName("host_du_summary")),
+	)
+
+	got, err := wrapped.Generate(context.Background(), history)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(got.ToolCalls) != 0 {
+		t.Fatalf("tool calls = %d, want 0", len(got.ToolCalls))
+	}
+	if !strings.Contains(got.Content, "disk_high") || !strings.Contains(got.Content, "/var=12.7 GiB") {
+		t.Fatalf("content missing evidence summary: %q", got.Content)
+	}
+	if !strings.Contains(got.Content, "下一步") {
+		t.Fatalf("content missing next-step guidance: %q", got.Content)
+	}
+}
+
 func TestBuildReActGraph_NilModelFails(t *testing.T) {
 	t.Parallel()
 	if _, err := BuildReActGraph(nil, nil, Config{}); err == nil {
