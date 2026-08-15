@@ -572,7 +572,10 @@ func (rt *Runtime) GetWorker(workerID string) (*Worker, bool) {
 // matching Handle()'s "user message lands on disk before the LLM call"
 // invariant — same survival semantics on a graph crash.
 func (rt *Runtime) runWorker(ctx context.Context, agentDef *Agent, sessID, userText, locale string, parentEmit Emit, workerID string) (string, error) {
-	workerTools := filterToolsForAgent(rt.toolBagSnapshot(), agentDef, false)
+	// Workers are not an authorization bypass. The coordinator stamps the
+	// resolved gate on context; absent wiring fails closed so a direct spawn
+	// cannot expose mutating tools unexpectedly.
+	workerTools := filterToolsForAgentRole(rt.toolBagSnapshot(), agentDef, false, !basetool.AgentWriteAllowedFromContext(ctx))
 
 	// Thread the persona-filtered tool view onto ctx so ToolSearch
 	// (which runs inside the worker graph) only returns tools the

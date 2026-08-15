@@ -784,6 +784,11 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 			graph.WithToolInvocationPersistence(toolPersistence),
 		),
 	))
+	// The tool adapter receives these invoke options, but coordinator-only
+	// tools can synchronously spawn a worker from the graph context. Stamp the
+	// same gate on the request context so that worker inherits the caller's
+	// permission instead of accidentally gaining a broader toolbag.
+	ctx = basetool.WithAgentWriteAllowed(ctx, writeEnabled && !viewerOnly)
 	// Thread the final per-turn tool view onto ctx so ToolSearch only
 	// returns tools callable in this graph. Coordinator routing stubs are
 	// deliberately included: a deferred schema lookup must return a
@@ -874,6 +879,9 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	//     row, so we re-fetch the recently-persisted assistant message
 	//     ID for handoff to the SSE adapter when needed.
 	reply := &Reply{Usage: out.Usage, Iterations: out.Iterations}
+	if toolPersistence != nil {
+		reply.ToolCalls = toolPersistence.ToolCalls()
+	}
 	if out.AssistantMessage != nil {
 		// Build a synthetic *aiopsmodel.Message so the upper layer
 		// can re-render the legacy postMessageResp shape. The
@@ -922,7 +930,7 @@ func resolveTurn(req *Request) (TurnPlan, string) {
 		return PlanTurn(ResolvedFacts{Permitted: false, Reason: "nil request"}), ""
 	}
 	text := strings.ToLower(req.UserText)
-	captureIntent := strings.Contains(text, "pcap") || strings.Contains(text, "packet capture") || strings.Contains(req.UserText, "抓包") || (strings.Contains(req.UserText, "抓") && strings.Contains(req.UserText, "流量"))
+	captureIntent := strings.Contains(text, "pcap") || strings.Contains(text, "packet capture") || strings.Contains(req.UserText, "抓包") || (strings.Contains(req.UserText, "抓") && (strings.Contains(req.UserText, "流量") || strings.Contains(req.UserText, "数据包") || strings.Contains(req.UserText, "的包") || strings.Contains(text, "tcp port") || strings.Contains(text, "udp port")))
 	hasTarget := len(confirmedDeviceIDs(req.Mentions)) > 0 || strings.Contains(text, "device_id")
 	plan := PlanTurn(ResolvedFacts{Missing: captureIntent && !hasTarget, Permitted: req.Role != "viewer", LongRunning: captureIntent})
 	if plan.Decision == DecisionClarify {

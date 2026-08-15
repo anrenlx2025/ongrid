@@ -43,6 +43,10 @@ func TestResolveTurnRequiresCaptureTarget(t *testing.T) {
 	if plan.Decision != DecisionOperate || plan.Phase != PhaseOperate || plan.Observe() != PhaseObserve {
 		t.Fatalf("resolveTurn selected target = %+v", plan)
 	}
+	plan, clarification = resolveTurn(&Request{UserText: "抓 60 秒 tcp port 443 的包", Role: "admin"})
+	if plan.Decision != DecisionClarify || clarification == "" {
+		t.Fatalf("resolveTurn packet wording = %+v, %q", plan, clarification)
+	}
 }
 
 func TestTurnPlanRecordsAndLoopsThroughSystemStates(t *testing.T) {

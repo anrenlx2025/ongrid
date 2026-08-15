@@ -399,6 +399,28 @@ func assistantEndWithToolCalls(t *testing.T, h *PersistenceHandler, calls ...str
 	h.OnEnd(context.Background(), chatModelInfo(), out)
 }
 
+func TestPersistenceHandlerToolCallsReturnsCompletedSnapshot(t *testing.T) {
+	repo := newFakeSessionRepo()
+	h := NewPersistenceHandler(PersistenceDeps{SessionID: "s", Repo: repo})
+	ctx := WithToolCallID(WithMessageID(context.Background(), "assistant-1"), "call-1")
+
+	h.PersistToolStart(ctx, "query_promql", `{"expr":"up"}`)
+	h.PersistToolEnd(ctx, "query_promql", `{"status":"success"}`)
+
+	calls := h.ToolCalls()
+	if len(calls) != 1 {
+		t.Fatalf("ToolCalls len = %d, want 1", len(calls))
+	}
+	call := calls[0]
+	if call.ToolName != "query_promql" || call.Status != model.StatusSuccess || call.ResultJSON == nil || *call.ResultJSON != `{"status":"success"}` || call.EndedAt == nil {
+		t.Fatalf("ToolCalls = %+v, want completed query_promql", call)
+	}
+	*call.ResultJSON = "mutated"
+	if got := h.ToolCalls()[0].ResultJSON; got == nil || *got != `{"status":"success"}` {
+		t.Fatalf("ToolCalls returned a mutable snapshot: %v", got)
+	}
+}
+
 func TestAutoheal_NoMissing_NoStubInserted(t *testing.T) {
 	t.Parallel()
 	repo := newFakeSessionRepo()

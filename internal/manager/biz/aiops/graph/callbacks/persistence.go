@@ -135,6 +135,11 @@ type PersistenceHandler struct {
 	// fired — those are what flushIncompleteBatch heals.
 	toolCalls   map[string]toolCallEntry
 	toolCallsMu sync.Mutex
+	// replyToolCalls is the request-scoped projection returned to the
+	// synchronous HTTP caller. Persistence remains the canonical audit trail;
+	// this avoids re-querying a concurrent session just to reconstruct the
+	// legacy post-message response.
+	replyToolCalls []model.ToolCall
 
 	// asstMu protects iteration-counting state used by OnEnd to
 	// distinguish the terminal assistant turn from intermediate ones.
@@ -361,6 +366,7 @@ func (h *PersistenceHandler) persistToolStart(ctx context.Context, toolName, arg
 		toolCallID: einoTCID,
 		llmCallID:  llmCallID,
 	}
+	h.replyToolCalls = append(h.replyToolCalls, *row)
 	h.toolCallsMu.Unlock()
 }
 
@@ -798,6 +804,7 @@ func (h *PersistenceHandler) persistToolEnd(ctx context.Context, info *callbacks
 	if err := h.deps.Repo.UpdateToolCallResult(writeCtx, entry.rowID, status, resultPtr, errStr, endedAt); err != nil {
 		h.recordErr("tool_call_update", err)
 	}
+	h.updateReplyToolCall(entry.rowID, status, resultPtr, errStr, endedAt)
 
 	// Append a role=tool message so history replay sees the tool
 	// result. Use the LLM-assigned call id (entry.llmCallID) when
@@ -905,6 +912,51 @@ func (h *PersistenceHandler) AssistantWriteCount() int {
 	h.asstMu.Lock()
 	defer h.asstMu.Unlock()
 	return h.asstWrites
+}
+
+// ToolCalls returns a stable snapshot of this graph run's tool lifecycle for
+// the blocking chat response. It intentionally mirrors the legacy Reply
+// contract while the database remains the source of truth for history.
+func (h *PersistenceHandler) ToolCalls() []*model.ToolCall {
+	if h == nil {
+		return nil
+	}
+	h.toolCallsMu.Lock()
+	defer h.toolCallsMu.Unlock()
+	out := make([]*model.ToolCall, 0, len(h.replyToolCalls))
+	for _, call := range h.replyToolCalls {
+		copy := call
+		if call.ResultJSON != nil {
+			result := *call.ResultJSON
+			copy.ResultJSON = &result
+		}
+		if call.Error != nil {
+			errText := *call.Error
+			copy.Error = &errText
+		}
+		if call.EndedAt != nil {
+			endedAt := *call.EndedAt
+			copy.EndedAt = &endedAt
+		}
+		out = append(out, &copy)
+	}
+	return out
+}
+
+func (h *PersistenceHandler) updateReplyToolCall(id, status string, resultJSON, errText *string, endedAt time.Time) {
+	h.toolCallsMu.Lock()
+	defer h.toolCallsMu.Unlock()
+	for i := range h.replyToolCalls {
+		call := &h.replyToolCalls[i]
+		if call.ID != id {
+			continue
+		}
+		call.Status = status
+		call.ResultJSON = resultJSON
+		call.Error = errText
+		call.EndedAt = &endedAt
+		return
+	}
 }
 
 // Compile-time assertion.

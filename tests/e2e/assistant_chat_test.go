@@ -198,6 +198,13 @@ func TestAssistantChat_UserVisibleLoop(t *testing.T) {
 	})
 
 	t.Run("synchronous specialist work stays internal and returns to the root loop", func(t *testing.T) {
+		status, setting, err := env.DoJSON("PUT", "/api/v1/system-settings/agent/write_enabled", map[string]any{
+			"value":     "true",
+			"sensitive": false,
+		}, admin.AccessToken)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("enable delegation gate: status=%d body=%v err=%v", status, setting, err)
+		}
 		status, sessions, err := env.DoJSON("GET", "/api/v1/chat/sessions", nil, admin.AccessToken)
 		if err != nil || status != http.StatusOK {
 			t.Fatalf("list sessions before delegation: status=%d body=%v err=%v", status, sessions, err)
