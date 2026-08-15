@@ -872,31 +872,33 @@ func TestAssistantChat_RemainingScenarioCoverage(t *testing.T) {
 	})
 
 	for _, tc := range []struct {
-		id      string
-		prompt  string
-		tool    string
-		args    string
-		answer  string
-		wantMsg string
+		id            string
+		prompt        string
+		forbiddenTool string
+		answer        string
 	}{
-		{id: "O18", prompt: "查一下 nginx 最近的错误日志", tool: "query_logql", args: `{"query":"{service_name=\"nginx\"} |= \"error\""}`, answer: "日志查询没有可用后端，不能编造日志内容。", wantMsg: "不能编造"},
-		{id: "O19", prompt: "查一下 checkout 请求的 trace 慢在哪里", tool: "query_traceql", args: `{"query":"{ name =~ \"checkout\" }"}`, answer: "trace 查询没有可用后端，不能编造链路数据。", wantMsg: "不能编造"},
+		{id: "O18", prompt: "查一下 nginx 最近的错误日志", forbiddenTool: "query_logql", answer: "当前日志后端未配置，不能编造日志内容。"},
+		{id: "O19", prompt: "查一下 checkout 请求的 trace 慢在哪里", forbiddenTool: "query_traceql", answer: "当前 trace 后端未配置，不能编造链路数据。"},
 	} {
-		t.Run(tc.id+" unavailable signal capability returns to loop", func(t *testing.T) {
-			env.FakeLLM().SetScript(
-				testenv.LLMReply{ToolCalls: []testenv.LLMToolCall{{ID: strings.ToLower(tc.id) + "-signal", Name: tc.tool, Arguments: tc.args}}},
-				testenv.LLMReply{Content: tc.answer},
-			)
+		t.Run(tc.id+" unavailable signal capability is not disclosed", func(t *testing.T) {
+			env.FakeLLM().SetScript(testenv.LLMReply{Content: tc.answer})
 			sessionID := createChatSession(t, env, admin.AccessToken, "E2E "+tc.id)
 			status, body, err := env.DoJSON("POST", chatMessagesPath(sessionID), map[string]any{"content": tc.prompt}, admin.AccessToken)
 			if err != nil || status != http.StatusOK {
 				t.Fatalf("%s post: status=%d body=%v err=%v", tc.id, status, body, err)
 			}
-			if got := nestedString(body, "assistant_message", "content"); !strings.Contains(got, tc.wantMsg) {
+			if got := nestedString(body, "assistant_message", "content"); !strings.Contains(got, "不能编造") {
 				t.Fatalf("%s answer=%q body=%v", tc.id, got, body)
 			}
-			if !containsToolCall(body["tool_calls"], tc.tool) {
-				t.Fatalf("%s missing tool %s in body=%v", tc.id, tc.tool, body)
+			if containsToolCall(body["tool_calls"], tc.forbiddenTool) {
+				t.Fatalf("%s should not execute unavailable tool %s: body=%v", tc.id, tc.forbiddenTool, body)
+			}
+			requests := env.FakeLLM().Requests()
+			if len(requests) == 0 {
+				t.Fatalf("%s no LLM request captured", tc.id)
+			}
+			if containsString(requests[0].ToolNames, tc.forbiddenTool) {
+				t.Fatalf("%s exposed unavailable tool %s in %+v", tc.id, tc.forbiddenTool, requests[0].ToolNames)
 			}
 		})
 	}

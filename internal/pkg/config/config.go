@@ -428,8 +428,8 @@ func Load() (*Config, error) {
 		K8sEventRetention:       getEnvDuration("ONGRID_K8S_EVENT_RETENTION", 24*time.Hour),
 		K8sEventMaxPerCluster:   getEnvInt("ONGRID_K8S_EVENT_MAX_PER_CLUSTER", 5000),
 		K8sEventCleanupInterval: getEnvDuration("ONGRID_K8S_EVENT_CLEANUP_INTERVAL", time.Hour),
-		Logs:                    LogsConfig{URL: getEnv("ONGRID_LOG_QUERY_URL", "http://loki:3100")},
-		Traces:                  TracesConfig{URL: getEnv("ONGRID_TRACE_QUERY_URL", "http://tempo:3200")},
+		Logs:                    LogsConfig{URL: getOptionalURL("ONGRID_LOG_QUERY_URL", "http://loki:3100")},
+		Traces:                  TracesConfig{URL: getOptionalURL("ONGRID_TRACE_QUERY_URL", "http://tempo:3200")},
 		PacketCapture: PacketCaptureConfig{
 			RawDir:                      getEnv("ONGRID_PACKET_CAPTURE_RAW_DIR", ""),
 			ParserURL:                   getEnv("ONGRID_PACKET_PARSER_URL", ""),
@@ -573,6 +573,19 @@ func getEnv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func getOptionalURL(key, def string) string {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "off", "disabled", "disable", "none", "null":
+		return ""
+	default:
+		return strings.TrimSpace(v)
+	}
 }
 
 // splitProviderModels parses a comma-separated list of model slugs into

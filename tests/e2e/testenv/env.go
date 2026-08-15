@@ -152,8 +152,8 @@ func Start(t *testing.T, opts ...Option) *Env {
 		"ONGRID_PROM_ENABLED":        "true",
 		"ONGRID_PROM_URL":            env.prom.URL(),
 		"ONGRID_PROM_QUERY_URL":      env.prom.URL(),
-		"ONGRID_LOG_QUERY_URL":       "", // Loki disabled in default e2e
-		"ONGRID_TRACE_QUERY_URL":     "",
+		"ONGRID_LOG_QUERY_URL":       "off", // disable Loki query tools in default e2e
+		"ONGRID_TRACE_QUERY_URL":     "off",
 		"ONGRID_OPENAI_API_KEY":      "fake-test-key",
 		"ONGRID_OPENAI_BASE_URL":     env.llm.URL() + "/v1",
 		"ONGRID_OPENAI_MODEL":        "fake-gpt",
