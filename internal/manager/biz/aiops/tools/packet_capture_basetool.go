@@ -19,9 +19,9 @@ const (
 	ToolNameGetPCAPSession = "get_packet_capture_session"
 )
 
-const capturePCAPDescription = "Start a bounded packet capture session on one or more host devices. Use repeat_count to create multiple capture members for each target in the same session. The tool returns as soon as every member is accepted by its edge; inspect the returned session for progress and artifacts. Captures are audited and must be explicitly requested by the operator."
+const capturePCAPDescription = "Start a bounded packet capture session on one or more host devices. Use repeat_count to create multiple capture members for each target in the same session. The tool returns a durable, cancelable operation as soon as every member is accepted by its edge; it does not wait for packets to finish. If the session is still collecting, present the operation/session id and detail link instead of treating zero PCAPs as a final analysis. Captures are audited and must be explicitly requested by the operator."
 
-const capturePCAPWhenToUse = "Use only when the user explicitly asks to capture packets or diagnose live network traffic on a specific host device/interface. Do not use for normal metric/log/trace questions. Prefer query_logql/query_traceql/query_promql first unless the user asks for raw packets."
+const capturePCAPWhenToUse = "Use only when the user explicitly asks to capture packets or diagnose live network traffic on a specific host device/interface. Do not use for normal metric/log/trace questions. Prefer query_logql/query_traceql/query_promql first unless the user asks for raw packets. After a successful start, do not immediately call get_packet_capture_session for final conclusions unless the user explicitly asks for current status or provides an already-completed pcap-session id."
 
 var CapturePCAPSchema = json.RawMessage(`{
   "type": "object",
@@ -35,8 +35,10 @@ var CapturePCAPSchema = json.RawMessage(`{
     "max_bytes": {"type": "integer", "minimum": 1, "maximum": 268435456, "default": 67108864},
     "max_packets": {"type": "integer", "minimum": 1, "maximum": 500000, "default": 100000},
     "snaplen": {"type": "integer", "minimum": 64, "maximum": 65535, "default": 1514},
-    "promiscuous": {"type": "boolean", "default": false},
+	"promiscuous": {"type": "boolean", "default": false},
 	"title": {"type": "string", "description": "Short investigation name shown on the packet capture session."},
+	"session_name": {"type": "string", "description": "Alias for title; accepted for models that phrase the task as a named session."},
+	"task_name": {"type": "string", "description": "Alias for title; accepted for models that phrase the task as a named task."},
 	"reason": {"type": "string", "description": "Why this capture is requested. Stored on the capture record."}
   },
 	"anyOf": [{"required": ["device_id", "interface"]}, {"required": ["targets"]}]
@@ -129,6 +131,8 @@ type capturePCAPArgs struct {
 	Promiscuous     bool   `json:"promiscuous"`
 	RepeatCount     int    `json:"repeat_count"`
 	Title           string `json:"title"`
+	SessionName     string `json:"session_name"`
+	TaskName        string `json:"task_name"`
 	Reason          string `json:"reason"`
 	Targets         []struct {
 		DeviceID  uint64 `json:"device_id"`
@@ -216,6 +220,12 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 	}
 	title := strings.TrimSpace(in.Title)
 	if title == "" {
+		title = strings.TrimSpace(in.SessionName)
+	}
+	if title == "" {
+		title = strings.TrimSpace(in.TaskName)
+	}
+	if title == "" {
 		title = "Packet capture"
 	}
 	out, err := sessionCreator.CreateSession(ctx, pcapbiz.CreateSessionInput{Targets: targets, Filter: strings.TrimSpace(in.Filter), DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: title, Description: strings.TrimSpace(in.Reason), Source: source, CreatedBy: resolved.UserID, ChatSessionID: basetool.SessionIDFromContext(ctx)})
@@ -252,7 +262,17 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 		Links:   map[string]string{"detail": "/artifacts/packet-sessions/" + out.Session.PublicID},
 		Actions: []basetool.OperationAction{{Kind: "cancel", Label: "Stop", Enabled: true}},
 	}
-	body, err := json.Marshal(map[string]any{"operation": operation, "session": out.Session, "captures": out.Captures, "member_errors": out.MemberErrors, "result": capturePCAPResult(out.Captures[0], nil, false)})
+	body, err := json.Marshal(map[string]any{
+		"operation":     operation,
+		"session":       out.Session,
+		"captures":      out.Captures,
+		"member_errors": out.MemberErrors,
+		"pending_analysis": map[string]any{
+			"state":   "collecting",
+			"message": "Packet capture has started as a durable operation. Final packet counts, endpoints, flows, and analysis are available only after the session reaches ready/partial/failed/cancelled.",
+		},
+		"result": capturePCAPResult(out.Captures[0], nil, false),
+	})
 	if err != nil {
 		return "", fmt.Errorf("%s: marshal response: %w", ToolNameCapturePCAP, err)
 	}

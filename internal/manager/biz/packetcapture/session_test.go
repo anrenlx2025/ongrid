@@ -56,10 +56,11 @@ func (r *sessionTestRepo) SetSessionAnalysis(_ context.Context, id uint64, state
 	return fmt.Errorf("not found")
 }
 
-func (r *sessionTestRepo) ListActiveSessions(_ context.Context, _ int) ([]*model.Session, error) {
+func (r *sessionTestRepo) ListReconcilableSessions(_ context.Context, _ int) ([]*model.Session, error) {
 	out := make([]*model.Session, 0, len(r.sessions))
 	for _, session := range r.sessions {
-		if session.State == model.SessionStateCollecting {
+		if session.State == model.SessionStateCollecting ||
+			(session.ChatSessionID != "" && session.CompletionNotifiedAt == nil && (session.State == model.SessionStateReady || session.State == model.SessionStatePartial || session.State == model.SessionStateCancelled || session.State == model.SessionStateFailed)) {
 			out = append(out, session)
 		}
 	}
@@ -134,6 +135,45 @@ func TestCreateSessionSupportsSingleCaptureTask(t *testing.T) {
 	}
 	if out.Captures[0].SessionID != out.Session.ID {
 		t.Fatalf("capture session=%d want %d", out.Captures[0].SessionID, out.Session.ID)
+	}
+}
+
+func TestReconcileActiveSessionsNotifiesReadySessionAfterInterruptedNotify(t *testing.T) {
+	repo := &sessionTestRepo{fakeRepo: newFakeRepo(), sessions: map[string]*model.Session{}}
+	uc := New(repo, &fakeCaller{}, sessionResolver{101: 11}, nil)
+	session := &model.Session{
+		ID:            7,
+		PublicID:      "pcap-session-ready",
+		State:         model.SessionStateReady,
+		ChatSessionID: "chat-session-1",
+		Title:         "HTTPS capture",
+		AnalysisJSON:  "{}",
+	}
+	repo.sessions[session.PublicID] = session
+	repo.byID[12] = &model.Capture{
+		ID:              12,
+		SessionID:       session.ID,
+		State:           model.StateReady,
+		ArtifactID:      "pcap-artifact-12",
+		CapturedPackets: 3,
+		ParsedJSON:      `{"packets":[{"source":"10.0.0.1","destination":"10.0.0.2","protocol":"TCP","index":{"srcport":"51234","dstport":"443"}}]}`,
+	}
+
+	var got CompletionEvent
+	if err := uc.ReconcileActiveSessions(context.Background(), 50, func(_ context.Context, event CompletionEvent) error {
+		got = event
+		return nil
+	}); err != nil {
+		t.Fatalf("ReconcileActiveSessions: %v", err)
+	}
+	if got.Session == nil || got.Session.PublicID != session.PublicID {
+		t.Fatalf("completion event = %+v", got)
+	}
+	if session.CompletionNotifiedAt == nil {
+		t.Fatal("ready session was not marked notified")
+	}
+	if got.Analysis.Summary.ReadyCount != 1 || got.Analysis.Summary.EventCount != 1 {
+		t.Fatalf("analysis summary = %+v", got.Analysis.Summary)
 	}
 }
 

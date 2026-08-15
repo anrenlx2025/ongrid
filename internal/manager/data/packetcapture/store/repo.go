@@ -252,13 +252,18 @@ func (r *Repo) SetSessionAnalysis(ctx context.Context, id uint64, state, analysi
 	return nil
 }
 
-func (r *Repo) ListActiveSessions(ctx context.Context, limit int) ([]*model.Session, error) {
+func (r *Repo) ListReconcilableSessions(ctx context.Context, limit int) ([]*model.Session, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	var sessions []*model.Session
-	if err := r.db.WithContext(ctx).Where("state = ?", model.SessionStateCollecting).Order("created_at ASC, id ASC").Limit(limit).Find(&sessions).Error; err != nil {
-		return nil, fmt.Errorf("packet capture: list active sessions: %w", err)
+	terminalStates := []string{model.SessionStateReady, model.SessionStatePartial, model.SessionStateCancelled, model.SessionStateFailed}
+	if err := r.db.WithContext(ctx).
+		Where("state = ? OR (state IN ? AND chat_session_id <> '' AND completion_notified_at IS NULL)", model.SessionStateCollecting, terminalStates).
+		Order("created_at ASC, id ASC").
+		Limit(limit).
+		Find(&sessions).Error; err != nil {
+		return nil, fmt.Errorf("packet capture: list reconcilable sessions: %w", err)
 	}
 	return sessions, nil
 }

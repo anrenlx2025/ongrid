@@ -105,7 +105,12 @@ func TestCapturePCAPToolInvokesUsecase(t *testing.T) {
 	var decoded struct {
 		Session struct {
 			PublicID string `json:"public_id"`
+			Title    string `json:"title"`
 		} `json:"session"`
+		PendingAnalysis struct {
+			State   string `json:"state"`
+			Message string `json:"message"`
+		} `json:"pending_analysis"`
 		Result struct {
 			Capture struct {
 				ID uint64 `json:"id"`
@@ -124,6 +129,9 @@ func TestCapturePCAPToolInvokesUsecase(t *testing.T) {
 	}
 	if decoded.Session.PublicID == "" || decoded.Result.Capture.ID != 12 || decoded.Result.Waited || decoded.Result.Artifact.ID != "" {
 		t.Fatalf("output = %s", out)
+	}
+	if decoded.PendingAnalysis.State != "collecting" || !strings.Contains(decoded.PendingAnalysis.Message, "durable operation") {
+		t.Fatalf("pending_analysis = %+v", decoded.PendingAnalysis)
 	}
 }
 
@@ -162,6 +170,23 @@ func TestCapturePCAPToolCreatesRepeatedMembersInOneSession(t *testing.T) {
 	}
 	if creator.sessionIn.Targets[1].StartAfterSeconds != 30 {
 		t.Fatalf("second round starts after %d seconds", creator.sessionIn.Targets[1].StartAfterSeconds)
+	}
+}
+
+func TestCapturePCAPToolAcceptsSessionNameAlias(t *testing.T) {
+	creator := &fakePacketCaptureCreator{}
+	tool := NewCapturePCAPTool(creator, nil, fakePacketCaptureOperation)
+
+	_, err := tool.InvokableRun(context.Background(), `{
+		"device_id": 24,
+		"interface": "eth0",
+		"session_name": "HTTPS 排障抓包"
+	}`, basetool.WithUserText("confirm device_id=24"))
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	if creator.sessionIn.Title != "HTTPS 排障抓包" {
+		t.Fatalf("session title = %q", creator.sessionIn.Title)
 	}
 }
 

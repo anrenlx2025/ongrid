@@ -57,7 +57,7 @@ type SessionRepo interface {
 	ListSessions(ctx context.Context, limit, offset int) ([]*model.Session, int64, error)
 	ListBySessionID(ctx context.Context, sessionID uint64) ([]*model.Capture, error)
 	SetSessionAnalysis(ctx context.Context, id uint64, state, analysisJSON string) error
-	ListActiveSessions(ctx context.Context, limit int) ([]*model.Session, error)
+	ListReconcilableSessions(ctx context.Context, limit int) ([]*model.Session, error)
 	MarkSessionCompletionNotified(ctx context.Context, id uint64, at time.Time) (bool, error)
 }
 

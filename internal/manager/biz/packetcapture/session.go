@@ -123,7 +123,7 @@ func (u *Usecase) ReconcileActiveSessions(ctx context.Context, limit int, notify
 	if !ok {
 		return errs.ErrNotWiredYet
 	}
-	active, err := sessions.ListActiveSessions(ctx, limit)
+	active, err := sessions.ListReconcilableSessions(ctx, limit)
 	if err != nil {
 		return err
 	}
