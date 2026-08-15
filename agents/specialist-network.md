@@ -14,6 +14,12 @@ when_to_use: |
     • 单纯指标告警分析（用 incident-investigator）
     • 文件系统 / 磁盘 / 进程问题（用 specialist-disk / specialist-compute）
     • 业务日志查询（coordinator 自己用 query_logql）
+capabilities:
+  - id: network_diagnosis
+    description: Diagnose network reachability, DNS, TCP, routing, namespaces, and packet-path evidence.
+    tools: [host_probe_http, host_probe_dns, host_probe_tcp, host_netns_inspect, query_promql, query_network_devices, get_network_neighbors]
+    max_tool_calls: 12
+can_delegate: true
 tools:
   - query_knowledge
   - host_probe_http

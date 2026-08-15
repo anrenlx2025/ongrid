@@ -46,9 +46,10 @@ type ResolvedFacts struct {
 // It remains request-local: durable work is represented by an Operation, not
 // an in-memory loop object.
 type TurnPlan struct {
-	Phase    TurnPhase
-	Decision Decision
-	Facts    ResolvedFacts
+	Phase       TurnPhase
+	Decision    Decision
+	Facts       ResolvedFacts
+	Transitions []TurnPhase
 }
 
 func PlanTurn(facts ResolvedFacts) TurnPlan {
@@ -64,7 +65,12 @@ func PlanTurn(facts ResolvedFacts) TurnPlan {
 	case DecisionReject:
 		phase = PhaseReject
 	}
-	return TurnPlan{Phase: phase, Decision: decision, Facts: facts}
+	return TurnPlan{
+		Phase:       phase,
+		Decision:    decision,
+		Facts:       facts,
+		Transitions: []TurnPhase{PhaseUnderstand, PhaseResolve, PhaseDecide, phase},
+	}
 }
 
 // Observe advances only an executable branch. A tool result is an observation
@@ -78,6 +84,16 @@ func (p TurnPlan) Observe() TurnPhase {
 	default:
 		return p.Phase
 	}
+}
+
+// NextAfterObserve is the only loop-back edge. A tool result is evidence,
+// not a final decision, so the assistant re-enters Understand with the new
+// observation before it may act again or complete the user-facing response.
+func (p TurnPlan) NextAfterObserve() TurnPhase {
+	if p.Observe() == PhaseObserve {
+		return PhaseUnderstand
+	}
+	return p.Phase
 }
 
 func (p TurnPlan) ModelBoundary() string {

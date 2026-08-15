@@ -15,6 +15,12 @@ when_to_use: |
     • 网络层（OVS / iptables / netns 用 specialist-network）
     • 磁盘空间细分 / 大文件定位（用 specialist-disk —— 我做"是否要清理"的决策，他做定位）
     • 应用业务逻辑日志解读（coordinator 直接 query_logql）
+capabilities:
+  - id: service_operations
+    description: Diagnose service operation state and prepare reviewed recovery actions.
+    tools: [get_edge_summary, get_host_processes, get_host_load, host_bash, query_promql, query_logql, host_restart_service]
+    max_tool_calls: 12
+can_delegate: true
 tools:
   - query_knowledge
   - host_bash

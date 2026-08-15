@@ -212,6 +212,8 @@ func (s *Service) CreateSession(ctx context.Context, caller Caller, in CreateSes
 		UserID:            caller.UserID,
 		Title:             title,
 		RelatedIncidentID: in.RelatedIncidentID,
+		Initiator:         model.SessionInitiatorUser,
+		Audience:          model.SessionAudienceUser,
 		CreatedAt:         time.Now().UTC(),
 		UpdatedAt:         time.Now().UTC(),
 	}

@@ -72,6 +72,15 @@ func TestSpawnWorker_Sync(t *testing.T) {
 	if row.UserID != 7 {
 		t.Errorf("row.UserID = %d, want 7 (inherited from parent)", row.UserID)
 	}
+	if row.RootSessionID == nil || *row.RootSessionID != parentID {
+		t.Errorf("row.RootSessionID = %v, want %q", row.RootSessionID, parentID)
+	}
+	if row.OwnerAgentID == nil || *row.OwnerAgentID != model.DefaultSessionOwnerAgent {
+		t.Errorf("row.OwnerAgentID = %v, want default", row.OwnerAgentID)
+	}
+	if row.Initiator != model.SessionInitiatorAgent || row.Audience != model.SessionAudienceInternal {
+		t.Errorf("row session boundary = initiator=%q audience=%q", row.Initiator, row.Audience)
+	}
 
 	// ListByParent surfaces the worker session under the parent.
 	kids, err := store.ListByParent(context.Background(), parentID)
@@ -427,250 +436,53 @@ func TestFilterToolsForAgent(t *testing.T) {
 	}
 }
 
-func TestFilterCoordinatorToolsForIntent_HidesTopologyAndHostForPureLogs(t *testing.T) {
-	bag := []basetool.BaseTool{
-		&fakeTool{name: "query_logql", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_traceql", schema: `{"type":"object"}`},
-		&fakeTool{name: "get_topology", schema: `{"type":"object"}`},
-		&fakeTool{name: "host_bash", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_devices", schema: `{"type":"object"}`},
-	}
-	out := filterCoordinatorToolsForIntent(bag, "查最近 30 分钟 Loki 错误日志", true)
-	names := toolNamesForTest(t, out)
-	if !containsName(names, "query_logql") {
-		t.Fatalf("query_logql should remain visible: %v", names)
-	}
-	if containsName(names, "query_traceql") || containsName(names, "get_topology") || containsName(names, "host_bash") || !containsName(names, "query_devices") {
-		t.Fatalf("pure log intent should keep device resolution but hide unrelated detours, got %v", names)
-	}
-}
-
-func TestFilterCoordinatorToolsForIntent_KeepsDeviceResolutionForPureTraces(t *testing.T) {
-	bag := []basetool.BaseTool{
-		&fakeTool{name: "query_logql", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_traceql", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_devices", schema: `{"type":"object"}`},
-		&fakeTool{name: "get_topology", schema: `{"type":"object"}`},
-	}
-	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "查询 VM-4-17-ubuntu 最近 1 小时的慢链路", true))
-	if !containsName(names, "query_traceql") || !containsName(names, "query_devices") {
-		t.Fatalf("trace intent should keep trace query and device resolution, got %v", names)
-	}
-	if containsName(names, "query_logql") || containsName(names, "get_topology") {
-		t.Fatalf("trace intent should hide unrelated tools, got %v", names)
-	}
-}
-
-func TestFilterCoordinatorToolsForIntent_NetworkInventoryUsesProgressiveDiscovery(t *testing.T) {
-	bag := []basetool.BaseTool{
-		&fakeTool{name: "ToolSearch", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_network_devices", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_network_interfaces", schema: `{"type":"object"}`},
-		&fakeTool{name: "get_network_neighbors", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_devices", schema: `{"type":"object"}`},
-		&fakeTool{name: "host_bash", schema: `{"type":"object"}`},
-	}
-	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "列出 SNMP 已验证的交换机，并查看它们与主机的连接关系", true))
-	for _, want := range []string{"ToolSearch", "query_network_devices", "query_network_interfaces", "get_network_neighbors"} {
-		if !containsName(names, want) {
-			t.Fatalf("network inventory intent should keep %s, got %v", want, names)
-		}
-	}
-	for _, hidden := range []string{"query_devices", "host_bash"} {
-		if containsName(names, hidden) {
-			t.Fatalf("network inventory intent should hide %s, got %v", hidden, names)
-		}
-	}
-}
-
-func TestFilterCoordinatorToolsForIntent_PacketCaptureKeepsCaptureTool(t *testing.T) {
-	bag := []basetool.BaseTool{
-		&fakeTool{name: "ToolSearch", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_devices", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_network_interfaces", schema: `{"type":"object"}`},
-		&fakeTool{name: "capture_pcap", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_network_devices", schema: `{"type":"object"}`},
-		&fakeTool{name: "host_bash", schema: `{"type":"object"}`},
-	}
-	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "Start a 1 second packet capture on device_id 1 interface eth0", true))
-	for _, want := range []string{"ToolSearch", "query_devices", "query_network_interfaces", "capture_pcap"} {
-		if !containsName(names, want) {
-			t.Fatalf("packet capture intent should keep %s, got %v", want, names)
-		}
-	}
-	for _, hidden := range []string{"query_network_devices", "host_bash"} {
-		if containsName(names, hidden) {
-			t.Fatalf("packet capture intent should hide %s, got %v", hidden, names)
-		}
-	}
-}
-
-func TestFilterCoordinatorToolsForIntent_KeepsExplicitTopologyOrHost(t *testing.T) {
-	bag := []basetool.BaseTool{
-		&fakeTool{name: "query_traceql", schema: `{"type":"object"}`},
-		&fakeTool{name: "get_topology", schema: `{"type":"object"}`},
-		&fakeTool{name: "host_bash", schema: `{"type":"object"}`},
-	}
-	topologyNames := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "trace 和 topology 一起看部署信息", true))
-	if !containsName(topologyNames, "get_topology") || containsName(topologyNames, "host_bash") {
-		t.Fatalf("topology intent should keep get_topology but hide host_bash, got %v", topologyNames)
-	}
-	hostNames := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "查 device_id=1 的 journalctl 日志", true))
-	if containsName(hostNames, "get_topology") || !containsName(hostNames, "host_bash") {
-		t.Fatalf("host intent should keep host_bash but hide get_topology, got %v", hostNames)
-	}
-}
-
-func TestFilterCoordinatorToolsForIntent_KeepsHostBashForExplicitDockerRead(t *testing.T) {
-	bag := []basetool.BaseTool{
-		&fakeTool{name: "query_knowledge", schema: `{"type":"object"}`},
-		&fakeTool{name: "get_topology", schema: `{"type":"object"}`},
-		&fakeTool{name: "host_bash", schema: `{"type":"object"}`},
-	}
-	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "在设备 1 上执行只读命令 docker images，只返回前 3 行", true))
-	if !containsName(names, "host_bash") {
-		t.Fatalf("explicit docker command should keep host_bash, got %v", names)
-	}
-	if containsName(names, "get_topology") {
-		t.Fatalf("explicit docker command should not add topology detour, got %v", names)
-	}
-}
-
-func TestFilterCoordinatorToolsForIntent_HonorsNegativeTopologyIntent(t *testing.T) {
-	bag := []basetool.BaseTool{
-		&fakeTool{name: "query_traceql", schema: `{"type":"object"}`},
-		&fakeTool{name: "get_topology", schema: `{"type":"object"}`},
-	}
-	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "列出最近 1 小时最新 trace，不要先查拓扑", true))
-	if !containsName(names, "query_traceql") || containsName(names, "get_topology") {
-		t.Fatalf("negative topology intent should hide get_topology, got %v", names)
-	}
-}
-
-func TestFilterCoordinatorToolsForIntent_NarrowsDirectReadIntents(t *testing.T) {
-	bag := []basetool.BaseTool{
-		&fakeTool{name: "query_change_events", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_incidents", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_alert_rules", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_knowledge", schema: `{"type":"object"}`},
-		&fakeTool{name: "get_topology", schema: `{"type":"object"}`},
-		&fakeTool{name: "analyze_database_status", schema: `{"type":"object"}`},
-		&fakeTool{name: "list_database_sources", schema: `{"type":"object"}`},
-	}
-	changeNames := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "查最近 24 小时配置或发布变更事件", true))
-	if !containsName(changeNames, "query_change_events") || containsName(changeNames, "query_incidents") ||
-		containsName(changeNames, "query_alert_rules") || containsName(changeNames, "query_knowledge") || containsName(changeNames, "get_topology") {
-		t.Fatalf("change-event intent should keep query_change_events and hide detours, got %v", changeNames)
-	}
-	dbNames := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "分析数据库当前状态和慢查询", true))
-	if !containsName(dbNames, "analyze_database_status") || containsName(dbNames, "list_database_sources") {
-		t.Fatalf("db health intent should prefer analyze_database_status, got %v", dbNames)
-	}
-	kbNames := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "知识库里有没有 trace 采集或 Tempo 排查的文档？列出最相关结果。", true))
-	if !containsName(kbNames, "query_knowledge") || containsName(kbNames, "AgentTool") || containsName(kbNames, "get_topology") {
-		t.Fatalf("knowledge lookup should keep query_knowledge only, got %v", kbNames)
-	}
-	topologyNames := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "查看当前 fleet/deployment facts：设备数、manager 版本、Prometheus/Loki/Tempo/Grafana 配置。", true))
-	if !containsName(topologyNames, "get_topology") || containsName(topologyNames, "query_knowledge") || containsName(topologyNames, "analyze_database_status") {
-		t.Fatalf("topology facts should keep get_topology only, got %v", topologyNames)
-	}
-}
-
-func TestFilterCoordinatorToolsForIntent_SourceSearchPrefersGrep(t *testing.T) {
-	bag := []basetool.BaseTool{
-		&fakeTool{name: "grep_source", schema: `{"type":"object"}`},
-		&fakeTool{name: "list_repo_sources", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_knowledge", schema: `{"type":"object"}`},
-	}
-	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "在已接入源码里搜索 query_traceql 相关实现", true))
-	if !containsName(names, "grep_source") || containsName(names, "list_repo_sources") {
-		t.Fatalf("source search should keep grep_source and hide repo-list detour, got %v", names)
-	}
-}
-
-func TestFilterCoordinatorToolsForIntent_SourceListKeepsRepoList(t *testing.T) {
-	bag := []basetool.BaseTool{
-		&fakeTool{name: "grep_source", schema: `{"type":"object"}`},
-		&fakeTool{name: "list_repo_sources", schema: `{"type":"object"}`},
-	}
-	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "列出已经接入的代码仓库 source", true))
-	if !containsName(names, "list_repo_sources") {
-		t.Fatalf("source list should keep list_repo_sources, got %v", names)
-	}
-}
-
-func TestFilterCoordinatorToolsForIntent_MetricIntentHidesTopology(t *testing.T) {
-	bag := []basetool.BaseTool{
-		&fakeTool{name: "query_promql", schema: `{"type":"object"}`},
-		&fakeTool{name: "list_metric_catalog", schema: `{"type":"object"}`},
-		&fakeTool{name: "rank_edges", schema: `{"type":"object"}`},
-		&fakeTool{name: "find_outlier_edges", schema: `{"type":"object"}`},
-		&fakeTool{name: "get_topology", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_devices", schema: `{"type":"object"}`},
-	}
-	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "查最近 1 小时磁盘使用率最高的挂载点", true))
-	if !containsName(names, "query_promql") || !containsName(names, "list_metric_catalog") || !containsName(names, "rank_edges") {
-		t.Fatalf("metric intent should keep metric tools, got %v", names)
-	}
-	if containsName(names, "get_topology") || containsName(names, "query_devices") {
-		t.Fatalf("metric-only intent should hide topology/device detours, got %v", names)
-	}
-}
-
-func TestFilterCoordinatorToolsForIntent_ComplexIntentKeepsControlToolsOnly(t *testing.T) {
+func TestFilterToolsForAgent_AllowsDeclaredWorkerDelegationOnly(t *testing.T) {
 	bag := []basetool.BaseTool{
 		&fakeTool{name: "AgentTool", schema: `{"type":"object"}`},
-		&fakeTool{name: "ToolSearch", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_promql", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_logql", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_traceql", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_incidents", schema: `{"type":"object"}`},
-		&fakeTool{name: "query_change_events", schema: `{"type":"object"}`},
-		&fakeTool{name: "get_topology", schema: `{"type":"object"}`},
-		&fakeTool{name: "host_bash", schema: `{"type":"object"}`},
+		&fakeTool{name: "SendMessage", schema: `{"type":"object"}`},
+		&fakeTool{name: "TaskStop", schema: `{"type":"object"}`},
 	}
-	cases := []string{
-		"给整个集群做健康检查：设备、告警、CPU、内存、磁盘、trace 错误都覆盖，最后给风险排序。",
-		"最近 24 小时的变更是否能解释当前告警？请关联 incidents、change events 和指标。",
-		"判断当前告警里哪些可能是噪声，哪些是真问题；给每条的证据和置信度。",
-		"用拓扑解释当前 incident 的传播路径：源头、下游影响、需要继续验证的节点。",
-		"基于当前告警和健康数据草拟一份交接报告，包含结论、证据、风险、下一步。",
+	delegating := filteredToolNames(t, filterToolsForAgent(bag, &Agent{CanDelegate: true}, false))
+	if len(delegating) != 1 || delegating[0] != "AgentTool" {
+		t.Fatalf("delegating worker tools = %v, want [AgentTool]", delegating)
 	}
-	for _, tc := range cases {
-		names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, tc, true))
-		for _, want := range []string{"AgentTool", "ToolSearch"} {
-			if !containsName(names, want) {
-				t.Fatalf("complex coordinator intent %q should keep %s, got %v", tc, want, names)
-			}
-		}
-		for _, hidden := range []string{"query_promql", "query_logql", "query_traceql", "query_incidents", "query_change_events", "get_topology", "host_bash"} {
-			if containsName(names, hidden) {
-				t.Fatalf("complex coordinator intent %q should hide direct tool %s, got %v", tc, hidden, names)
-			}
-		}
+	nonDelegating := filteredToolNames(t, filterToolsForAgent(bag, &Agent{}, false))
+	if len(nonDelegating) != 0 {
+		t.Fatalf("non-delegating worker tools = %v, want none", nonDelegating)
 	}
 }
 
-func toolNamesForTest(t *testing.T, bag []basetool.BaseTool) []string {
+func TestSpawnWorkerRejectsThirdDelegationLevel(t *testing.T) {
+	rootID := "root"
+	workerID := "worker-1"
+	owner := model.DefaultSessionOwnerAgent
+	store := newMemSessions(&model.Session{ID: rootID, UserID: 7, RootSessionID: &rootID, OwnerAgentID: &owner})
+	for _, session := range []*model.Session{
+		{ID: workerID, UserID: 7, RootSessionID: &rootID, ParentSessionID: &rootID, OwnerAgentID: &owner},
+		{ID: "worker-2", UserID: 7, RootSessionID: &rootID, ParentSessionID: &workerID, OwnerAgentID: &owner},
+	} {
+		if err := store.CreateSession(context.Background(), session); err != nil {
+			t.Fatalf("seed session: %v", err)
+		}
+	}
+	rt := newRuntimeWithStore(t, "specialist-disk", newScriptedChatModel(), nil, store)
+	_, err := rt.SpawnWorker(context.Background(), SpawnRequest{AgentName: "specialist-disk", Prompt: "delegate again", ParentSession: "worker-2"})
+	if err == nil || !strings.Contains(err.Error(), "delegation depth exceeded") {
+		t.Fatalf("SpawnWorker error = %v, want depth rejection", err)
+	}
+}
+
+func filteredToolNames(t *testing.T, tools []basetool.BaseTool) []string {
 	t.Helper()
-	names := make([]string, 0, len(bag))
-	for _, tool := range bag {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
 		info, err := tool.Info(context.Background())
 		if err != nil {
-			t.Fatalf("Info: %v", err)
+			t.Fatalf("tool info: %v", err)
 		}
 		names = append(names, info.Name)
 	}
 	return names
-}
-
-func containsName(names []string, want string) bool {
-	for _, name := range names {
-		if name == want {
-			return true
-		}
-	}
-	return false
 }
 
 func TestSpawnWorker_DoesNotForceKnowledgePrologue(t *testing.T) {
@@ -814,6 +626,8 @@ func newRuntimeWithStore(t *testing.T, name string, cm *scriptedChatModel, toolB
 func newSeededRuntimeStore(t *testing.T, userID uint64) (*memSessions, string) {
 	t.Helper()
 	parentID := "parent-sess-1"
-	store := newMemSessions(&model.Session{ID: parentID, UserID: userID, Title: "parent"})
+	rootID := parentID
+	owner := model.DefaultSessionOwnerAgent
+	store := newMemSessions(&model.Session{ID: parentID, UserID: userID, Title: "parent", RootSessionID: &rootID, OwnerAgentID: &owner})
 	return store, parentID
 }

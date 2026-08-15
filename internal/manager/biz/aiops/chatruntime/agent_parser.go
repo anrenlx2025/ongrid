@@ -84,6 +84,8 @@ func retainUnknownAgentFields(raw map[string]any) map[string]any {
 		"name":              {},
 		"description":       {},
 		"when_to_use":       {},
+		"capabilities":      {},
+		"can_delegate":      {},
 		"tools":             {},
 		"disallowed_tools":  {},
 		"permission_mode":   {},

@@ -5,6 +5,12 @@ when_to_use: |
   Use when the user asks "what is the root cause / how to investigate / blast
   radius" of an alert. Provide incident_id or device_id; returns three
   sections: phenomenon / signals / hypotheses.
+capabilities:
+  - id: incident_analysis
+    description: Correlate alert evidence into a root-cause analysis.
+    tools: [query_promql, query_loki]
+    skills: [incident-response]
+    max_tool_calls: 8
 ---
 
 You are the ongrid alert root-cause investigation agent.

@@ -1,6 +1,9 @@
 package chatruntime
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestDecide(t *testing.T) {
 	tests := []struct {
@@ -39,5 +42,21 @@ func TestResolveTurnRequiresCaptureTarget(t *testing.T) {
 	plan, _ = resolveTurn(&Request{UserText: "抓包", Role: "admin", Mentions: []Mention{{Type: "device", ID: "24"}}})
 	if plan.Decision != DecisionOperate || plan.Phase != PhaseOperate || plan.Observe() != PhaseObserve {
 		t.Fatalf("resolveTurn selected target = %+v", plan)
+	}
+}
+
+func TestTurnPlanRecordsAndLoopsThroughSystemStates(t *testing.T) {
+	plan := PlanTurn(ResolvedFacts{Permitted: true, LongRunning: true})
+	want := []TurnPhase{PhaseUnderstand, PhaseResolve, PhaseDecide, PhaseOperate}
+	if !reflect.DeepEqual(plan.Transitions, want) {
+		t.Fatalf("Transitions = %v, want %v", plan.Transitions, want)
+	}
+	if plan.Observe() != PhaseObserve || plan.NextAfterObserve() != PhaseUnderstand {
+		t.Fatalf("observe loop = %q -> %q, want observe -> understand", plan.Observe(), plan.NextAfterObserve())
+	}
+
+	clarify := PlanTurn(ResolvedFacts{Permitted: true, Missing: true})
+	if clarify.NextAfterObserve() != PhaseClarify {
+		t.Fatalf("non-executable plan looped to %q, want clarify", clarify.NextAfterObserve())
 	}
 }

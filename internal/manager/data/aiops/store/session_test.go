@@ -59,6 +59,15 @@ func TestSessionRepoRoundTrip(t *testing.T) {
 	if got.Title != "hello" || got.UserID != 1 {
 		t.Errorf("round-trip mismatch: %+v", got)
 	}
+	if got.RootSessionID == nil || *got.RootSessionID != s.ID {
+		t.Errorf("RootSessionID = %v, want %q", got.RootSessionID, s.ID)
+	}
+	if got.OwnerAgentID == nil || *got.OwnerAgentID != model.DefaultSessionOwnerAgent {
+		t.Errorf("OwnerAgentID = %v, want %q", got.OwnerAgentID, model.DefaultSessionOwnerAgent)
+	}
+	if got.Initiator != model.SessionInitiatorUser || got.Audience != model.SessionAudienceUser {
+		t.Errorf("session defaults = initiator=%q audience=%q", got.Initiator, got.Audience)
+	}
 
 	list, err := repo.ListSessions(ctx, 1, 10, 0, nil)
 	if err != nil {
@@ -241,5 +250,29 @@ func TestListByParent(t *testing.T) {
 	}
 	if empty == nil || len(empty) != 0 {
 		t.Errorf("empty parentID: want empty non-nil slice, got %v", empty)
+	}
+}
+
+func TestListSessionsHidesInternalWork(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	userSession := &model.Session{UserID: 42, Title: "user", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	internalSession := &model.Session{
+		UserID: 42, Title: "worker", Kind: model.SessionKindWork,
+		Initiator: model.SessionInitiatorAgent, Audience: model.SessionAudienceInternal,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := repo.CreateSession(ctx, userSession); err != nil {
+		t.Fatalf("CreateSession user: %v", err)
+	}
+	if err := repo.CreateSession(ctx, internalSession); err != nil {
+		t.Fatalf("CreateSession internal: %v", err)
+	}
+	list, err := repo.ListSessions(ctx, 42, 10, 0, nil)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != userSession.ID {
+		t.Errorf("ListSessions = %+v, want only user session %q", list, userSession.ID)
 	}
 }

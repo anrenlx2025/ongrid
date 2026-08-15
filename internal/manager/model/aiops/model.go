@@ -47,10 +47,25 @@ const (
 // fan out from a parent session id in O(log N), and audit queries can
 // filter by persona.
 type Session struct {
-	ID              string  `gorm:"primaryKey;type:char(36);column:id"`
-	UserID          uint64  `gorm:"index;not null;column:user_id"`
-	Title           string  `gorm:"size:256;not null"`
-	ScopeJSON       *string `gorm:"type:text;column:scope_json"`
+	ID        string  `gorm:"primaryKey;type:char(36);column:id"`
+	UserID    uint64  `gorm:"index;not null;column:user_id"`
+	Title     string  `gorm:"size:256;not null"`
+	ScopeJSON *string `gorm:"type:text;column:scope_json"`
+	// RootSessionID identifies the user or system task that owns this
+	// transcript. Top-level sessions point at themselves after creation;
+	// work sessions retain the same root while parent_session_id captures
+	// the immediate delegation edge.
+	RootSessionID *string `gorm:"size:36;index;column:root_session_id"`
+	// Initiator distinguishes user conversations from agent-, alert-, and
+	// scheduler-created work. It is audit metadata, not an authorization
+	// bypass.
+	Initiator string `gorm:"size:16;not null;default:'user';column:initiator"`
+	// Audience controls transcript visibility. Internal work sessions stay
+	// out of the primary chat list while preserving their evidence chain.
+	Audience string `gorm:"size:16;not null;default:'user';column:audience"`
+	// OwnerAgentID is the agent accountable for closing this session's
+	// goal. AgentID remains the concrete persona that executed a worker.
+	OwnerAgentID    *string `gorm:"size:128;index;column:owner_agent_id"`
 	AgentID         *string `gorm:"size:128;index;column:agent_id"`
 	ParentSessionID *string `gorm:"size:36;index;column:parent_session_id"`
 	Background      bool    `gorm:"not null;default:false;column:background"`
@@ -59,22 +74,35 @@ type Session struct {
 	// Nullable: ad-hoc chats from the home page have no incident. Indexed
 	// so the per-incident agent-timeline panel can list its sessions in
 	// O(log N).
-	RelatedIncidentID *uint64    `gorm:"index;column:related_incident_id"`
+	RelatedIncidentID *uint64 `gorm:"index;column:related_incident_id"`
 	// Kind discriminates a user-initiated conversation from a system-
 	// spawned investigation transcript. The /chat listing filters to
 	// kind='user' so auto-spawned investigation sessions (one per
 	// alert RCA) don't drown out the operator's own chats. The
 	// `investigation_reports.audit_session_id` FK points at sessions
 	// with kind='investigation'.
-	Kind              string     `gorm:"size:16;not null;default:'user';column:kind;index:idx_session_kind_created,priority:1"`
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	ClosedAt          *time.Time `gorm:"column:closed_at"`
+	Kind      string `gorm:"size:16;not null;default:'user';column:kind;index:idx_session_kind_created,priority:1"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	ClosedAt  *time.Time `gorm:"column:closed_at"`
 }
 
 const (
+	// DefaultSessionOwnerAgent owns ordinary product conversations. A worker
+	// may execute them, but it never becomes the user-facing owner.
+	DefaultSessionOwnerAgent = "default"
+
 	SessionKindUser          = "user"
 	SessionKindInvestigation = "investigation"
+	SessionKindWork          = "work"
+
+	SessionInitiatorUser      = "user"
+	SessionInitiatorAgent     = "agent"
+	SessionInitiatorAlert     = "alert"
+	SessionInitiatorScheduler = "scheduler"
+
+	SessionAudienceUser     = "user"
+	SessionAudienceInternal = "internal"
 )
 
 // TableName pins the SQLite table name.
@@ -87,6 +115,20 @@ func (s *Session) BeforeCreate(*gorm.DB) error {
 	if s.ID == "" {
 		s.ID = uuid.NewString()
 	}
+	if s.RootSessionID == nil || *s.RootSessionID == "" {
+		rootID := s.ID
+		s.RootSessionID = &rootID
+	}
+	if s.Initiator == "" {
+		s.Initiator = SessionInitiatorUser
+	}
+	if s.Audience == "" {
+		s.Audience = SessionAudienceUser
+	}
+	if s.OwnerAgentID == nil || *s.OwnerAgentID == "" {
+		owner := DefaultSessionOwnerAgent
+		s.OwnerAgentID = &owner
+	}
 	return nil
 }
 
@@ -97,12 +139,12 @@ func (s *Session) BeforeCreate(*gorm.DB) error {
 // without conflating empty-string with absent. ToolCallID / ToolName are
 // non-nil on role=tool messages.
 type Message struct {
-	ID               string  `gorm:"primaryKey;type:char(36);column:id"`
-	SessionID        string  `gorm:"index:idx_session_msg,priority:1;type:char(36);not null;column:session_id"`
-	Role             string  `gorm:"size:16;not null;check:role IN ('user','assistant','tool','system')"`
-	Content          *string `gorm:"type:text"`
-	ToolCallID       *string `gorm:"size:64;column:tool_call_id"`
-	ToolName         *string `gorm:"size:64;column:tool_name"`
+	ID         string  `gorm:"primaryKey;type:char(36);column:id"`
+	SessionID  string  `gorm:"index:idx_session_msg,priority:1;type:char(36);not null;column:session_id"`
+	Role       string  `gorm:"size:16;not null;check:role IN ('user','assistant','tool','system')"`
+	Content    *string `gorm:"type:text"`
+	ToolCallID *string `gorm:"size:64;column:tool_call_id"`
+	ToolName   *string `gorm:"size:64;column:tool_name"`
 	// Model is the LLM model id that produced this message — only set on
 	// role=assistant rows. Lets the SPA show per-message provenance ("the
 	// answer above came from glm-4-plus; the answer below from opus") and

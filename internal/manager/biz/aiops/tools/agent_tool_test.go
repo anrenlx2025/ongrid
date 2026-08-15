@@ -15,15 +15,16 @@ import (
 // SendMessage / TaskStop tests. It records the last spawn / send /
 // stop call so assertions can verify what the tool delegated.
 type fakeSpawner struct {
-	mu        sync.Mutex
-	lastSpawn SpawnWorkerRequest
-	spawnRet  *WorkerHandle
-	spawnErr  error
-	lastSend  struct{ id, msg string }
-	sendErr   error
-	lastStop  string
-	stopErr   error
-	workers   map[string]*WorkerHandle
+	mu         sync.Mutex
+	lastSpawn  SpawnWorkerRequest
+	spawnCalls int
+	spawnRet   *WorkerHandle
+	spawnErr   error
+	lastSend   struct{ id, msg string }
+	sendErr    error
+	lastStop   string
+	stopErr    error
+	workers    map[string]*WorkerHandle
 }
 
 func newFakeSpawner() *fakeSpawner {
@@ -34,6 +35,7 @@ func (f *fakeSpawner) SpawnWorker(_ context.Context, req SpawnWorkerRequest) (*W
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastSpawn = req
+	f.spawnCalls++
 	if f.spawnErr != nil {
 		return nil, f.spawnErr
 	}
@@ -141,6 +143,22 @@ func TestAgentTool_Sync_HappyPath(t *testing.T) {
 	}
 }
 
+func TestAgentTool_DedupeDoesNotCrossSessions(t *testing.T) {
+	sp := newFakeSpawner()
+	sp.spawnRet = &WorkerHandle{ID: "agent-dedupe", Status: "completed", Result: "ok"}
+	tool := NewAgentTool(sp, fakeSubagentRegistry{names: map[string]bool{"general-purpose": true}}, nil)
+	args := `{"description":"test","subagent_type":"general-purpose","prompt":"same brief"}`
+	for _, sessionID := range []string{"session-a", "session-b"} {
+		ctx := basetool.WithSessionID(context.Background(), sessionID)
+		if _, err := tool.InvokableRun(ctx, args); err != nil {
+			t.Fatalf("InvokableRun(%s): %v", sessionID, err)
+		}
+	}
+	if sp.spawnCalls != 2 {
+		t.Fatalf("spawn calls = %d, want 2; dedupe must stay in one session", sp.spawnCalls)
+	}
+}
+
 // TestAgentTool_IgnoresBackgroundFlag — the schema no longer exposes
 // background; even when the LLM tries to pass it (older sessions /
 // model bias), we force sync and ignore the field. This locks in the
@@ -181,6 +199,16 @@ func TestAgentTool_RegistryRejectsUnknown(t *testing.T) {
 	}
 	if sp.lastSpawn.AgentName != "" {
 		t.Errorf("spawner shouldn't have been called")
+	}
+}
+
+func TestAgentTool_RejectsReservedAgentTypes(t *testing.T) {
+	tool := NewAgentTool(newFakeSpawner(), nil, nil)
+	for _, name := range []string{"default", "reviewer"} {
+		_, err := tool.InvokableRun(context.Background(), `{"description":"test","subagent_type":"`+name+`","prompt":"brief"}`)
+		if err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Fatalf("InvokableRun(%s) error = %v, want reserved rejection", name, err)
+		}
 	}
 }
 

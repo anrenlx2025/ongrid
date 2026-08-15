@@ -105,29 +105,6 @@ func TestToolSearch_SelectMultiple(t *testing.T) {
 	}
 }
 
-func TestToolSearch_SelectRoutingStubReturnsCallableTool(t *testing.T) {
-	route := &RedirectStub{ToolName: "query_promql", Specialist: "specialist-sre", Reason: "PromQL 查询"}
-	bag := &stubBagProvider{all: []basetool.BaseTool{
-		newStub(ToolSearchToolName, "fetch tool schemas"),
-		newStub("AgentTool", "dispatch a specialist"),
-		route,
-	}}
-	ts := NewToolSearchTool(bag, nil)
-
-	ctx := basetool.WithFilteredTools(context.Background(), bag.all)
-	out, err := ts.InvokableRun(ctx, `{"query":"select:query_promql"}`)
-	if err != nil {
-		t.Fatalf("InvokableRun: %v", err)
-	}
-	resp := decodeToolSearchResp(t, out)
-	if len(resp.Tools) != 1 || resp.Tools[0].Name != "query_promql" {
-		t.Fatalf("expected callable PromQL routing stub, got %+v", resp.Tools)
-	}
-	if !strings.Contains(resp.Tools[0].WhenToUse, "AgentTool") {
-		t.Fatalf("routing stub should direct the next call to AgentTool, got %q", resp.Tools[0].WhenToUse)
-	}
-}
-
 // TestToolSearch_KeywordMatch tests substring keyword matching across
 // name + description + when_to_use.
 func TestToolSearch_KeywordMatch(t *testing.T) {

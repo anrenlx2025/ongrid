@@ -14,6 +14,12 @@ when_to_use: |
     • 网络层细节（OVS / iptables / netns 用 specialist-network）
     • 磁盘 / 文件系统底层排查（用 specialist-disk）
     • 一条 incident 端到端走 metric+log+trace（用 incident-investigator —— 它做关联诊断更深，我做趋势 / 优先级判断）
+capabilities:
+  - id: sre_assessment
+    description: Assess incidents, observability signals, SLO risk, and fleet outliers.
+    tools: [query_incidents, get_incident_detail, correlate_incident, query_promql, query_logql, rank_edges, find_outlier_edges]
+    max_tool_calls: 12
+can_delegate: true
 tools:
   - query_knowledge
   - correlate_incident

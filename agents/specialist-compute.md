@@ -16,6 +16,12 @@ when_to_use: |
     • 网络层（用 specialist-network）
     • 单条 incident 端到端做关联（用 incident-investigator）
     • 趋势 / SLO / 告警优先级（用 specialist-sre）
+capabilities:
+  - id: compute_diagnosis
+    description: Diagnose CPU, memory, load, process, and kernel resource pressure.
+    tools: [get_host_load, get_host_processes, rank_edges, find_outlier_edges, query_promql, host_bash]
+    max_tool_calls: 12
+can_delegate: true
 tools:
   - query_knowledge
   - get_host_load

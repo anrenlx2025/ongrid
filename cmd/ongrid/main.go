@@ -3604,69 +3604,10 @@ func loadBootstrapRegistries(log *slog.Logger) (*aiopschatruntime.SkillRegistry,
 // ONGRID_AGENT_KERNEL=graph. Returns (nil, err) on failure so the
 // caller can fall back to the legacy kernel without a panic.
 //
-// coordinatorExtraToolNames are policy exceptions that are intentionally
-// coordinator-owned even though they are not registry core tools in every
-// deployment. The rest of the coordinator whitelist is derived from the
-// registered ToolBag core tier so new core read/query tools do not need a
-// second hard-coded entry here.
-var coordinatorExtraToolNames = []string{
-	// Lightweight direct reads added by this routing fix: cheap snapshots /
-	// rankings should not bounce through AgentTool.
-	"host_bash",
-	"rank_edges",
-	"find_outlier_edges",
-	"query_alert_rules",
-	// Legacy / optional tools that are appended after the initial registry bag,
-	// or still live outside the BaseTool registry in some deployments.
-	aiopstools.ToolNameExecuteK8sAction,
-	"search_web",
-	// Approval/output primitives: these do not execute infrastructure changes
-	// without a human approval or an explicit pre-configured channel/page sink.
-	"cloud_bash",
-	"install_skill",
-	"serve_page",
-	aiopstools.ToolNameSendNotification,
-	aiopstools.ToolNameSendIMMessage,
-	// Network inventory remains specialty/schema-redacted. These entries only
-	// let explicit network-asset requests discover it through ToolSearch.
-	aiopstools.ToolSearchToolName,
-	aiopstools.ToolNameQueryNetworkDevices,
-	aiopstools.ToolNameQueryNetworkInterfaces,
-	aiopstools.ToolNameGetNetworkNeighbors,
-	aiopstools.ToolNameCapturePCAP,
-}
-
 // Keep the default persona aligned with graph.DefaultConfig's hard ceiling.
 // A persona override must never silently reopen a loop budget that the graph
 // intentionally constrained for every other session.
 const defaultCoordinatorMaxTurns = 12
-
-func buildCoordinatorToolNames(registered []aiopstoolsbase.BaseTool) []string {
-	names := aiopstools.CoreToolNames(registered)
-	return appendUniqueToolNames(names, coordinatorExtraToolNames...)
-}
-
-func appendUniqueToolNames(names []string, extra ...string) []string {
-	seen := make(map[string]bool, len(names)+len(extra))
-	out := make([]string, 0, len(names)+len(extra))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		out = append(out, name)
-	}
-	for _, name := range extra {
-		name = strings.TrimSpace(name)
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		out = append(out, name)
-	}
-	return out
-}
 
 // Heavy on parameters because every dep flows through this site
 // exactly once — the alternative (build the runtime inline in main)
@@ -3842,34 +3783,22 @@ func buildAIOpsRuntime(
 	//    the references handed in here and continue with the chat-wiring
 	//    work below.
 
-	// Register the virtual "default" persona — the top-level chat
-	// coordinator. **Curated toolbag** (not full bag): the coordinator
-	// owns cheap read-only fleet facts / rankings / snapshots, while
-	// multi-step diagnosis and domain-specific RCA still go through
-	// AgentTool specialists. This keeps "CPU top 20" fast and cheap
-	// without letting the coordinator turn into a full deep-dive worker.
-	// AgentTool / SendMessage / TaskStop survive automatically via the
-	// coordinatorOnlyTools carve-out (see filterToolsForAgent in
-	// internal/manager/biz/aiops/chatruntime/worker.go).
-	//
-	// Coordinator whitelist:
-	//   - registered core tools from ToolBag metadata — query_* observability,
-	//     knowledge/code lookup, topology, incident lists, config draft tools,
-	//     Kubernetes read-only tools, and output primitives that advertise
-	//     themselves as always-loaded core
-	//   - coordinatorExtraToolNames — narrow policy exceptions that are safe or
-	//     intentionally cheap enough to keep on the coordinator even when they
-	//     are not part of the core tier in every deployment.
-	//
-	// Everything else (host file probes, mutating tools, broad deep-dive
-	// diagnostics, etc.) should be reached via AgentTool dispatch into a
-	// specialist unless it is registered as core or listed as a narrow
-	// coordinator-owned exception above.
+	// Register the virtual "default" persona — the user-facing root agent.
+	// An empty Tools whitelist inherits the complete tool bag; permission
+	// decorators and ToolSearch govern execution and progressive disclosure.
+	// Specialists improve depth but are never a prerequisite for closure.
 	agentReg.Add(&aiopschatruntime.Agent{
 		Name:        "default",
 		Description: "默认助理",
 		WhenToUse:   "首页发起的会话默认绑定它；适合任何运维 / 排查 / 知识库查询场景。",
-		Tools:       buildCoordinatorToolNames(bag.AllTools()),
+		Capabilities: []aiopschatruntime.AgentCapability{
+			{
+				ID:           "operate_and_investigate",
+				Description:  "Own the user conversation, resolve facts, execute permitted tools, and integrate expert evidence.",
+				MaxToolCalls: defaultCoordinatorMaxTurns,
+			},
+		},
+		Tools: nil,
 		// Keep the coordinator ceiling aligned with the global ReAct
 		// budget. Loop prevention belongs in graph-level guards
 		// (identical-call memo, per-tool execution caps, AgentTool
@@ -3910,31 +3839,15 @@ func buildAIOpsRuntime(
 	// param lints stay quiet across edits.
 	_ = ctx
 	_ = llmRouter
-	// Coordinator-only redirect stubs (see redirect_stub.go). They
-	// catch hallucinated tool names so the LLM gets a "use AgentTool
-	// to dispatch" hint instead of crashing the graph with
-	// "tool not found in toolsNode".
-	coordStubs := make([]aiopstoolsbase.BaseTool, 0)
-	for _, t := range aiopstools.CoordinatorRedirectStubs() {
-		// Same decorator chain as real tools so timeouts / audit
-		// behave consistently (the stub's body is trivial so the
-		// timeout is harmless, audit just records a no-op call).
-		coordStubs = append(coordStubs, aiopstoolsdec.Wrap(t, aiopstoolsdec.Deps{
-			Timeout:    5 * time.Second,
-			Limiter:    aiopstoolsdec.NewTokenBucketLimiter(0),
-			Registerer: reg,
-		}))
-	}
 	rt, err := aiopschatruntime.NewRuntime(aiopschatruntime.Config{
-		SkillRegistry:    skillReg,
-		AgentRegistry:    agentReg,
-		Sessions:         sessions,
-		ChatModel:        chatModel,
-		ToolBag:          wrapped,
-		CoordinatorStubs: coordStubs,
-		MentionResolver:  nil, // wired below if we have a searcher
-		BasePrompt:       ongridBasePrompt(),
-		HistoryLimit:     50,
+		SkillRegistry:   skillReg,
+		AgentRegistry:   agentReg,
+		Sessions:        sessions,
+		ChatModel:       chatModel,
+		ToolBag:         wrapped,
+		MentionResolver: nil, // wired below if we have a searcher
+		BasePrompt:      ongridBasePrompt(),
+		HistoryLimit:    50,
 		GraphCfg: aiopsgraph.Config{
 			Model:         cfg.OpenAI.Model,
 			Temperature:   0.1,
@@ -3985,12 +3898,12 @@ func ongridBasePrompt() string {
 ## 路由
 
 - 工具能力以本轮可见能力（动态）和每个工具的 when_to_use / schema 为准；基础 prompt 只做路由原则。不要臆造不存在的工具，工具名或参数不确定时先用 ` + bt + `ToolSearch` + bt + ` 按能力描述查找。
-- 调工具前先分类：DIRECT_READ 只查一个明确数据面；DELEGATE 是根因、影响面、处置建议、综合体检、风险评估、优先级、报告、remediation plan、容量预测、噪音过滤、跨 metric+log+trace/change/topology/host 的关联。DELEGATE 第一工具必须是 ` + bt + `AgentTool` + bt + `，不要先自己查 ` + bt + `get_topology/query_promql/query_logql/host_bash` + bt + `。
-- “按指标排序”本身才是 DIRECT_READ；若排序结果还要求目录/文件/进程/日志等主机归因或下钻，则是 DELEGATE。先用 ` + bt + `AgentTool` + bt + ` 派对应专家，不要把目录或文件占用误写成 PromQL。全局磁盘使用率排序优先 ` + bt + `rank_edges(by="disk")` + bt + `，不要手写未知的 node_filesystem 指标名。
+- 调工具前先分类：DIRECT_READ 只查一个明确数据面；INVESTIGATE 是根因、影响面、处置建议、综合体检、风险评估、优先级、报告、remediation plan、容量预测、噪音过滤、跨 metric+log+trace/change/topology/host 的关联。默认助理始终负责闭环，可直接调用本轮可见工具；需要更深证据、独立复核或并行分析时可调用 ` + bt + `AgentTool` + bt + ` 请求专家工作会话。
+- “按指标排序”本身才是 DIRECT_READ；若排序结果还要求目录/文件/进程/日志等主机归因或下钻，则进入 INVESTIGATE。默认助理可以直接下钻，也可在证据不足时请求对应专家；不要把目录或文件占用误写成 PromQL。全局磁盘使用率排序优先 ` + bt + `rank_edges(by="disk")` + bt + `，不要手写未知的 node_filesystem 指标名。
 - 单一数据源查询由默认助理直接查，不派专家：metric/PromQL→` + bt + `query_promql` + bt + `，log/LogQL→` + bt + `query_logql` + bt + `，trace/span/trace_id/慢 trace/错误 trace/TraceQL→` + bt + `query_traceql` + bt + `，incident 列表→` + bt + `query_incidents` + bt + `，告警规则列表→` + bt + `query_alert_rules` + bt + `，change/release events/审计变更→` + bt + `query_change_events` + bt + `，代码仓库列表→` + bt + `list_repo_sources` + bt + `，源码搜索/grep/函数或报错串定位→` + bt + `grep_source` + bt + `，数据库健康/连接/慢查询/复制/metric coverage→` + bt + `analyze_database_status` + bt + `，数据库源清单→` + bt + `list_database_sources` + bt + `，指定 incident 明细→` + bt + `get_incident_detail/correlate_incident` + bt + `，设备/主机清单→` + bt + `query_devices` + bt + `，设备健康快照→` + bt + `get_edge_summary/get_host_load/get_host_processes` + bt + `。
 - ` + bt + `get_topology` + bt + ` 只查 fleet/deployment facts（规模、版本、Prom/Loki/Tempo/Grafana 配置）。不要为了确认某个数据源是否可用而先调它；对应 query 工具失败时再说明配置缺口。
 - 已知 edge 主机命令或已知文件删除：直接 ` + bt + `host_bash(device_ids=[...], cmd="...")` + bt + `；读命令走只读 sandbox，写命令自动弹内置确认卡。不要为已知删除再派 AgentTool。
-- 复杂诊断、根因、影响面、处置建议、多数据源关联或预计超过 2-3 个工具步骤：第一步就用 ` + bt + `AgentTool` + bt + ` 派专家。不要把单一 metric/log/trace 查询误判成跨域任务，也不要把多数据源任务留给 coordinator 自己循环。worker 看不到本对话，prompt 必须自包含。
+- 复杂诊断、根因、影响面、处置建议、多数据源关联或预计超过 2-3 个工具步骤：默认助理先维护假设、证据和下一步；需要更深证据时可调用 ` + bt + `AgentTool` + bt + `。不要把单一 metric/log/trace 查询误判成跨域任务。专家 worker 看不到本对话，prompt 必须自包含；其结果是证据，不是对用户会话的最终答复。
 - 专家选择：网络→` + bt + `specialist-network` + bt + `；磁盘/文件系统→` + bt + `specialist-disk` + bt + `；CPU/内存/load/进程→` + bt + `specialist-compute` + bt + `；SLO/趋势/优先级→` + bt + `specialist-sre` + bt + `；服务/systemctl/journalctl/部署→` + bt + `specialist-ops` + bt + `；明确 incident_id 端到端 RCA→` + bt + `incident-investigator` + bt + `。
 - 简单 topN / 快照 / 列表不要派 AgentTool；模糊“变慢/卡了”先要时间点、影响面、已采取动作。
 
