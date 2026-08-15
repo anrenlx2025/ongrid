@@ -20,7 +20,7 @@ import { cn } from '@/lib/cn';
 import { isConfigDraftConfirmationMessage } from '@/lib/configDraftConfirmation';
 import { useI18n } from '@/i18n/locale';
 import { Button } from '@/components/ui';
-import { executeOperationAction } from '@/api/operations';
+import { executeOperationAction, getOperation, type Operation } from '@/api/operations';
 
 export type ConfigDraftResult = {
   kind: 'config_draft';
@@ -318,8 +318,49 @@ function asLegacyOperation(record: Record<string, unknown>): OperationCardData |
 function OperationCard({ operation }: { operation: OperationCardData }) {
   const { tr } = useI18n();
   const [state, setState] = useState(operation.state);
+  const [summary, setSummary] = useState(operation.summary);
+  const [detailURL, setDetailURL] = useState(operation.detailURL);
+  const [actions, setActions] = useState(operation.actions);
   const presentation = operationPresentation(state, tr);
   const [cancelling, setCancelling] = useState(false);
+  const terminal = isTerminalOperationState(state);
+
+  useEffect(() => {
+    setState(operation.state);
+    setSummary(operation.summary);
+    setDetailURL(operation.detailURL);
+    setActions(operation.actions);
+  }, [operation.id, operation.state, operation.summary, operation.detailURL, operation.actions]);
+
+  useEffect(() => {
+    if (!operation.id || terminal) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const detail = await getOperation(operation.id);
+        if (cancelled || !detail.operation) return;
+        applyOperationUpdate(detail.operation, detail.artifacts?.[0]?.url);
+      } catch {
+        // Keep the last known state. The chat history poll will still refresh
+        // appended completion messages if this point lookup is temporarily down.
+      }
+    };
+    const timer = window.setInterval(refresh, 3000);
+    void refresh();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operation.id, terminal]);
+
+  function applyOperationUpdate(updated: Operation, artifactURL?: string) {
+    if (updated.state) setState(updated.state);
+    setSummary(updated.summary || undefined);
+    if (updated.detail_url) setDetailURL(updated.detail_url);
+    else if (artifactURL) setDetailURL(artifactURL);
+    setActions(parseOperationActions(updated.actions_json));
+  }
 
   return (
     <section className="overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-900/40 text-xs">
@@ -331,23 +372,23 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
       <div className="grid gap-2 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
         <div className="min-w-0">
           <div className="truncate font-medium text-zinc-200">{operation.title}</div>
-          {operation.summary && <div className="mt-1 text-[11px] text-zinc-500">{operation.summary}</div>}
+          {summary && <div className="mt-1 text-[11px] text-zinc-500">{summary}</div>}
         </div>
-        {operation.detailURL && (
+        {detailURL && (
           <a
-            href={operation.detailURL}
+            href={detailURL}
             className="inline-flex h-8 items-center justify-center gap-1 border border-zinc-700 px-2.5 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
           >
             <ExternalLink size={13} />
             {tr('打开调查', 'Open investigation')}
           </a>
         )}
-        {operation.actions.filter((action) => action.enabled).map((action) => (
+        {actions.filter((action) => action.enabled).map((action) => (
           <Button key={action.kind} variant="ghost" disabled={cancelling || !operation.id} onClick={async () => {
             setCancelling(true);
             try {
               const updated = await executeOperationAction(operation.id, action.kind);
-              if (updated.state) setState(updated.state);
+              applyOperationUpdate(updated);
             } finally { setCancelling(false); }
           }}>
             {action.kind === 'cancel' && <X size={13} />}
@@ -357,6 +398,27 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
       </div>
     </section>
   );
+}
+
+function parseOperationActions(raw?: string): OperationCardData['actions'] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((action): action is { kind: string; label: string; enabled: boolean } =>
+      !!action &&
+      typeof action === 'object' &&
+      typeof (action as { kind?: unknown }).kind === 'string' &&
+      typeof (action as { label?: unknown }).label === 'string' &&
+      typeof (action as { enabled?: unknown }).enabled === 'boolean',
+    );
+  } catch {
+    return [];
+  }
+}
+
+function isTerminalOperationState(state: string) {
+  return state === 'succeeded' || state === 'failed' || state === 'cancelled';
 }
 
 function operationPresentation(state: string, tr: (zh: string, en: string) => string) {

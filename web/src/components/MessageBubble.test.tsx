@@ -4,10 +4,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageBubble, type ConfigDraftResult } from './MessageBubble';
 import type { ChatMessage } from '@/api/chat';
-import { executeOperationAction } from '@/api/operations';
+import { executeOperationAction, getOperation } from '@/api/operations';
 
 vi.mock('@/api/operations', () => ({
   executeOperationAction: vi.fn(),
+  getOperation: vi.fn(),
 }));
 
 afterEach(() => {
@@ -251,11 +252,13 @@ describe('MessageBubble config draft card', () => {
 
 describe('MessageBubble operation card', () => {
   it('renders a cancellable running operation card and executes the stop action', async () => {
+    vi.mocked(getOperation).mockRejectedValue(new Error('skip poll'));
     vi.mocked(executeOperationAction).mockResolvedValue({
       id: 'op-123',
       kind: 'packet_capture_session',
       state: 'cancelled',
       title: 'HTTPS capture',
+      actions_json: '[]',
     });
     const user = userEvent.setup();
     const message: ChatMessage = {
@@ -283,6 +286,43 @@ describe('MessageBubble operation card', () => {
 
     expect(executeOperationAction).toHaveBeenCalledWith('op-123', 'cancel');
     await waitFor(() => expect(screen.getByText('已停止')).toBeInTheDocument());
+  });
+
+  it('polls a running operation card until it reaches a terminal state', async () => {
+    vi.mocked(getOperation).mockResolvedValue({
+      operation: {
+        id: 'op-123',
+        kind: 'packet_capture_session',
+        state: 'succeeded',
+        title: 'HTTPS capture',
+        summary: '1/1 capture artifact(s) available',
+        detail_url: '/artifacts/packet-sessions/pcap-session-running',
+        actions_json: '[]',
+      },
+      artifacts: [],
+    });
+    const message: ChatMessage = {
+      id: 'packet-capture-operation',
+      role: 'tool',
+      tool_name: 'capture_pcap',
+      content: JSON.stringify({
+        operation: {
+          id: 'op-123',
+          kind: 'packet_capture_session',
+          title: 'HTTPS capture',
+          state: 'running',
+          summary: 'collecting',
+          links: { detail: '/artifacts/packet-sessions/pcap-session-running' },
+          actions: [{ kind: 'cancel', label: 'Stop', enabled: true }],
+        },
+      }),
+    };
+
+    render(<MessageBubble message={message} />);
+
+    await waitFor(() => expect(screen.getByText('已完成')).toBeInTheDocument());
+    expect(screen.getByText('1/1 capture artifact(s) available')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
   });
 
   it('renders a persisted packet capture result as an investigation card', () => {
