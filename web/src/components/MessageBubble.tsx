@@ -335,7 +335,9 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
     ? tr('抓包任务', 'Packet capture task')
     : tr('任务', 'Operation');
   const actionHint = operationActionHint(state, operation.kind, tr);
-  const rows = operationMetaRows(operation, state, summary, tr);
+  const actionLabel = terminal
+    ? tr('已归档', 'Archived')
+    : tr('自动同步中', 'Auto-syncing');
 
   useEffect(() => {
     setState(operation.state);
@@ -386,18 +388,21 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
   }
 
   return (
-    <section className="overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-900/40 text-xs">
-      <div className="border-b border-zinc-800/80 px-3 py-2.5">
-        <div className="flex min-w-0 items-start gap-2">
-          <div className={cn('mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md', presentation.iconBoxClass)}>
+    <section className="overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-950/40 text-xs shadow-sm shadow-black/10">
+      <div className="flex min-w-0 items-start gap-3 px-3 py-3">
+        <div className="flex min-w-0 flex-1 items-start gap-2.5">
+          <div className={cn('mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border', presentation.iconBoxClass)}>
             {presentation.icon}
           </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <span className="truncate text-sm font-medium text-zinc-100">{operation.title || kindLabel}</span>
-              <Chip tone={presentation.tone} dense>{presentation.label}</Chip>
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', presentation.dotClass)} />
+              <h3 className="min-w-0 truncate text-sm font-medium text-zinc-100">
+                {operation.title || kindLabel}
+              </h3>
+              <Chip tone={presentation.tone} dense className="shrink-0">{presentation.label}</Chip>
             </div>
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-500">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-500">
               <span>{kindLabel}</span>
               {(operation.id || operation.legacySessionID) && (
                 <>
@@ -405,57 +410,36 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
                   <span className="font-mono">{shortOperationID(operation.id || operation.legacySessionID || '')}</span>
                 </>
               )}
+              {summary && (
+                <>
+                  <span className="text-zinc-700">/</span>
+                  <span className="min-w-[120px] max-w-full truncate text-zinc-400" title={summary}>{summary}</span>
+                </>
+              )}
             </div>
+            {actionHint && <div className="text-[11px] leading-5 text-zinc-500">{actionHint}</div>}
           </div>
         </div>
-        {!terminal && (
-          <div className="mt-2 h-1 overflow-hidden rounded-full bg-zinc-800">
-            <div className={cn('h-full rounded-full transition-all', presentation.progressClass)} style={{ width: presentation.progressWidth }} />
-          </div>
-        )}
-      </div>
 
-      <div className="px-3 py-3">
-        {rows.length > 0 ? (
-          <dl className="grid gap-2 sm:grid-cols-2">
-            {rows.map((row) => (
-              <div key={row.label} className="min-w-0 rounded-md bg-zinc-950/40 px-2.5 py-2">
-                <dt className="text-[10px] uppercase tracking-wide text-zinc-500">{row.label}</dt>
-                <dd className="mt-1 truncate text-[11px] text-zinc-300" title={row.value}>{row.value}</dd>
-              </div>
-            ))}
-          </dl>
-        ) : (
-          <div className="rounded-md bg-zinc-950/40 px-2.5 py-2 text-[11px] text-zinc-500">
-            {tr('等待任务状态同步', 'Waiting for task state sync')}
-          </div>
-        )}
-        {actionHint && (
-          <div className={cn('mt-2 rounded-md px-2.5 py-2 text-[11px] leading-5', presentation.hintClass)}>
-            {actionHint}
-          </div>
-        )}
-      </div>
-
-      <div className="flex flex-col gap-2 border-t border-zinc-800/80 bg-zinc-950/30 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-[11px] text-zinc-500">
-          {terminal
-            ? tr('任务状态已归档到会话上下文', 'Task state has been archived to the conversation context')
-            : tr('状态会自动同步，无需刷新页面', 'State syncs automatically; no page refresh is needed')}
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           {detailURL && (
             <a
               href={detailURL}
-              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-zinc-700/80 bg-zinc-900 px-2.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800 hover:text-zinc-100"
             >
               <ExternalLink size={13} />
               {operation.kind === 'packet_capture_session' ? tr('打开会话', 'Open session') : tr('打开产物', 'Open artifact')}
             </a>
           )}
           {visibleCancel && (
-            <Button
-              variant={canCancel ? 'danger' : 'ghost'}
+            <button
+              type="button"
+              className={cn(
+                'inline-flex h-8 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors',
+                canCancel
+                  ? 'border-red-500/30 bg-zinc-900 text-red-300 hover:border-red-500/50 hover:bg-red-500/10'
+                  : 'border-zinc-800 bg-zinc-900 text-zinc-600',
+              )}
               disabled={!canCancel || cancelling}
               onClick={async () => {
                 if (!canCancel) return;
@@ -470,7 +454,7 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
             >
               {cancelling || state === 'canceling' ? <Loader2 size={13} className="animate-spin" /> : <X size={13} />}
               {cancelling || state === 'canceling' ? tr('停止中', 'Stopping') : (visibleCancel.label || tr('停止', 'Stop'))}
-            </Button>
+            </button>
           )}
           {enabledActions.filter((action) => action.kind !== 'cancel').map((action) => (
             <Button key={action.kind} variant="ghost" disabled={cancelling || !operation.id} onClick={async () => {
@@ -481,6 +465,14 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
             </Button>
           ))}
         </div>
+      </div>
+      <div className="flex items-center justify-between border-t border-zinc-900 bg-zinc-950/50 px-3 py-1.5 text-[10px] text-zinc-600">
+        <span>{actionLabel}</span>
+        {!terminal && (
+          <div className="h-0.5 w-24 overflow-hidden rounded-full bg-zinc-800">
+            <div className={cn('h-full rounded-full transition-all', presentation.progressClass)} style={{ width: presentation.progressWidth }} />
+          </div>
+        )}
       </div>
     </section>
   );
@@ -507,40 +499,23 @@ function isTerminalOperationState(state: string) {
   return state === 'ready' || state === 'partial' || state === 'succeeded' || state === 'failed' || state === 'cancelled';
 }
 
-function operationMetaRows(
-  operation: OperationCardData,
-  state: string,
-  summary: string | undefined,
-  tr: (zh: string, en: string) => string,
-) {
-  const rows: { label: string; value: string }[] = [
-    { label: tr('阶段', 'Phase'), value: operationPresentation(state, tr).label },
-  ];
-  if (summary) rows.push({ label: tr('摘要', 'Summary'), value: summary });
-  if (operation.kind) rows.push({ label: tr('类型', 'Type'), value: operation.kind });
-  if (operation.links && Object.keys(operation.links).length > 0) {
-    rows.push({ label: tr('关联入口', 'Linked entries'), value: Object.keys(operation.links).join(', ') });
-  }
-  return rows.slice(0, 4);
-}
-
 function operationActionHint(
   state: string,
   kind: string,
   tr: (zh: string, en: string) => string,
 ) {
-  if (state === 'queued') return tr('任务已创建，正在等待可用执行端。', 'The task is created and waiting for an available runner.');
-  if (state === 'created') return tr('任务已登记，正在进入执行队列。', 'The task is registered and moving into execution.');
+  if (state === 'queued') return tr('等待可用执行端', 'Waiting for an available runner');
+  if (state === 'created') return tr('任务已登记', 'Task registered');
   if (state === 'running' || state === 'collecting' || state === 'capturing') {
     return kind === 'packet_capture_session'
-      ? tr('抓包正在边端执行，可以在这里停止；停止后会保留已经生成的产物。', 'Capture is running on the edge. You can stop it here; generated artifacts will be preserved.')
-      : tr('任务正在执行，可以等待完成或使用可用动作中断。', 'The task is running; wait for completion or use available actions to interrupt it.');
+      ? tr('边端正在采集，可随时停止并保留已生成产物', 'Capturing on the edge; stopping preserves generated artifacts')
+      : tr('任务正在执行', 'Task is running');
   }
-  if (state === 'canceling') return tr('停止请求已发送，正在等待执行端确认。', 'Stop request was sent; waiting for runner confirmation.');
-  if (state === 'failed') return tr('任务失败，详情里会保留失败原因和可用产物。', 'The task failed; details keep the failure reason and any available artifacts.');
-  if (state === 'partial') return tr('部分产物已生成，可以打开入口继续分析。', 'Some artifacts are available; open the entry to continue analysis.');
-  if (state === 'cancelled') return tr('任务已停止，没有继续运行的后台动作。', 'The task has stopped; no background action is still running.');
-  if (state === 'ready' || state === 'succeeded') return tr('任务已完成，可以打开入口查看产物和分析。', 'The task is complete; open the entry to view artifacts and analysis.');
+  if (state === 'canceling') return tr('等待执行端确认停止', 'Waiting for runner stop confirmation');
+  if (state === 'failed') return tr('失败原因和可用产物已保留', 'Failure reason and available artifacts are preserved');
+  if (state === 'partial') return tr('部分产物可用于继续分析', 'Partial artifacts are available for analysis');
+  if (state === 'cancelled') return tr('任务已停止', 'Task stopped');
+  if (state === 'ready' || state === 'succeeded') return tr('产物和分析入口已就绪', 'Artifacts and analysis entry are ready');
   return '';
 }
 
@@ -562,9 +537,9 @@ function operationPresentation(state: string, tr: (zh: string, en: string) => st
   tone: 'default' | 'success' | 'warning' | 'danger' | 'info' | 'accent';
   icon: JSX.Element;
   iconBoxClass: string;
+  dotClass: string;
   progressClass: string;
   progressWidth: string;
-  hintClass: string;
 } {
   switch (state) {
     case 'created':
@@ -572,30 +547,30 @@ function operationPresentation(state: string, tr: (zh: string, en: string) => st
         label: tr('已创建', 'Created'),
         tone: 'default',
         icon: <Clock3 size={15} className="text-zinc-400" />,
-        iconBoxClass: 'bg-zinc-800/70',
+        iconBoxClass: 'border-zinc-800 bg-zinc-900',
+        dotClass: 'bg-zinc-500',
         progressClass: 'bg-zinc-500',
         progressWidth: '18%',
-        hintClass: 'bg-zinc-950/40 text-zinc-400',
       };
     case 'queued':
       return {
         label: tr('排队中', 'Queued'),
         tone: 'default',
         icon: <Clock3 size={15} className="text-zinc-400" />,
-        iconBoxClass: 'bg-zinc-800/70',
+        iconBoxClass: 'border-zinc-800 bg-zinc-900',
+        dotClass: 'bg-zinc-500',
         progressClass: 'bg-zinc-500',
         progressWidth: '28%',
-        hintClass: 'bg-zinc-950/40 text-zinc-400',
       };
     case 'creating':
       return {
         label: tr('正在创建', 'Creating'),
         tone: 'info',
         icon: <Loader2 size={15} className="animate-spin text-sky-500" />,
-        iconBoxClass: 'bg-sky-500/10',
+        iconBoxClass: 'border-sky-500/20 bg-sky-500/10',
+        dotClass: 'bg-sky-500',
         progressClass: 'bg-sky-500',
         progressWidth: '36%',
-        hintClass: 'bg-sky-500/10 text-sky-300',
       };
     case 'ready':
     case 'succeeded':
@@ -603,60 +578,60 @@ function operationPresentation(state: string, tr: (zh: string, en: string) => st
         label: tr('已完成', 'Ready'),
         tone: 'success',
         icon: <CheckCircle2 size={15} className="text-emerald-500" />,
-        iconBoxClass: 'bg-emerald-500/10',
+        iconBoxClass: 'border-emerald-500/20 bg-emerald-500/10',
+        dotClass: 'bg-emerald-500',
         progressClass: 'bg-emerald-500',
         progressWidth: '100%',
-        hintClass: 'bg-emerald-500/10 text-emerald-300',
       };
     case 'partial':
       return {
         label: tr('部分完成', 'Partial'),
         tone: 'warning',
         icon: <AlertCircle size={15} className="text-amber-500" />,
-        iconBoxClass: 'bg-amber-500/10',
+        iconBoxClass: 'border-amber-500/20 bg-amber-500/10',
+        dotClass: 'bg-amber-500',
         progressClass: 'bg-amber-500',
         progressWidth: '72%',
-        hintClass: 'bg-amber-500/10 text-amber-300',
       };
     case 'failed':
       return {
         label: tr('失败', 'Failed'),
         tone: 'danger',
         icon: <XCircle size={15} className="text-red-500" />,
-        iconBoxClass: 'bg-red-500/10',
+        iconBoxClass: 'border-red-500/20 bg-red-500/10',
+        dotClass: 'bg-red-500',
         progressClass: 'bg-red-500',
         progressWidth: '100%',
-        hintClass: 'bg-red-500/10 text-red-300',
       };
     case 'cancelled':
       return {
         label: tr('已停止', 'Stopped'),
         tone: 'default',
         icon: <XCircle size={15} className="text-zinc-500" />,
-        iconBoxClass: 'bg-zinc-800/70',
+        iconBoxClass: 'border-zinc-800 bg-zinc-900',
+        dotClass: 'bg-zinc-500',
         progressClass: 'bg-zinc-500',
         progressWidth: '100%',
-        hintClass: 'bg-zinc-950/40 text-zinc-400',
       };
     case 'canceling':
       return {
         label: tr('停止中', 'Stopping'),
         tone: 'warning',
         icon: <Loader2 size={15} className="animate-spin text-amber-500" />,
-        iconBoxClass: 'bg-amber-500/10',
+        iconBoxClass: 'border-amber-500/20 bg-amber-500/10',
+        dotClass: 'bg-amber-500',
         progressClass: 'bg-amber-500',
         progressWidth: '64%',
-        hintClass: 'bg-amber-500/10 text-amber-300',
       };
     default:
       return {
         label: tr('运行中', 'Running'),
         tone: 'info',
         icon: <Loader2 size={15} className="animate-spin text-sky-500" />,
-        iconBoxClass: 'bg-sky-500/10',
+        iconBoxClass: 'border-sky-500/20 bg-sky-500/10',
+        dotClass: 'bg-sky-500',
         progressClass: 'bg-sky-500',
         progressWidth: '52%',
-        hintClass: 'bg-sky-500/10 text-sky-300',
       };
   }
 }
