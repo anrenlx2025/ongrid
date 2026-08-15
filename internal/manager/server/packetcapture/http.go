@@ -155,12 +155,21 @@ type sessionDTO struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
+type sessionAnalysisDTO struct {
+	Summary bizpacketcapture.SessionSummary `json:"summary"`
+	Flows   []bizpacketcapture.SessionFlow  `json:"flows"`
+}
+
 func toSessionDTO(s *model.Session) sessionDTO {
 	if s == nil {
 		return sessionDTO{}
 	}
 	dto := sessionDTO{ID: s.PublicID, Source: s.Source, State: s.State, Title: s.Title, Description: s.Description, CanonicalFilter: s.CanonicalFilter, DurationSeconds: s.DurationSecs, PlannedStartAt: s.PlannedStartAt, ClockQuality: s.ClockQuality, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
 	return dto
+}
+
+func toSessionAnalysisDTO(analysis bizpacketcapture.SessionAnalysis) sessionAnalysisDTO {
+	return sessionAnalysisDTO{Summary: analysis.Summary, Flows: analysis.Flows}
 }
 
 func toSessionListDTO(s *model.Session) sessionDTO {
@@ -279,7 +288,7 @@ func (h *Handler) getSession(w http.ResponseWriter, r *http.Request) {
 	}
 	dto := toSessionDTO(detail.Session)
 	dto.PCAPCount = len(detail.Captures)
-	dto.Analysis = detail.Analysis
+	dto.Analysis = toSessionAnalysisDTO(detail.Analysis)
 	writeJSON(w, http.StatusOK, map[string]any{"session": dto, "captures": members})
 }
 
@@ -480,7 +489,8 @@ func (h *Handler) refreshSession(w http.ResponseWriter, r *http.Request) {
 		members = append(members, toSessionMemberDTO(capture))
 	}
 	dto := toSessionDTO(detail.Session)
-	dto.Analysis = detail.Analysis
+	dto.PCAPCount = len(detail.Captures)
+	dto.Analysis = toSessionAnalysisDTO(detail.Analysis)
 	writeJSON(w, http.StatusOK, map[string]any{"session": dto, "captures": members})
 }
 
@@ -498,7 +508,7 @@ func (h *Handler) cancelSession(w http.ResponseWriter, r *http.Request) {
 	}
 	dto := toSessionDTO(detail.Session)
 	dto.PCAPCount = len(detail.Captures)
-	dto.Analysis = detail.Analysis
+	dto.Analysis = toSessionAnalysisDTO(detail.Analysis)
 	writeJSON(w, http.StatusOK, dto)
 }
 
