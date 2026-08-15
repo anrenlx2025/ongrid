@@ -20,6 +20,8 @@ const (
 	TaskSucceeded = "succeeded"
 	TaskFailed    = "failed"
 	TaskCancelled = "cancelled"
+
+	maxQueuedCaptures = 10
 )
 
 // Task is the edge-owned view of one capture. The manager later mirrors this
@@ -42,9 +44,11 @@ type RawObject struct {
 	SHA256Hex string
 }
 
-// Service runs bounded capture work asynchronously. It intentionally permits
-// only one live capture per edge: two simultaneous AF_PACKET captures can
+// Service runs bounded capture work asynchronously. It intentionally runs only
+// one capture at a time per edge: two simultaneous AF_PACKET captures can
 // double memory, disk, and packet-copy pressure on an already unhealthy host.
+// Multiple queued tasks are accepted so manager-coordinated repeat captures can
+// execute as a durable sequence.
 type Service struct {
 	capturer *Capturer
 
@@ -86,10 +90,8 @@ func (s *Service) Start(in Request) (Task, error) {
 	if existing, ok := s.tasks[normalized.CaptureID]; ok {
 		return existing.task, nil
 	}
-	for _, state := range s.tasks {
-		if state.task.State == TaskQueued || state.task.State == TaskRunning {
-			return Task{}, fmt.Errorf("packet capture: capture %q is already %s", state.task.ID, state.task.State)
-		}
+	if queued := s.liveTaskCountLocked(); queued >= maxQueuedCaptures {
+		return Task{}, fmt.Errorf("packet capture: queue is full (%d live captures)", queued)
 	}
 	now := time.Now().UTC()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -118,6 +120,28 @@ func (s *Service) run(ctx context.Context, captureID string) {
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
+			finished := time.Now().UTC()
+			s.mu.Lock()
+			if state, ok := s.tasks[captureID]; ok {
+				state.task.State = TaskCancelled
+				state.task.FinishedAt = &finished
+			}
+			s.mu.Unlock()
+			return
+		case <-timer.C:
+		}
+	}
+	for {
+		s.mu.RLock()
+		ready := s.canRunLocked(captureID)
+		s.mu.RUnlock()
+		if ready {
+			break
+		}
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
 			finished := time.Now().UTC()
 			s.mu.Lock()
 			if state, ok := s.tasks[captureID]; ok {
@@ -163,6 +187,55 @@ func (s *Service) run(ctx context.Context, captureID string) {
 		return
 	}
 	state.task.State = TaskSucceeded
+}
+
+func (s *Service) liveTaskCountLocked() int {
+	count := 0
+	for _, state := range s.tasks {
+		if state.task.State == TaskQueued || state.task.State == TaskRunning {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *Service) canRunLocked(captureID string) bool {
+	current, ok := s.tasks[captureID]
+	if !ok || current.task.State != TaskQueued {
+		return false
+	}
+	for id, state := range s.tasks {
+		if id == captureID {
+			continue
+		}
+		switch state.task.State {
+		case TaskRunning:
+			return false
+		case TaskQueued:
+			if queuedBefore(state.task, current.task) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func queuedBefore(a, b Task) bool {
+	aStart, bStart := queuedOrderTime(a), queuedOrderTime(b)
+	if !aStart.Equal(bStart) {
+		return aStart.Before(bStart)
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID < b.ID
+}
+
+func queuedOrderTime(task Task) time.Time {
+	if task.Request.StartAt != nil {
+		return *task.Request.StartAt
+	}
+	return task.CreatedAt
 }
 
 func (s *Service) Get(captureID string) (Task, bool) {

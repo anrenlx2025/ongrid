@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestServiceStartIsIdempotentAndSerializesCaptures(t *testing.T) {
+func TestServiceStartIsIdempotentAndQueuesConcurrentCaptures(t *testing.T) {
 	svc := newServiceForTest(t, func(ctx context.Context, _ Request) (Result, error) {
 		<-ctx.Done()
 		return Result{}, ctx.Err()
@@ -27,12 +27,58 @@ func TestServiceStartIsIdempotentAndSerializesCaptures(t *testing.T) {
 	if first.ID != second.ID {
 		t.Fatalf("duplicate IDs: %q %q", first.ID, second.ID)
 	}
-	if _, err := svc.Start(Request{CaptureID: "capture-456", Interface: "eth0"}); err == nil {
-		t.Fatal("concurrent capture was accepted")
+	queued, err := svc.Start(Request{CaptureID: "capture-456", Interface: "eth0"})
+	if err != nil {
+		t.Fatalf("Start queued: %v", err)
+	}
+	if queued.State != TaskQueued {
+		t.Fatalf("queued state=%q want queued", queued.State)
 	}
 	if _, err := svc.Cancel(first.ID); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
+	if _, err := svc.Cancel(queued.ID); err != nil {
+		t.Fatalf("Cancel queued: %v", err)
+	}
+}
+
+func TestServiceRunsQueuedCapturesSerially(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	svc := newServiceForTest(t, func(_ context.Context, in Request) (Result, error) {
+		started <- in.CaptureID
+		<-release
+		return Result{StopReason: "duration_limit"}, nil
+	})
+	if _, err := svc.Start(Request{CaptureID: "capture-1", Interface: "eth0"}); err != nil {
+		t.Fatalf("Start first: %v", err)
+	}
+	if _, err := svc.Start(Request{CaptureID: "capture-2", Interface: "eth0"}); err != nil {
+		t.Fatalf("Start second: %v", err)
+	}
+	select {
+	case id := <-started:
+		if id != "capture-1" {
+			t.Fatalf("first started capture=%q", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first capture never started")
+	}
+	select {
+	case id := <-started:
+		t.Fatalf("second capture started while first was still running: %q", id)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release <- struct{}{}
+	select {
+	case id := <-started:
+		if id != "capture-2" {
+			t.Fatalf("second started capture=%q", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second capture never started after first completed")
+	}
+	release <- struct{}{}
 }
 
 func TestServiceCompletesTask(t *testing.T) {
