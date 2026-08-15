@@ -233,7 +233,18 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 		return "", err
 	}
 	if len(out.Captures) == 0 {
-		return "", fmt.Errorf("%s: packet capture session has no created members", ToolNameCapturePCAP)
+		body, marshalErr := json.Marshal(map[string]any{
+			"status":        "failed",
+			"error":         "packet capture session has no created members",
+			"session":       out.Session,
+			"captures":      out.Captures,
+			"member_errors": out.MemberErrors,
+			"links":         map[string]string{"detail": "/artifacts/packet-sessions/" + out.Session.PublicID},
+		})
+		if marshalErr != nil {
+			return "", fmt.Errorf("%s: marshal empty-session response: %w", ToolNameCapturePCAP, marshalErr)
+		}
+		return string(body), nil
 	}
 	if t.operationCreate == nil {
 		return "", fmt.Errorf("%s: operation runtime is not configured", ToolNameCapturePCAP)

@@ -1573,13 +1573,34 @@ func main() {
 		if err != nil {
 			return nil, err
 		}
+		nextState := manageraiopsmodel.OperationStateCancelled
 		summary := "Capture session stopped"
-		if detail != nil && detail.Session != nil && detail.Session.State == managerpacketcapturemodel.SessionStatePartial {
-			summary = fmt.Sprintf("Capture session stopped; %d/%d artifact(s) remain available", detail.Analysis.Summary.ReadyCount, detail.Analysis.Summary.CaptureCount)
+		nextActions := []managerbizaiops.OperationAction(nil)
+		eventType := "cancelled"
+		if detail != nil && detail.Session != nil {
+			switch detail.Session.State {
+			case managerpacketcapturemodel.SessionStateReady:
+				nextState = manageraiopsmodel.OperationStateSucceeded
+				summary = fmt.Sprintf("%d/%d capture artifact(s) available", detail.Analysis.Summary.ReadyCount, detail.Analysis.Summary.CaptureCount)
+				eventType = "succeeded_after_cancel"
+			case managerpacketcapturemodel.SessionStatePartial:
+				nextState = manageraiopsmodel.OperationStateSucceeded
+				summary = fmt.Sprintf("Capture session partially complete; %d/%d artifact(s) available", detail.Analysis.Summary.ReadyCount, detail.Analysis.Summary.CaptureCount)
+				eventType = "partial_after_cancel"
+			case managerpacketcapturemodel.SessionStateCollecting:
+				nextState = manageraiopsmodel.OperationStateRunning
+				summary = "Cancellation could not be confirmed; capture session is still collecting"
+				nextActions = []managerbizaiops.OperationAction{{Kind: "cancel", Label: "Stop", Enabled: true}}
+				eventType = "cancel_failed"
+			case managerpacketcapturemodel.SessionStateFailed:
+				nextState = manageraiopsmodel.OperationStateFailed
+				summary = "Capture session failed while cancellation was requested"
+				eventType = "failed_after_cancel"
+			}
 		}
 		if err := operationUC.Transition(ctx, operation.ID,
-			[]string{manageraiopsmodel.OperationStateCanceling}, manageraiopsmodel.OperationStateCancelled,
-			summary, nil, "cancelled", map[string]any{"packet_capture_session_id": input.SessionID}); err != nil && !errors.Is(err, errs.ErrConflict) {
+			[]string{manageraiopsmodel.OperationStateCanceling}, nextState,
+			summary, nextActions, eventType, map[string]any{"packet_capture_session_id": input.SessionID}); err != nil && !errors.Is(err, errs.ErrConflict) {
 			return nil, err
 		}
 		return operationUC.GetOwned(ctx, operation.ID, operation.CreatedBy, true)

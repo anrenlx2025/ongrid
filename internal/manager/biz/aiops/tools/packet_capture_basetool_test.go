@@ -13,9 +13,10 @@ import (
 )
 
 type fakePacketCaptureCreator struct {
-	in        pcapbiz.CreateInput
-	sessionIn pcapbiz.CreateSessionInput
-	refresh   func(*pcapmodel.Capture) *pcapmodel.Capture
+	in           pcapbiz.CreateInput
+	sessionIn    pcapbiz.CreateSessionInput
+	refresh      func(*pcapmodel.Capture) *pcapmodel.Capture
+	emptySession bool
 }
 
 func fakePacketCaptureOperation(context.Context, PacketCaptureOperationInput) (PacketCaptureOperation, error) {
@@ -37,6 +38,13 @@ func (f *fakePacketCaptureCreator) Create(_ context.Context, in pcapbiz.CreateIn
 
 func (f *fakePacketCaptureCreator) CreateSession(ctx context.Context, in pcapbiz.CreateSessionInput) (*pcapbiz.SessionOutput, error) {
 	f.sessionIn = in
+	if f.emptySession {
+		return &pcapbiz.SessionOutput{
+			Session:      &pcapmodel.Session{ID: 4, PublicID: "pcap-session-empty", State: pcapmodel.SessionStateFailed},
+			Captures:     []*pcapmodel.Capture{},
+			MemberErrors: []string{"device 24: packet capture: dispatch edge: busy"},
+		}, nil
+	}
 	if len(in.Targets) == 0 {
 		return nil, nil
 	}
@@ -132,6 +140,38 @@ func TestCapturePCAPToolInvokesUsecase(t *testing.T) {
 	}
 	if decoded.PendingAnalysis.State != "collecting" || !strings.Contains(decoded.PendingAnalysis.Message, "durable operation") {
 		t.Fatalf("pending_analysis = %+v", decoded.PendingAnalysis)
+	}
+}
+
+func TestCapturePCAPToolReturnsStructuredEmptySessionFailure(t *testing.T) {
+	creator := &fakePacketCaptureCreator{emptySession: true}
+	tool := NewCapturePCAPTool(creator, nil, fakePacketCaptureOperation)
+
+	out, err := tool.InvokableRun(context.Background(), `{
+		"device_id": 24,
+		"interface": "eth0",
+		"filter": "tcp and port 443"
+	}`, basetool.WithUserText("confirm device_id=24"))
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	var decoded struct {
+		Status       string   `json:"status"`
+		Error        string   `json:"error"`
+		MemberErrors []string `json:"member_errors"`
+		Session      struct {
+			PublicID string `json:"public_id"`
+		} `json:"session"`
+		Links map[string]string `json:"links"`
+	}
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if decoded.Status != "failed" || decoded.Session.PublicID != "pcap-session-empty" || len(decoded.MemberErrors) != 1 || decoded.Links["detail"] == "" {
+		t.Fatalf("output = %s", out)
+	}
+	if !strings.Contains(decoded.MemberErrors[0], "dispatch edge") {
+		t.Fatalf("member errors = %+v", decoded.MemberErrors)
 	}
 }
 

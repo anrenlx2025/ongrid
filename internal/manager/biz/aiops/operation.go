@@ -167,7 +167,7 @@ func validOperationTransition(from []string, to string) bool {
 				return true
 			}
 		case model.OperationStateCanceling:
-			if to == model.OperationStateSucceeded || to == model.OperationStateFailed || to == model.OperationStateCancelled {
+			if to == model.OperationStateRunning || to == model.OperationStateSucceeded || to == model.OperationStateFailed || to == model.OperationStateCancelled {
 				return true
 			}
 		}
