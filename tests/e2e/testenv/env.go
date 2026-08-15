@@ -130,31 +130,33 @@ func Start(t *testing.T, opts ...Option) *Env {
 		t.Fatalf("testenv: pick free metrics port: %v", err)
 	}
 	env.httpBase = fmt.Sprintf("http://127.0.0.1:%d", port)
+	pagesDir := t.TempDir()
 
 	managerEnv := map[string]string{
-		"ONGRID_HTTP_ADDR":         fmt.Sprintf("127.0.0.1:%d", port),
-		"ONGRID_METRICS_ADDR":      fmt.Sprintf("127.0.0.1:%d", metricsPort),
-		"ONGRID_TUNNEL_ADDR":       "127.0.0.1:0", // disabled in practice; never dialed from e2e
-		"ONGRID_DB_DIALECT":        "mysql",
-		"ONGRID_DB_DSN":            dsn,
-		"ONGRID_JWT_SECRET":        "test-jwt-secret-" + randomSuffix(),
-		"ONGRID_ADMIN_EMAIL":       env.AdminEmail,
-		"ONGRID_ADMIN_PASSWORD":    env.AdminPassword,
-		"ONGRID_PUBLIC_URL":        env.httpBase,
-		"ONGRID_PROM_ENABLED":      "true",
-		"ONGRID_PROM_URL":          env.prom.URL(),
-		"ONGRID_PROM_QUERY_URL":    env.prom.URL(),
-		"ONGRID_LOG_QUERY_URL":     "", // Loki disabled in default e2e
-		"ONGRID_TRACE_QUERY_URL":   "",
-		"ONGRID_OPENAI_API_KEY":    "fake-test-key",
-		"ONGRID_OPENAI_BASE_URL":   env.llm.URL() + "/v1",
-		"ONGRID_OPENAI_MODEL":      "fake-gpt",
-		"ONGRID_ANTHROPIC_API_KEY": "fake-test-key",
-		"ONGRID_ANTHROPIC_BASE_URL": env.llm.URL(),
-		"ONGRID_ANTHROPIC_MODEL":   "claude-fake",
-		"ONGRID_ZHIPU_API_KEY":     "fake-test-key",
-		"ONGRID_ZHIPU_BASE_URL":    env.llm.URL() + "/v1",
-		"ONGRID_ZHIPU_MODEL":       "glm-fake",
+		"ONGRID_HTTP_ADDR":           fmt.Sprintf("127.0.0.1:%d", port),
+		"ONGRID_METRICS_ADDR":        fmt.Sprintf("127.0.0.1:%d", metricsPort),
+		"ONGRID_TUNNEL_ADDR":         "127.0.0.1:0", // disabled in practice; never dialed from e2e
+		"ONGRID_DB_DIALECT":          "mysql",
+		"ONGRID_DB_DSN":              dsn,
+		"ONGRID_JWT_SECRET":          "test-jwt-secret-" + randomSuffix(),
+		"ONGRID_ADMIN_EMAIL":         env.AdminEmail,
+		"ONGRID_ADMIN_PASSWORD":      env.AdminPassword,
+		"ONGRID_PUBLIC_URL":          env.httpBase,
+		"ONGRID_PAGES_DIR":           pagesDir,
+		"ONGRID_PROM_ENABLED":        "true",
+		"ONGRID_PROM_URL":            env.prom.URL(),
+		"ONGRID_PROM_QUERY_URL":      env.prom.URL(),
+		"ONGRID_LOG_QUERY_URL":       "", // Loki disabled in default e2e
+		"ONGRID_TRACE_QUERY_URL":     "",
+		"ONGRID_OPENAI_API_KEY":      "fake-test-key",
+		"ONGRID_OPENAI_BASE_URL":     env.llm.URL() + "/v1",
+		"ONGRID_OPENAI_MODEL":        "fake-gpt",
+		"ONGRID_ANTHROPIC_API_KEY":   "fake-test-key",
+		"ONGRID_ANTHROPIC_BASE_URL":  env.llm.URL(),
+		"ONGRID_ANTHROPIC_MODEL":     "claude-fake",
+		"ONGRID_ZHIPU_API_KEY":       "fake-test-key",
+		"ONGRID_ZHIPU_BASE_URL":      env.llm.URL() + "/v1",
+		"ONGRID_ZHIPU_MODEL":         "glm-fake",
 		"ONGRID_ALERT_EVAL_INTERVAL": "30s",
 		// Graph kernel is the live runtime (memory: chat quality
 		// 2026-05-25). The legacy kernel doesn't build chatruntime, so
