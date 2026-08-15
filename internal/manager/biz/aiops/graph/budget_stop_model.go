@@ -163,6 +163,8 @@ func summarizeToolMessage(toolName, content string) string {
 			return summarizeDiskUsagePayload(toolName, payload)
 		case "host_find_large_files":
 			return summarizeLargeFilesPayload(toolName, payload)
+		case "host_bash":
+			return summarizeHostBashPayload(toolName, payload)
 		}
 		if count, ok := jsonNumber(payload["count"]); ok {
 			return toolName + ": 返回 " + formatNumber(count) + " 条结果。"
@@ -300,6 +302,70 @@ func summarizeLargeFilesPayload(toolName string, payload map[string]any) string 
 		return toolName + ": 返回大文件扫描结果。"
 	}
 	return toolName + ": 大文件 " + strings.Join(parts, "；")
+}
+
+func summarizeHostBashPayload(toolName string, payload map[string]any) string {
+	cmd, _ := payload["cmd"].(string)
+	results, _ := payload["results"].([]any)
+	stdouts := make([]string, 0, len(results))
+	for _, item := range results {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		stdout, _ := obj["stdout"].(string)
+		stdout = strings.TrimSpace(stdout)
+		if stdout != "" {
+			stdouts = append(stdouts, stdout)
+		}
+	}
+	if len(stdouts) == 0 {
+		return toolName + ": 命令 `" + trimRunes(cmd, 60) + "` 无有效输出。"
+	}
+	joined := strings.Join(stdouts, "\n")
+	if strings.Contains(cmd, "df ") {
+		line := firstDataLine(joined)
+		if line != "" {
+			return toolName + ": `df` 显示 " + trimRunes(line, 120)
+		}
+	}
+	if strings.Contains(cmd, "du ") {
+		tops := topOutputLines(joined, 4)
+		if len(tops) > 0 {
+			return toolName + ": `du` Top 项 " + strings.Join(tops, "；")
+		}
+	}
+	lines := topOutputLines(joined, 3)
+	if len(lines) == 0 {
+		return toolName + ": 命令 `" + trimRunes(cmd, 60) + "` 已执行。"
+	}
+	return toolName + ": `" + trimRunes(cmd, 60) + "` 输出 " + strings.Join(lines, "；")
+}
+
+func firstDataLine(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.Join(strings.Fields(line), " ")
+		if line == "" || strings.HasPrefix(strings.ToLower(line), "filesystem ") {
+			continue
+		}
+		return line
+	}
+	return ""
+}
+
+func topOutputLines(output string, max int) []string {
+	lines := make([]string, 0, max)
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.Join(strings.Fields(line), " ")
+		if line == "" {
+			continue
+		}
+		lines = append(lines, trimRunes(line, 80))
+		if len(lines) >= max {
+			break
+		}
+	}
+	return lines
 }
 
 func jsonNumber(value any) (float64, bool) {
