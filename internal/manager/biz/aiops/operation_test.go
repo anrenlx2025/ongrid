@@ -88,6 +88,9 @@ func TestOperationTransitionsRejectTerminalAndBackwardStates(t *testing.T) {
 	if !validOperationTransition([]string{model.OperationStateRunning}, model.OperationStateCanceling) {
 		t.Fatal("running operation cannot enter canceling")
 	}
+	if !validOperationTransition([]string{model.OperationStateCreated, model.OperationStateQueued, model.OperationStateRunning, model.OperationStateCanceling}, model.OperationStateSucceeded) {
+		t.Fatal("allowed current-state set rejected running/canceling completion")
+	}
 }
 
 func isErr(err, target error) bool { return err == target }

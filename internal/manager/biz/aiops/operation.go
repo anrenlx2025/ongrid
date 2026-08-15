@@ -153,22 +153,26 @@ func validOperationTransition(from []string, to string) bool {
 		return false
 	}
 	for _, state := range from {
-		allowed := false
 		switch state {
 		case model.OperationStateCreated:
-			allowed = to == model.OperationStateQueued || to == model.OperationStateRunning || to == model.OperationStateCanceling || to == model.OperationStateFailed
+			if to == model.OperationStateQueued || to == model.OperationStateRunning || to == model.OperationStateCanceling || to == model.OperationStateFailed {
+				return true
+			}
 		case model.OperationStateQueued:
-			allowed = to == model.OperationStateRunning || to == model.OperationStateCanceling || to == model.OperationStateFailed || to == model.OperationStateCancelled
+			if to == model.OperationStateRunning || to == model.OperationStateCanceling || to == model.OperationStateFailed || to == model.OperationStateCancelled {
+				return true
+			}
 		case model.OperationStateRunning:
-			allowed = to == model.OperationStateCanceling || to == model.OperationStateSucceeded || to == model.OperationStateFailed || to == model.OperationStateCancelled
+			if to == model.OperationStateCanceling || to == model.OperationStateSucceeded || to == model.OperationStateFailed || to == model.OperationStateCancelled {
+				return true
+			}
 		case model.OperationStateCanceling:
-			allowed = to == model.OperationStateSucceeded || to == model.OperationStateFailed || to == model.OperationStateCancelled
-		}
-		if !allowed {
-			return false
+			if to == model.OperationStateSucceeded || to == model.OperationStateFailed || to == model.OperationStateCancelled {
+				return true
+			}
 		}
 	}
-	return true
+	return false
 }
 
 func isTerminalOperationState(state string) bool {
