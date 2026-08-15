@@ -347,8 +347,8 @@ func TestEinoToolAdapter_QueryPromQLUsesStrictCallCap(t *testing.T) {
 	ctx := context.Background()
 	limit := maxCallsForTool("query_promql")
 
-	if limit != 3 {
-		t.Fatalf("query_promql limit = %d, want 3", limit)
+	if limit != 4 {
+		t.Fatalf("query_promql limit = %d, want 4", limit)
 	}
 	for i := 0; i < limit; i++ {
 		out, _ := a.InvokableRun(ctx, fmt.Sprintf(`{"q":"m%d"}`, i))
@@ -372,8 +372,8 @@ func TestEinoToolAdapter_ReadToolsUseGenericCallCap(t *testing.T) {
 	t.Parallel()
 	for name, wantLimit := range map[string]int{
 		"AgentTool":             4,
-		"query_logql":           3,
-		"query_traceql":         3,
+		"query_logql":           4,
+		"query_traceql":         4,
 		"host_bash":             4,
 		"host_du_summary":       maxToolCallsPerRun,
 		"host_find_large_files": maxToolCallsPerRun,

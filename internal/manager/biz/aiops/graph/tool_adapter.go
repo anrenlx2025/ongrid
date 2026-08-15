@@ -114,7 +114,7 @@ const maxTotalToolCallsPerRun = 8
 func maxCallsForTool(name string) int {
 	switch name {
 	case toolNameQueryPromQL, "query_logql", "query_traceql":
-		return 3
+		return 4
 	case "host_bash", "query_k8s_snapshot", "AgentTool":
 		return 4
 	case "draft_config_change":
