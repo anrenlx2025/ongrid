@@ -49,6 +49,7 @@ type Env struct {
 	httpBase string
 	cmd      *exec.Cmd
 	logBuf   *bytes.Buffer
+	db       *sql.DB
 
 	// Fakes — always created. Live-mode tests get the real URL out of
 	// secrets and ignore the fake's URL; that's fine, the fake just sits
@@ -120,6 +121,11 @@ func Start(t *testing.T, opts ...Option) *Env {
 		AdminPassword: "E2E!Admin-pass-do-not-reuse",
 	}
 	t.Cleanup(env.Stop)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("testenv: open db: %v", err)
+	}
+	env.db = db
 
 	port, err := freePort()
 	if err != nil {
@@ -223,6 +229,11 @@ func (e *Env) Stop() {
 		if e.prom != nil {
 			e.prom.Close()
 		}
+		if e.db != nil {
+			if err := e.db.Close(); err != nil {
+				e.t.Logf("testenv: close db: %v", err)
+			}
+		}
 	})
 }
 
@@ -244,6 +255,93 @@ func (e *Env) FakeSlack() *FakeSlack       { return e.slack }
 func (e *Env) FakeTelegram() *FakeTelegram { return e.telegram }
 func (e *Env) FakeProm() *FakeProm         { return e.prom }
 func (e *Env) BaseURL() string             { return e.httpBase }
+
+// DeviceFixture is the minimal monitored-host shape E2E chat tests need.
+// Rows are hard-deleted by the registered cleanup because the shared MySQL
+// container intentionally survives across Start calls.
+type DeviceFixture struct {
+	Name      string
+	Hostname  string
+	IPAddress string
+	Online    bool
+	Roles     uint8
+	LastSeen  *time.Time
+}
+
+// SeedDevice inserts one monitored device and its host edge relation.
+// This is test infrastructure only; production still creates these rows
+// through edge registration.
+func (e *Env) SeedDevice(f DeviceFixture) uint64 {
+	e.t.Helper()
+	if e.db == nil {
+		e.t.Fatal("testenv: db is not configured")
+	}
+	now := time.Now().UTC()
+	name := strings.TrimSpace(f.Name)
+	if name == "" {
+		name = "e2e-device-" + randomSuffix()
+	}
+	hostname := strings.TrimSpace(f.Hostname)
+	if hostname == "" {
+		hostname = name
+	}
+	fingerprint := "e2e-" + randomSuffix() + "-" + strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+	lastSeen := now
+	if f.LastSeen != nil {
+		lastSeen = f.LastSeen.UTC()
+	}
+	res, err := e.db.Exec(`INSERT INTO devices
+		(fingerprint, name, description, hostname, os, os_version, arch, kernel_version, ip_address,
+		 cpu_count, mem_total_bytes, disk_total_bytes, cpu_usage_pct, mem_usage_pct, disk_usage_pct,
+		 roles, online, last_seen_at, created_at, updated_at, delete_marker)
+		VALUES (?, ?, '', ?, 'linux', '', 'amd64', '', ?, 4, 8589934592, 107374182400, 0, 0, 0, ?, ?, ?, ?, ?, 0)`,
+		fingerprint, name, hostname, f.IPAddress, f.Roles, f.Online, lastSeen, now, now)
+	if err != nil {
+		e.t.Fatalf("seed device %q: %v", name, err)
+	}
+	deviceID, err := res.LastInsertId()
+	if err != nil {
+		e.t.Fatalf("seed device %q id: %v", name, err)
+	}
+	accessKey := "e2e" + randomSuffix()
+	res, err = e.db.Exec(`INSERT INTO edges
+		(name, access_key_id, secret_key_hash, status, description, last_seen_at, last_registered_at,
+		 agent_version, device_id, created_at, updated_at, delete_marker)
+		VALUES (?, ?, 'e2e-test-hash', ?, '', ?, ?, 'e2e', ?, ?, ?, 0)`,
+		name, accessKey, edgeStatus(f.Online), lastSeen, now, deviceID, now, now)
+	if err != nil {
+		e.t.Fatalf("seed edge for device %q: %v", name, err)
+	}
+	edgeID, err := res.LastInsertId()
+	if err != nil {
+		e.t.Fatalf("seed edge %q id: %v", name, err)
+	}
+	_, err = e.db.Exec(`INSERT INTO edge_devices
+		(edge_id, device_id, type, created_at, updated_at, delete_marker)
+		VALUES (?, ?, 1, ?, ?, 0)`, edgeID, deviceID, now, now)
+	if err != nil {
+		e.t.Fatalf("seed edge-device for %q: %v", name, err)
+	}
+	e.t.Cleanup(func() {
+		if _, err := e.db.Exec("DELETE FROM edge_devices WHERE edge_id = ? OR device_id = ?", edgeID, deviceID); err != nil {
+			e.t.Logf("cleanup edge_devices device=%d edge=%d: %v", deviceID, edgeID, err)
+		}
+		if _, err := e.db.Exec("DELETE FROM edges WHERE id = ?", edgeID); err != nil {
+			e.t.Logf("cleanup edge %d: %v", edgeID, err)
+		}
+		if _, err := e.db.Exec("DELETE FROM devices WHERE id = ?", deviceID); err != nil {
+			e.t.Logf("cleanup device %d: %v", deviceID, err)
+		}
+	})
+	return uint64(deviceID)
+}
+
+func edgeStatus(online bool) string {
+	if online {
+		return "online"
+	}
+	return "offline"
+}
 
 // ─── HTTP helpers ───────────────────────────────────────────────────────
 

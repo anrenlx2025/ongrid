@@ -41,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -930,13 +931,61 @@ func resolveTurn(req *Request) (TurnPlan, string) {
 		return PlanTurn(ResolvedFacts{Permitted: false, Reason: "nil request"}), ""
 	}
 	text := strings.ToLower(req.UserText)
-	captureIntent := strings.Contains(text, "pcap") || strings.Contains(text, "packet capture") || strings.Contains(req.UserText, "抓包") || (strings.Contains(req.UserText, "抓") && (strings.Contains(req.UserText, "流量") || strings.Contains(req.UserText, "数据包") || strings.Contains(req.UserText, "的包") || strings.Contains(text, "tcp port") || strings.Contains(text, "udp port")))
-	hasTarget := len(confirmedDeviceIDs(req.Mentions)) > 0 || strings.Contains(text, "device_id")
-	plan := PlanTurn(ResolvedFacts{Missing: captureIntent && !hasTarget, Permitted: req.Role != "viewer", LongRunning: captureIntent})
+	captureIntent := !isCancelIntent(req.UserText) && (strings.Contains(text, "pcap") || strings.Contains(text, "packet capture") || strings.Contains(req.UserText, "抓包") || (strings.Contains(req.UserText, "抓") && (strings.Contains(req.UserText, "流量") || strings.Contains(req.UserText, "数据包") || strings.Contains(req.UserText, "的包") || strings.Contains(text, "tcp port") || strings.Contains(text, "udp port"))))
+	hostTargetIntent := requiresHostTarget(req.UserText)
+	hasTarget := hasExplicitHostTarget(req)
+	plan := PlanTurn(ResolvedFacts{Missing: (captureIntent || hostTargetIntent) && !hasTarget, Permitted: req.Role != "viewer", LongRunning: captureIntent})
 	if plan.Decision == DecisionClarify {
-		return plan, "要开始抓包，请先选择目标设备（使用 @ 选择设备），或明确提供 `device_id` 和网卡接口。"
+		if captureIntent {
+			return plan, "要开始抓包，请先选择目标设备（使用 @ 选择设备），或明确提供 `device_id` 和网卡接口。"
+		}
+		return plan, "这个操作需要先确定目标设备。请使用 @ 选择设备，或明确提供 `device_id`。"
 	}
 	return plan, ""
+}
+
+func isCancelIntent(userText string) bool {
+	text := strings.ToLower(userText)
+	for _, phrase := range []string{"停止", "取消", "终止", "stop", "cancel", "abort"} {
+		if strings.Contains(text, phrase) || strings.Contains(userText, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasExplicitHostTarget(req *Request) bool {
+	if req == nil {
+		return false
+	}
+	text := strings.ToLower(req.UserText)
+	if len(confirmedDeviceIDs(req.Mentions)) > 0 || strings.Contains(text, "device_id") || strings.Contains(req.UserText, "@") {
+		return true
+	}
+	targetMarkers := []string{"edge-", "vm-", "node-", "host-", "server-", "device-"}
+	for _, marker := range targetMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return ipv4LikeRe.MatchString(text)
+}
+
+var ipv4LikeRe = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
+
+func requiresHostTarget(userText string) bool {
+	text := strings.ToLower(userText)
+	zh := userText
+	hostIntentPhrases := []string{
+		"磁盘", "目录", "文件", "大文件", "进程", "端口", "服务重启", "重启服务", "网络接口", "网卡", "dns", "连通性",
+		"disk", "directory", "file", "process", "port", "restart service", "interface", "reachability",
+	}
+	for _, phrase := range hostIntentPhrases {
+		if strings.Contains(text, phrase) || strings.Contains(zh, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // toCallbackEmitter adapts a chatruntime.Emit into the

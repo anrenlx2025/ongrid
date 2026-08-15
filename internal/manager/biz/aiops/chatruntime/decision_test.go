@@ -47,6 +47,46 @@ func TestResolveTurnRequiresCaptureTarget(t *testing.T) {
 	if plan.Decision != DecisionClarify || clarification == "" {
 		t.Fatalf("resolveTurn packet wording = %+v, %q", plan, clarification)
 	}
+	plan, clarification = resolveTurn(&Request{UserText: "停止刚才的抓包任务", Role: "admin"})
+	if plan.Decision == DecisionClarify || clarification != "" {
+		t.Fatalf("resolveTurn stop capture = %+v, %q; want agent loop", plan, clarification)
+	}
+}
+
+func TestResolveTurnRequiresHostTargetForHostBoundOps(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{name: "disk", text: "磁盘快满了，帮我看看"},
+		{name: "directory", text: "看看 /var 哪些目录最大"},
+		{name: "process", text: "找一下占内存最高的进程"},
+		{name: "interface", text: "检查网络接口错误包"},
+		{name: "dns", text: "DNS 解析失败了，帮我排查"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, clarification := resolveTurn(&Request{UserText: tt.text, Role: "admin"})
+			if plan.Decision != DecisionClarify || plan.Phase != PhaseClarify || clarification == "" {
+				t.Fatalf("resolveTurn(%q) = %+v, %q; want clarify", tt.text, plan, clarification)
+			}
+		})
+	}
+}
+
+func TestResolveTurnAllowsExplicitHostTarget(t *testing.T) {
+	tests := []Request{
+		{UserText: "看看 edge-001 的磁盘", Role: "admin"},
+		{UserText: "检查 10.0.0.5 的网络接口", Role: "admin"},
+		{UserText: "看看目录 /var", Role: "admin", Mentions: []Mention{{Type: "device", ID: "24"}}},
+		{UserText: "device_id=24 查大文件", Role: "admin"},
+	}
+	for _, req := range tests {
+		plan, clarification := resolveTurn(&req)
+		if plan.Decision == DecisionClarify || clarification != "" {
+			t.Fatalf("resolveTurn(%q) = %+v, %q; want non-clarify", req.UserText, plan, clarification)
+		}
+	}
 }
 
 func TestTurnPlanRecordsAndLoopsThroughSystemStates(t *testing.T) {
