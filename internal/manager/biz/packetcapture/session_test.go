@@ -137,6 +137,57 @@ func TestCreateSessionSupportsSingleCaptureTask(t *testing.T) {
 	}
 }
 
+func TestCancelSessionStopsAllActiveMembersOnce(t *testing.T) {
+	repo := &sessionTestRepo{fakeRepo: newFakeRepo(), sessions: map[string]*model.Session{}}
+	caller := &fakeCaller{}
+	uc := New(repo, caller, sessionResolver{101: 11, 102: 12}, nil)
+
+	created, err := uc.CreateSession(context.Background(), CreateSessionInput{
+		Targets: []SessionTarget{{DeviceID: 101, Interface: "eth0"}, {DeviceID: 102, Interface: "eth1"}},
+		Filter:  "tcp and port 443",
+		Source:  SourceChat,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if len(created.Captures) != 2 {
+		t.Fatalf("members=%d want 2", len(created.Captures))
+	}
+
+	detail, err := uc.CancelSession(context.Background(), created.Session.PublicID)
+	if err != nil {
+		t.Fatalf("CancelSession: %v", err)
+	}
+	if detail.Session.State != model.SessionStateCancelled {
+		t.Fatalf("session state=%q want %q when all members are cancelled without evidence", detail.Session.State, model.SessionStateCancelled)
+	}
+	for _, capture := range detail.Captures {
+		if capture.State != model.StateCancelled {
+			t.Fatalf("capture %d state=%q want cancelled", capture.ID, capture.State)
+		}
+	}
+	if got := countPacketCaptureMethod(caller.methods, tunnel.MethodCancelPacketCapture); got != 2 {
+		t.Fatalf("cancel calls=%d want 2", got)
+	}
+
+	if _, err := uc.CancelSession(context.Background(), created.Session.PublicID); err != nil {
+		t.Fatalf("idempotent CancelSession: %v", err)
+	}
+	if got := countPacketCaptureMethod(caller.methods, tunnel.MethodCancelPacketCapture); got != 2 {
+		t.Fatalf("second stop issued extra edge calls: %d", got)
+	}
+}
+
+func countPacketCaptureMethod(methods []string, want string) int {
+	count := 0
+	for _, method := range methods {
+		if method == want {
+			count++
+		}
+	}
+	return count
+}
+
 func TestAnalyzeSessionCorrelatesBidirectionalFlowAcrossEdges(t *testing.T) {
 	started := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
 	captures := []*model.Capture{

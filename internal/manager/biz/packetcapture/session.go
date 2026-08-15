@@ -233,10 +233,15 @@ func (u *Usecase) updateSessionAnalysis(ctx context.Context, publicID string) (*
 	analysis := analyzeSession(detail.Captures)
 	state := model.SessionStateReady
 	ready := 0
+	cancelled := 0
 	incomplete := false
 	for _, capture := range detail.Captures {
 		if capture.State == model.StateReady && capture.ParsedJSON != "" {
 			ready++
+			continue
+		}
+		if capture.State == model.StateCancelled {
+			cancelled++
 			continue
 		}
 		if capture.State != model.StateFailed && capture.State != model.StateCancelled && capture.State != model.StateExpired && capture.State != model.StateDeleted {
@@ -246,7 +251,11 @@ func (u *Usecase) updateSessionAnalysis(ctx context.Context, publicID string) (*
 	if incomplete {
 		state = model.SessionStateCollecting
 	} else if ready == 0 {
-		state = model.SessionStateFailed
+		if cancelled == len(detail.Captures) {
+			state = model.SessionStateCancelled
+		} else {
+			state = model.SessionStateFailed
+		}
 	} else if ready != len(detail.Captures) {
 		state = model.SessionStatePartial
 	}

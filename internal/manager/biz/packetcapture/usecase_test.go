@@ -347,19 +347,32 @@ func (r fakeResolver) ResolveEdgeID(_ context.Context, _ uint64) (uint64, error)
 }
 
 type fakeCaller struct {
-	method string
-	edgeID uint64
-	err    error
-	state  string
+	method  string
+	methods []string
+	edgeID  uint64
+	err     error
+	state   string
 }
 
 func (c *fakeCaller) Call(_ context.Context, edgeID uint64, method string, body []byte) ([]byte, error) {
 	c.edgeID = edgeID
 	c.method = method
+	c.methods = append(c.methods, method)
 	if c.err != nil {
 		return nil, c.err
 	}
 	now := time.Now().UTC()
+	if method == tunnel.MethodCancelPacketCapture {
+		var req tunnel.PacketCaptureCancelRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, err
+		}
+		return json.Marshal(tunnel.PacketCaptureTask{
+			ID:         req.CaptureID,
+			State:      "cancelled",
+			FinishedAt: &now,
+		})
+	}
 	if method == tunnel.MethodGetPacketCapture {
 		var req tunnel.PacketCaptureGetRequest
 		if err := json.Unmarshal(body, &req); err != nil {

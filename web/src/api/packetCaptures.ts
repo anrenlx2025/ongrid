@@ -51,7 +51,7 @@ export type PacketCaptureSession = {
   id: string;
   source: string;
   pcap_count: number;
-  state: 'collecting' | 'ready' | 'partial' | 'failed';
+  state: 'collecting' | 'ready' | 'partial' | 'cancelled' | 'failed';
   title: string;
   description: string;
   canonical_filter: string;

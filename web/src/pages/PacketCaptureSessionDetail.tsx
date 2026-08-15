@@ -11,7 +11,7 @@ export default function PacketCaptureSessionDetailPage() {
   const [session, setSession] = useState<PacketCaptureSession | null>(null); const [captures, setCaptures] = useState<PacketCapture[]>([]); const [analyzing,setAnalyzing]=useState(false); const [error,setError]=useState('');
   const load=useCallback(async(refresh=false)=>{ try { const result=refresh?await refreshPacketCaptureSession(sessionID):await getPacketCaptureSession(sessionID); setSession(result.session);setCaptures(result.captures);setError(''); } catch(e){setError(e instanceof Error?e.message:String(e));} },[sessionID]);
   useEffect(()=>{void load();},[load]);
-  useEffect(()=>{ if(!session || ['ready','failed'].includes(session.state)){ return; } const timer=window.setTimeout(()=>void load(true), 2000); return ()=>window.clearTimeout(timer); },[load,session]);
+  useEffect(()=>{ if(!session || ['ready','cancelled','failed'].includes(session.state)){ return; } const timer=window.setTimeout(()=>void load(true), 2000); return ()=>window.clearTimeout(timer); },[load,session]);
   const analysis=session?.analysis;
   const analyzeWithAI = async () => {
     if (!session || analyzing) return;

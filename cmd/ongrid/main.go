@@ -1569,7 +1569,17 @@ func main() {
 		if err := operationUC.Transition(ctx, operation.ID, []string{manageraiopsmodel.OperationStateCreated, manageraiopsmodel.OperationStateQueued, manageraiopsmodel.OperationStateRunning}, manageraiopsmodel.OperationStateCanceling, "Cancellation requested", actions, "cancel_requested", map[string]any{"packet_capture_session_id": input.SessionID}); err != nil && !errors.Is(err, errs.ErrConflict) {
 			return nil, err
 		}
-		if _, err := packetCaptureUC.CancelSession(ctx, input.SessionID); err != nil {
+		detail, err := packetCaptureUC.CancelSession(ctx, input.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		summary := "Capture session stopped"
+		if detail != nil && detail.Session != nil && detail.Session.State == managerpacketcapturemodel.SessionStatePartial {
+			summary = fmt.Sprintf("Capture session stopped; %d/%d artifact(s) remain available", detail.Analysis.Summary.ReadyCount, detail.Analysis.Summary.CaptureCount)
+		}
+		if err := operationUC.Transition(ctx, operation.ID,
+			[]string{manageraiopsmodel.OperationStateCanceling}, manageraiopsmodel.OperationStateCancelled,
+			summary, nil, "cancelled", map[string]any{"packet_capture_session_id": input.SessionID}); err != nil && !errors.Is(err, errs.ErrConflict) {
 			return nil, err
 		}
 		return operationUC.GetOwned(ctx, operation.ID, operation.CreatedBy, true)
@@ -2654,6 +2664,8 @@ func main() {
 				state := manageraiopsmodel.OperationStateSucceeded
 				if event.Session.State == managerpacketcapturemodel.SessionStateFailed {
 					state = manageraiopsmodel.OperationStateFailed
+				} else if event.Session.State == managerpacketcapturemodel.SessionStateCancelled {
+					state = manageraiopsmodel.OperationStateCancelled
 				}
 				summary := fmt.Sprintf("%d/%d capture artifact(s) available", event.Analysis.Summary.ReadyCount, event.Analysis.Summary.CaptureCount)
 				if _, err := operationUC.AddArtifact(ctx, event.Session.OperationID, managerbizaiops.OperationArtifactInput{
@@ -5538,6 +5550,8 @@ func packetCaptureCompletionMessage(event managerbizpacketcapture.CompletionEven
 	state := "已完成"
 	if event.Session.State == "partial" {
 		state = "部分完成"
+	} else if event.Session.State == "cancelled" {
+		state = "已停止"
 	} else if event.Session.State == "failed" {
 		state = "失败"
 	}

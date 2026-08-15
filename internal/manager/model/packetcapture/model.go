@@ -29,6 +29,7 @@ const (
 	SessionStateCollecting = "collecting"
 	SessionStateReady      = "ready"
 	SessionStatePartial    = "partial"
+	SessionStateCancelled  = "cancelled"
 	SessionStateFailed     = "failed"
 )
 

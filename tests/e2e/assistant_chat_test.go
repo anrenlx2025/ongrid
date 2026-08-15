@@ -138,22 +138,80 @@ func TestAssistantChat_UserVisibleLoop(t *testing.T) {
 	})
 
 	t.Run("capture without an explicit target clarifies before model or tool execution", func(t *testing.T) {
-		before := env.FakeLLM().CallCount()
-		sessionID := createChatSession(t, env, admin.AccessToken, "E2E capture clarification")
+		for _, prompt := range []string{
+			"抓 60 秒 tcp port 443 的包",
+			"抓 HTTPS 流量，持续一分钟",
+			"帮我抓一下数据包",
+		} {
+			t.Run(prompt, func(t *testing.T) {
+				before := env.FakeLLM().CallCount()
+				sessionID := createChatSession(t, env, admin.AccessToken, "E2E capture clarification")
+				status, body, err := env.DoJSON("POST", chatMessagesPath(sessionID), map[string]any{
+					"content": prompt,
+				}, admin.AccessToken)
+				if err != nil || status != http.StatusOK {
+					t.Fatalf("post capture clarification: status=%d body=%v err=%v", status, body, err)
+				}
+				if got := nestedString(body, "assistant_message", "content"); !strings.Contains(got, "设备") {
+					t.Fatalf("clarification=%q, want explicit device question", got)
+				}
+				if after := env.FakeLLM().CallCount(); after != before {
+					t.Fatalf("clarification called LLM: before=%d after=%d", before, after)
+				}
+				if calls, _ := body["tool_calls"].([]any); len(calls) != 0 {
+					t.Fatalf("clarification executed tools: %v", calls)
+				}
+			})
+		}
+	})
+
+	t.Run("ToolSearch no match settles after one lookup instead of looping", func(t *testing.T) {
+		env.FakeLLM().SetScript(
+			testenv.LLMReply{ToolCalls: []testenv.LLMToolCall{{
+				ID: "search-missing-1", Name: "ToolSearch", Arguments: `{"query":"select:not_a_real_tool"}`,
+			}}},
+			testenv.LLMReply{Content: "当前环境没有这个能力，无法执行该操作。"},
+		)
+		sessionID := createChatSession(t, env, admin.AccessToken, "E2E missing tool")
 		status, body, err := env.DoJSON("POST", chatMessagesPath(sessionID), map[string]any{
-			"content": "抓 60 秒 tcp port 443 的包",
+			"content": "使用一个不存在的工具",
 		}, admin.AccessToken)
 		if err != nil || status != http.StatusOK {
-			t.Fatalf("post capture clarification: status=%d body=%v err=%v", status, body, err)
+			t.Fatalf("post missing tool: status=%d body=%v err=%v", status, body, err)
 		}
-		if got := nestedString(body, "assistant_message", "content"); !strings.Contains(got, "设备") {
-			t.Fatalf("clarification=%q, want explicit device question", got)
+		if got := nestedString(body, "assistant_message", "content"); got != "当前环境没有这个能力，无法执行该操作。" {
+			t.Fatalf("missing-tool answer=%q body=%v", got, body)
 		}
-		if after := env.FakeLLM().CallCount(); after != before {
-			t.Fatalf("clarification called LLM: before=%d after=%d", before, after)
+		if !containsToolCall(body["tool_calls"], "ToolSearch") {
+			t.Fatalf("ToolSearch was not recorded: %v", body)
 		}
-		if calls, _ := body["tool_calls"].([]any); len(calls) != 0 {
-			t.Fatalf("clarification executed tools: %v", calls)
+		if got := len(env.FakeLLM().Requests()); got != 2 {
+			t.Fatalf("LLM turns=%d want 2; ToolSearch no-match must not retry", got)
+		}
+	})
+
+	t.Run("a failed read tool returns control to the same conversation", func(t *testing.T) {
+		env.FakeLLM().SetScript(
+			testenv.LLMReply{ToolCalls: []testenv.LLMToolCall{{
+				ID: "bad-promql-1", Name: "query_promql", Arguments: `{}`,
+			}}},
+			testenv.LLMReply{Content: "查询参数缺少指标表达式；请提供具体 PromQL。"},
+		)
+		sessionID := createChatSession(t, env, admin.AccessToken, "E2E tool recovery")
+		status, body, err := env.DoJSON("POST", chatMessagesPath(sessionID), map[string]any{
+			"content": "查询一个指标",
+		}, admin.AccessToken)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("post failing tool: status=%d body=%v err=%v", status, body, err)
+		}
+		if got := nestedString(body, "assistant_message", "content"); got != "查询参数缺少指标表达式；请提供具体 PromQL。" {
+			t.Fatalf("recovered answer=%q body=%v", got, body)
+		}
+		if !containsToolCall(body["tool_calls"], "query_promql") {
+			t.Fatalf("failed query_promql was not recorded: %v", body)
+		}
+		if got := len(env.FakeLLM().Requests()); got != 2 {
+			t.Fatalf("LLM turns=%d want 2 after one failed tool call", got)
 		}
 	})
 
