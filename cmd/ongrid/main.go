@@ -3636,7 +3636,10 @@ var coordinatorExtraToolNames = []string{
 	aiopstools.ToolNameCapturePCAP,
 }
 
-const defaultCoordinatorMaxTurns = 30
+// Keep the default persona aligned with graph.DefaultConfig's hard ceiling.
+// A persona override must never silently reopen a loop budget that the graph
+// intentionally constrained for every other session.
+const defaultCoordinatorMaxTurns = 12
 
 func buildCoordinatorToolNames(registered []aiopstoolsbase.BaseTool) []string {
 	names := aiopstools.CoreToolNames(registered)
@@ -3983,6 +3986,7 @@ func ongridBasePrompt() string {
 
 - 工具能力以本轮可见能力（动态）和每个工具的 when_to_use / schema 为准；基础 prompt 只做路由原则。不要臆造不存在的工具，工具名或参数不确定时先用 ` + bt + `ToolSearch` + bt + ` 按能力描述查找。
 - 调工具前先分类：DIRECT_READ 只查一个明确数据面；DELEGATE 是根因、影响面、处置建议、综合体检、风险评估、优先级、报告、remediation plan、容量预测、噪音过滤、跨 metric+log+trace/change/topology/host 的关联。DELEGATE 第一工具必须是 ` + bt + `AgentTool` + bt + `，不要先自己查 ` + bt + `get_topology/query_promql/query_logql/host_bash` + bt + `。
+- “按指标排序”本身才是 DIRECT_READ；若排序结果还要求目录/文件/进程/日志等主机归因或下钻，则是 DELEGATE。先用 ` + bt + `AgentTool` + bt + ` 派对应专家，不要把目录或文件占用误写成 PromQL。全局磁盘使用率排序优先 ` + bt + `rank_edges(by="disk")` + bt + `，不要手写未知的 node_filesystem 指标名。
 - 单一数据源查询由默认助理直接查，不派专家：metric/PromQL→` + bt + `query_promql` + bt + `，log/LogQL→` + bt + `query_logql` + bt + `，trace/span/trace_id/慢 trace/错误 trace/TraceQL→` + bt + `query_traceql` + bt + `，incident 列表→` + bt + `query_incidents` + bt + `，告警规则列表→` + bt + `query_alert_rules` + bt + `，change/release events/审计变更→` + bt + `query_change_events` + bt + `，代码仓库列表→` + bt + `list_repo_sources` + bt + `，源码搜索/grep/函数或报错串定位→` + bt + `grep_source` + bt + `，数据库健康/连接/慢查询/复制/metric coverage→` + bt + `analyze_database_status` + bt + `，数据库源清单→` + bt + `list_database_sources` + bt + `，指定 incident 明细→` + bt + `get_incident_detail/correlate_incident` + bt + `，设备/主机清单→` + bt + `query_devices` + bt + `，设备健康快照→` + bt + `get_edge_summary/get_host_load/get_host_processes` + bt + `。
 - ` + bt + `get_topology` + bt + ` 只查 fleet/deployment facts（规模、版本、Prom/Loki/Tempo/Grafana 配置）。不要为了确认某个数据源是否可用而先调它；对应 query 工具失败时再说明配置缺口。
 - 已知 edge 主机命令或已知文件删除：直接 ` + bt + `host_bash(device_ids=[...], cmd="...")` + bt + `；读命令走只读 sandbox，写命令自动弹内置确认卡。不要为已知删除再派 AgentTool。

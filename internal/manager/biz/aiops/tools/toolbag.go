@@ -75,6 +75,7 @@ var tierByName = map[string]string{
 	"query_incidents":         "core",
 	"query_change_events":     "core",
 	"get_edge_summary":        "core",
+	"rank_edges":              "core",
 	"correlate_incident":      "core",
 	"AgentTool":               "core",
 	"SendMessage":             "core",
@@ -93,7 +94,6 @@ var tierByName = map[string]string{
 	// diagnostic exploration — most chats don't need it, and its
 	// when_to_use blob is large enough to want defer-loading once
 	// the marketplace pushes the bag past threshold.
-	"rank_edges":            "specialty",
 	"find_outlier_edges":    "specialty",
 	"get_incident_detail":   "specialty",
 	"query_alert_rules":     "specialty",

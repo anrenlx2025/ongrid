@@ -118,9 +118,9 @@ func TestToolBag_OverThresholdSplits(t *testing.T) {
 	}
 
 	deferred := bag.DeferredTools()
-	// 8 known specialty + 13 unknown → 21 deferred.
-	if len(deferred) != 21 {
-		t.Errorf("DeferredTools len=%d want 21", len(deferred))
+	// 7 known specialty + 13 unknown → 20 deferred.
+	if len(deferred) != 20 {
+		t.Errorf("DeferredTools len=%d want 20", len(deferred))
 	}
 
 	got := bag.SchemasForLLM()
@@ -136,11 +136,11 @@ func TestToolBag_OverThresholdSplits(t *testing.T) {
 			coreCount++
 		}
 	}
-	if coreCount != 14 {
-		t.Errorf("core (full schema) tools=%d want 14", coreCount)
+	if coreCount != 15 {
+		t.Errorf("core (full schema) tools=%d want 15", coreCount)
 	}
-	if redactedCount != 21 {
-		t.Errorf("redacted tools=%d want 21", redactedCount)
+	if redactedCount != 20 {
+		t.Errorf("redacted tools=%d want 20", redactedCount)
 	}
 }
 

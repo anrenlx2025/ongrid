@@ -62,6 +62,9 @@ func TestCoordinatorRosterDerivesRegisteredCoreTools(t *testing.T) {
 			t.Errorf("coordinator roster missing policy extra %q (have %v)", want, got)
 		}
 	}
+	if !containsString(got, "rank_edges") {
+		t.Errorf("coordinator roster missing registered core rank_edges tool: %v", got)
+	}
 }
 
 func TestBasePromptAllowsLightweightCoordinatorReads(t *testing.T) {
@@ -99,6 +102,11 @@ func TestBasePromptRoutesSimpleTraceQueriesDirectly(t *testing.T) {
 			t.Fatalf("base prompt missing trace direct-routing guidance %q", want)
 		}
 	}
+	for _, want := range []string{"按指标排序", "目录/文件/进程/日志等主机归因", "rank_edges(by=\"disk\")"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("base prompt missing filesystem delegation guidance %q", want)
+		}
+	}
 }
 
 func TestBasePromptRoutesComplexWorkToAgentToolFirst(t *testing.T) {
@@ -115,9 +123,9 @@ func TestBasePromptRoutesComplexWorkToAgentToolFirst(t *testing.T) {
 	}
 }
 
-func TestDefaultCoordinatorKeepsThirtyTurns(t *testing.T) {
-	if defaultCoordinatorMaxTurns != 30 {
-		t.Fatalf("default coordinator MaxTurns = %d, want 30", defaultCoordinatorMaxTurns)
+func TestDefaultCoordinatorUsesGraphLoopBudget(t *testing.T) {
+	if defaultCoordinatorMaxTurns != 12 {
+		t.Fatalf("default coordinator MaxTurns = %d, want 12", defaultCoordinatorMaxTurns)
 	}
 }
 
