@@ -57,6 +57,7 @@ func TestResolveTurnRequiresCaptureTarget(t *testing.T) {
 func TestResolveTurnAllowsReadOnlyPacketAndGlobalRequests(t *testing.T) {
 	tests := []string{
 		"在源码里找 packet capture 会话列表 API 的入口文件，只给路径和函数名。",
+		"分析最近 packet capture 页面为什么可能 page not found，从产物关联角度回答。",
 		"跨 Edge 抓包能不能直接用时间差判断网络延迟？请基于当前产品能力回答。",
 		"用 PromQL 算出各设备根分区磁盘使用率，按高到低排序。",
 		"列出当前可用的磁盘、CPU、内存相关指标名。",

@@ -956,6 +956,12 @@ func needsPacketCaptureSessionID(userText string) bool {
 	if strings.Contains(text, "pcap-session-") {
 		return false
 	}
+	if strings.Contains(userText, "页面") ||
+		strings.Contains(userText, "产物关联") ||
+		strings.Contains(text, "page not found") ||
+		strings.Contains(text, "why") {
+		return false
+	}
 	hasCapture := strings.Contains(userText, "抓包") ||
 		strings.Contains(userText, "数据包") ||
 		strings.Contains(text, "packet capture") ||
