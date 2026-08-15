@@ -388,7 +388,7 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
   }
 
   return (
-    <section className="overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-950/40 text-xs shadow-sm shadow-black/10">
+    <section className="overflow-hidden rounded-lg border border-zinc-800/60 bg-zinc-900/40 text-xs shadow-sm shadow-black/10">
       <div className="flex min-w-0 items-start gap-3 px-3 py-3">
         <div className="flex min-w-0 flex-1 items-start gap-2.5">
           <div className={cn('mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border', presentation.iconBoxClass)}>
@@ -425,7 +425,7 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
           {detailURL && (
             <a
               href={detailURL}
-              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-zinc-700/80 bg-zinc-900 px-2.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800 hover:text-zinc-100"
+              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800 hover:text-zinc-100"
             >
               <ExternalLink size={13} />
               {operation.kind === 'packet_capture_session' ? tr('打开会话', 'Open session') : tr('打开产物', 'Open artifact')}
@@ -470,7 +470,7 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
           ))}
         </div>
       </div>
-      <div className="flex items-center justify-between border-t border-zinc-900 bg-zinc-950/50 px-3 py-1.5 text-[10px] text-zinc-600">
+      <div className="flex items-center justify-between border-t border-zinc-800/40 bg-zinc-900/20 px-3 py-1.5 text-[10px] text-zinc-600">
         <span>{actionLabel}</span>
         {!terminal && (
           <div className="h-0.5 w-24 overflow-hidden rounded-full bg-zinc-800">
