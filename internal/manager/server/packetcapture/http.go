@@ -181,6 +181,14 @@ func toSessionListDTO(s *model.Session) sessionDTO {
 }
 
 func toDTO(c *model.Capture) captureDTO {
+	return toDTOWithAnalysis(c, true)
+}
+
+func toSessionMemberDTO(c *model.Capture) captureDTO {
+	return toDTOWithAnalysis(c, false)
+}
+
+func toDTOWithAnalysis(c *model.Capture, includeAnalysis bool) captureDTO {
 	if c == nil {
 		return captureDTO{}
 	}
@@ -214,7 +222,7 @@ func toDTO(c *model.Capture) captureDTO {
 		CreatedAt:       c.CreatedAt,
 		UpdatedAt:       c.UpdatedAt,
 	}
-	if c.ParsedJSON != "" {
+	if includeAnalysis && c.ParsedJSON != "" {
 		var analysis any
 		if err := json.Unmarshal([]byte(c.ParsedJSON), &analysis); err == nil {
 			dto.Analysis = analysis
@@ -267,7 +275,7 @@ func (h *Handler) getSession(w http.ResponseWriter, r *http.Request) {
 	}
 	members := make([]captureDTO, 0, len(detail.Captures))
 	for _, capture := range detail.Captures {
-		members = append(members, toDTO(capture))
+		members = append(members, toSessionMemberDTO(capture))
 	}
 	dto := toSessionDTO(detail.Session)
 	dto.PCAPCount = len(detail.Captures)
@@ -469,7 +477,7 @@ func (h *Handler) refreshSession(w http.ResponseWriter, r *http.Request) {
 	}
 	members := make([]captureDTO, 0, len(detail.Captures))
 	for _, capture := range detail.Captures {
-		members = append(members, toDTO(capture))
+		members = append(members, toSessionMemberDTO(capture))
 	}
 	dto := toSessionDTO(detail.Session)
 	dto.Analysis = detail.Analysis
