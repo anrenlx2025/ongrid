@@ -3,6 +3,7 @@
 package testenv
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -29,8 +30,73 @@ type FakeLLM struct {
 
 	mu        sync.Mutex
 	reply     string
+	script    []LLMReply
 	calls     int
 	gotModels []string // model parameter from each request, in order
+	requests  []LLMRequest
+	blockNext *LLMBlock
+}
+
+// LLMToolCall is one OpenAI-compatible function call emitted by a scripted
+// reply. Arguments must be a JSON object encoded as a string.
+type LLMToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
+}
+
+// LLMReply is one deterministic response from FakeLLM. Empty ToolCalls
+// produces a normal terminal assistant response; otherwise it produces an
+// OpenAI tool_calls turn.
+type LLMReply struct {
+	Content   string
+	ToolCalls []LLMToolCall
+}
+
+// LLMRequest is the observable subset of an OpenAI completion request used
+// by E2E assertions. ToolNames establishes what schemas the agent exposed to
+// the model on that turn without binding tests to provider wire details.
+type LLMRequest struct {
+	Model     string
+	ToolNames []string
+}
+
+// LLMBlock makes the next OpenAI completion wait until the client cancels the
+// request or Release is called. It lets E2E exercise the public stop endpoint
+// against a real in-flight agent turn without adding a test-only production
+// code path.
+type LLMBlock struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+// BlockNext arranges for the next OpenAI completion to block.
+func (f *FakeLLM) BlockNext() *LLMBlock {
+	block := &LLMBlock{started: make(chan struct{}), release: make(chan struct{})}
+	f.mu.Lock()
+	f.blockNext = block
+	f.mu.Unlock()
+	return block
+}
+
+// WaitStarted waits until FakeLLM has received the blocked completion.
+func (b *LLMBlock) WaitStarted(ctx context.Context) error {
+	select {
+	case <-b.started:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Release lets a blocked completion return its scripted response. It is
+// idempotent so callers can safely defer it as cleanup.
+func (b *LLMBlock) Release() {
+	if b == nil {
+		return
+	}
+	b.once.Do(func() { close(b.release) })
 }
 
 // NewFakeLLM starts an httptest.Server that speaks enough of the
@@ -56,6 +122,18 @@ func (f *FakeLLM) Close() { f.server.Close() }
 func (f *FakeLLM) SetLLMReply(s string) {
 	f.mu.Lock()
 	f.reply = s
+	f.script = nil
+	f.mu.Unlock()
+}
+
+// SetScript replaces the next OpenAI completion responses. It is intended
+// for one E2E test at a time: Start serializes manager instances and E2E
+// tests do not run in parallel. When the script is exhausted FakeLLM falls
+// back to its canned reply so an accidental extra agent turn remains visible.
+func (f *FakeLLM) SetScript(replies ...LLMReply) {
+	f.mu.Lock()
+	f.script = append([]LLMReply(nil), replies...)
+	f.requests = nil
 	f.mu.Unlock()
 }
 
@@ -76,28 +154,94 @@ func (f *FakeLLM) ModelsRequested() []string {
 	return out
 }
 
+// Requests returns snapshots of OpenAI completion requests served since the
+// most recent SetScript call.
+func (f *FakeLLM) Requests() []LLMRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]LLMRequest, len(f.requests))
+	for i, req := range f.requests {
+		out[i] = LLMRequest{Model: req.Model, ToolNames: append([]string(nil), req.ToolNames...)}
+	}
+	return out
+}
+
 func (f *FakeLLM) openaiChat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Model string `json:"model"`
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid fake LLM request", http.StatusBadRequest)
+		return
+	}
+	toolNames := make([]string, 0, len(req.Tools))
+	for _, tool := range req.Tools {
+		if tool.Function.Name != "" {
+			toolNames = append(toolNames, tool.Function.Name)
+		}
+	}
 	f.mu.Lock()
 	f.calls++
 	f.gotModels = append(f.gotModels, req.Model)
-	reply := f.reply
+	f.requests = append(f.requests, LLMRequest{Model: req.Model, ToolNames: toolNames})
+	reply := LLMReply{Content: f.reply}
+	if len(f.script) > 0 {
+		reply = f.script[0]
+		f.script = f.script[1:]
+	}
+	block := f.blockNext
+	f.blockNext = nil
 	f.mu.Unlock()
+	if block != nil {
+		close(block.started)
+		select {
+		case <-r.Context().Done():
+			return
+		case <-block.release:
+		}
+	}
+	message := map[string]any{
+		"role":    "assistant",
+		"content": reply.Content,
+	}
+	finishReason := "stop"
+	if len(reply.ToolCalls) > 0 {
+		toolCalls := make([]map[string]any, 0, len(reply.ToolCalls))
+		for i, call := range reply.ToolCalls {
+			id := call.ID
+			if id == "" {
+				id = "call_fake_" + strconv.Itoa(i+1)
+			}
+			arguments := call.Arguments
+			if arguments == "" {
+				arguments = "{}"
+			}
+			toolCalls = append(toolCalls, map[string]any{
+				"id":   id,
+				"type": "function",
+				"function": map[string]any{
+					"name":      call.Name,
+					"arguments": arguments,
+				},
+			})
+		}
+		message["tool_calls"] = toolCalls
+		finishReason = "tool_calls"
+	}
 	resp := map[string]any{
 		"id":      "chatcmpl-fake",
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   req.Model,
 		"choices": []map[string]any{{
-			"index": 0,
-			"message": map[string]any{
-				"role":    "assistant",
-				"content": reply,
-			},
-			"finish_reason": "stop",
+			"index":         0,
+			"message":       message,
+			"finish_reason": finishReason,
 		}},
 		"usage": map[string]any{
 			"prompt_tokens":     42,
@@ -120,13 +264,13 @@ func (f *FakeLLM) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 	reply := f.reply
 	f.mu.Unlock()
 	resp := map[string]any{
-		"id":      "msg_fake",
-		"type":    "message",
-		"role":    "assistant",
-		"model":   req.Model,
-		"content": []map[string]any{{"type": "text", "text": reply}},
+		"id":          "msg_fake",
+		"type":        "message",
+		"role":        "assistant",
+		"model":       req.Model,
+		"content":     []map[string]any{{"type": "text", "text": reply}},
 		"stop_reason": "end_turn",
-		"usage": map[string]any{"input_tokens": 42, "output_tokens": 8},
+		"usage":       map[string]any{"input_tokens": 42, "output_tokens": 8},
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
