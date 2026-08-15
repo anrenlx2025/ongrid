@@ -453,7 +453,11 @@ function OperationCard({ operation }: { operation: OperationCardData }) {
               }}
             >
               {cancelling || state === 'canceling' ? <Loader2 size={13} className="animate-spin" /> : <X size={13} />}
-              {cancelling || state === 'canceling' ? tr('停止中', 'Stopping') : (visibleCancel.label || tr('停止', 'Stop'))}
+              {cancelling || state === 'canceling'
+                ? tr('停止中', 'Stopping')
+                : visibleCancel.kind === 'cancel'
+                  ? tr('停止', 'Stop')
+                  : visibleCancel.label}
             </button>
           )}
           {enabledActions.filter((action) => action.kind !== 'cancel').map((action) => (
