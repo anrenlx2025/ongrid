@@ -8,6 +8,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, CalendarClock, ChevronDown, ChevronRight, Loader2, Pencil, Play, Plus, Power, Trash2, Zap } from 'lucide-react';
 import { Modal } from '@/components/Modal';
 import { ReportCards } from '@/components/ReportCards';
+import { Button, Card, EmptyState } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { fullDateTime } from '@/lib/format';
 import { usePermissions } from '@/store/me';
@@ -165,9 +166,25 @@ function TaskList() {
         {loading ? (
           <div className="py-16 text-center text-sm text-zinc-500">{tr('加载中…', 'Loading…')}</div>
         ) : items.length === 0 ? (
-          <div className="mx-auto max-w-2xl rounded-lg border border-dashed border-zinc-800 py-16 text-center text-sm text-zinc-400">
-            {tr('还没有任务。点「立即生成」做一次性报告，或「新建定时任务」排期。', 'No tasks yet. Click "Run now" for a one-shot, or create a scheduled task.')}
-          </div>
+          <Card className="p-0">
+            <EmptyState
+              icon={CalendarClock}
+              title={tr('还没有任务', 'No tasks yet')}
+              hint={tr('任务会汇总一次性生成和定时报告，点进任务可查看它产生的所有产物。', 'Tasks collect one-shot generations and scheduled reports; open a task to see all artifacts it produced.')}
+              action={
+                canMutate ? (
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Button variant="primary" onClick={() => setOneoffOpen(true)}>
+                      <Zap size={12} /> {tr('立即生成', 'Run now')}
+                    </Button>
+                    <Button onClick={() => setCreating(true)}>
+                      <CalendarClock size={12} /> {tr('新建定时任务', 'New scheduled task')}
+                    </Button>
+                  </div>
+                ) : undefined
+              }
+            />
+          </Card>
         ) : (
           <div className="overflow-hidden rounded-xl border border-zinc-800/60 bg-zinc-900/40">
             <table className="w-full text-sm">
