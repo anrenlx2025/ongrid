@@ -91,11 +91,13 @@ const (
 // enough that normal multi-step investigation isn't clipped. A 30-call cap
 // merely turns a wrong route into a long, expensive failure, so the general
 // limit is intentionally small and evidence tools have a stricter limit.
-const maxToolCallsPerRun = 8
+const maxToolCallsPerRun = 6
 
 func maxCallsForTool(name string) int {
 	switch name {
 	case toolNameQueryPromQL, "query_logql", "query_traceql":
+		return 3
+	case "host_bash", "query_k8s_snapshot", "AgentTool":
 		return 4
 	case "draft_config_change":
 		// Only a confirmable config_draft increments this counter;

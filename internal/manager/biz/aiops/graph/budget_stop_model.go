@@ -51,9 +51,9 @@ func finalAnswerAfterToolBudget(messages []*schema.Message) (*schema.Message, bo
 	if tool == "" {
 		tool = "the tool"
 	}
-	content := "本轮 `" + tool + "` 查询已经达到安全上限。我会停止继续调用工具，基于已经拿到的结果回答：当前证据不足以继续细分这条查询路径；如果前面的结果为空或报错，请检查查询标签/语法/数据源配置，或在下一条消息给出更具体的时间窗、service、device_id 后再查。"
+	content := "我已经停止继续调用 `" + tool + "`，避免在同一轮里反复查询。基于本轮已经拿到的结果：如果上面的数据已经出现异常信号，就按这些信号给出结论和下一步；如果结果为空或报错，本轮缺少可判定证据，请在下一条消息补充更具体的时间窗、service 或 device_id 后再查。"
 	if wantsEnglishResponse(messages) {
-		content = "This turn has reached the safety limit for `" + tool + "` queries. I will stop calling tools and answer from the evidence already collected: the current evidence is not enough to narrow this path further. If earlier results were empty or errored, check the query labels, syntax, or data-source configuration; otherwise send a narrower time window, service, or device_id in the next message and I can query again."
+		content = "I stopped calling `" + tool + "` again to avoid repeating the same investigation in this turn. Based on the evidence already collected: if the earlier results show an abnormal signal, use that signal for the conclusion and next step; if they were empty or errored, this turn lacks decisive evidence, so send a narrower time window, service, or device_id in the next message and I can query again."
 	}
 	return &schema.Message{Role: schema.Assistant, Content: content}, true
 }

@@ -53,6 +53,27 @@ func TestResolveTurnRequiresCaptureTarget(t *testing.T) {
 	}
 }
 
+func TestResolveTurnAllowsReadOnlyPacketAndGlobalRequests(t *testing.T) {
+	tests := []string{
+		"在源码里找 packet capture 会话列表 API 的入口文件，只给路径和函数名。",
+		"告诉我最近的数据包会话有哪些，给出会话名、pcap 数量和分析入口。",
+		"分析最近一个 HTTPS 排障抓包会话，说明主要通信端点。",
+		"跨 Edge 抓包能不能直接用时间差判断网络延迟？请基于当前产品能力回答。",
+		"用 PromQL 算出各设备根分区磁盘使用率，按高到低排序。",
+		"列出当前可用的磁盘、CPU、内存相关指标名。",
+		"有没有 Linux 磁盘占用排查的内置知识？给我相关条目标题。",
+		"在源码里搜索 ToolSearch 的实现位置，给出文件路径。",
+	}
+	for _, text := range tests {
+		t.Run(text, func(t *testing.T) {
+			plan, clarification := resolveTurn(&Request{UserText: text, Role: "admin"})
+			if plan.Decision == DecisionClarify || clarification != "" {
+				t.Fatalf("resolveTurn(%q) = %+v, %q; want agent loop", text, plan, clarification)
+			}
+		})
+	}
+}
+
 func TestResolveTurnRequiresHostTargetForHostBoundOps(t *testing.T) {
 	tests := []struct {
 		name string

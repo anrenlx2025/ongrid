@@ -930,8 +930,7 @@ func resolveTurn(req *Request) (TurnPlan, string) {
 	if req == nil {
 		return PlanTurn(ResolvedFacts{Permitted: false, Reason: "nil request"}), ""
 	}
-	text := strings.ToLower(req.UserText)
-	captureIntent := !isCancelIntent(req.UserText) && (strings.Contains(text, "pcap") || strings.Contains(text, "packet capture") || strings.Contains(req.UserText, "抓包") || (strings.Contains(req.UserText, "抓") && (strings.Contains(req.UserText, "流量") || strings.Contains(req.UserText, "数据包") || strings.Contains(req.UserText, "的包") || strings.Contains(text, "tcp port") || strings.Contains(text, "udp port"))))
+	captureIntent := isStartCaptureIntent(req.UserText)
 	hostTargetIntent := requiresHostTarget(req.UserText)
 	hasTarget := hasExplicitHostTarget(req)
 	plan := PlanTurn(ResolvedFacts{Missing: (captureIntent || hostTargetIntent) && !hasTarget, Permitted: req.Role != "viewer", LongRunning: captureIntent})
@@ -942,6 +941,48 @@ func resolveTurn(req *Request) (TurnPlan, string) {
 		return plan, "这个操作需要先确定目标设备。请使用 @ 选择设备，或明确提供 `device_id`。"
 	}
 	return plan, ""
+}
+
+func isStartCaptureIntent(userText string) bool {
+	if isCancelIntent(userText) {
+		return false
+	}
+	text := strings.ToLower(userText)
+	if hasReadOnlyCaptureIntent(userText) {
+		return false
+	}
+	startMarkers := []string{"开始", "发起", "启动", "抓包", "抓取", "抓一下", "抓 ", "抓\t", "capture ", "start capture", "run capture"}
+	hasStartMarker := false
+	for _, marker := range startMarkers {
+		if strings.Contains(text, marker) || strings.Contains(userText, marker) {
+			hasStartMarker = true
+			break
+		}
+	}
+	if !hasStartMarker {
+		return false
+	}
+	return strings.Contains(text, "pcap") ||
+		strings.Contains(text, "packet capture") ||
+		strings.Contains(text, "tcp port") ||
+		strings.Contains(text, "udp port") ||
+		strings.Contains(userText, "抓包") ||
+		strings.Contains(userText, "流量") ||
+		strings.Contains(userText, "数据包") ||
+		strings.Contains(userText, "的包")
+}
+
+func hasReadOnlyCaptureIntent(userText string) bool {
+	text := strings.ToLower(userText)
+	for _, phrase := range []string{
+		"分析", "查看", "列出", "最近", "有哪些", "告诉我", "入口", "源码", "实现", "页面", "产物", "会话", "能不能", "是否",
+		"analyze", "inspect", "show", "list", "recent", "artifact", "session", "source", "code", "can ",
+	} {
+		if strings.Contains(text, phrase) || strings.Contains(userText, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func isCancelIntent(userText string) bool {
@@ -976,12 +1017,29 @@ var ipv4LikeRe = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
 func requiresHostTarget(userText string) bool {
 	text := strings.ToLower(userText)
 	zh := userText
+	if hasGlobalOrReadOnlyIntent(userText) {
+		return false
+	}
 	hostIntentPhrases := []string{
 		"磁盘", "目录", "文件", "大文件", "进程", "端口", "服务重启", "重启服务", "网络接口", "网卡", "dns", "连通性",
 		"disk", "directory", "file", "process", "port", "restart service", "interface", "reachability",
 	}
 	for _, phrase := range hostIntentPhrases {
 		if strings.Contains(text, phrase) || strings.Contains(zh, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasGlobalOrReadOnlyIntent(userText string) bool {
+	text := strings.ToLower(userText)
+	globalPhrases := []string{
+		"列出", "所有", "各设备", "当前可用", "指标名", "promql", "源码", "实现", "知识", "内置知识", "产物", "会话", "报告",
+		"list", "all", "fleet", "metric catalog", "source", "code", "knowledge", "artifact", "report", "session",
+	}
+	for _, phrase := range globalPhrases {
+		if strings.Contains(text, phrase) || strings.Contains(userText, phrase) {
 			return true
 		}
 	}
