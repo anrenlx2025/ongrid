@@ -35,6 +35,25 @@ type recordingToolPersistence struct {
 	ends   []string
 }
 
+type concurrentCountTool struct {
+	name  string
+	class string
+	calls atomic.Int32
+}
+
+func (t *concurrentCountTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
+	return &basetool.ToolInfo{
+		Name:       t.name,
+		Class:      t.class,
+		Parameters: json.RawMessage(`{"type":"object","properties":{}}`),
+	}, nil
+}
+
+func (t *concurrentCountTool) InvokableRun(_ context.Context, _ string, _ ...basetool.InvokeOption) (string, error) {
+	t.calls.Add(1)
+	return `{"ok":true}`, nil
+}
+
 func (r *recordingToolPersistence) PersistToolStart(_ context.Context, name, args string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -385,6 +404,71 @@ func TestEinoToolAdapter_ReadToolsUseGenericCallCap(t *testing.T) {
 				t.Fatalf("%s executions = %d, want %d", name, got, limit)
 			}
 		})
+	}
+}
+
+func TestEinoToolAdapter_PerToolCallCapReservesBeforeConcurrentExecution(t *testing.T) {
+	t.Parallel()
+	inner := &concurrentCountTool{name: "host_bash", class: "read"}
+	a := &einoToolAdapter{inner: inner, memo: newToolMemo()}
+	ctx := context.Background()
+	limit := maxCallsForTool("host_bash")
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	outs := make(chan string, limit*3)
+	for i := 0; i < limit*3; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			out, _ := a.InvokableRun(ctx, fmt.Sprintf(`{"cmd":"echo %d"}`, i))
+			outs <- out
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(outs)
+
+	var budgeted int
+	for out := range outs {
+		if strings.Contains(out, "call_budget_exceeded") {
+			budgeted++
+		}
+	}
+	if got := inner.calls.Load(); got != int32(limit) {
+		t.Fatalf("concurrent executions = %d, want exactly limit %d", got, limit)
+	}
+	if budgeted == 0 {
+		t.Fatalf("expected over-limit concurrent calls to receive budget results")
+	}
+}
+
+func TestEinoToolAdapter_TotalCallCapStopsWideInvestigation(t *testing.T) {
+	t.Parallel()
+	memo := newToolMemo()
+	ctx := context.Background()
+	var executed int32
+	for i := 0; i < maxTotalToolCallsPerRun; i++ {
+		inner := &concurrentCountTool{name: fmt.Sprintf("tool_%02d", i), class: "read"}
+		a := &einoToolAdapter{inner: inner, memo: memo}
+		out, _ := a.InvokableRun(ctx, `{}`)
+		if strings.Contains(out, "call_budget_exceeded") {
+			t.Fatalf("tool %d should execute before total cap, got %s", i, out)
+		}
+		executed += inner.calls.Load()
+	}
+	over := &concurrentCountTool{name: "tool_over", class: "read"}
+	a := &einoToolAdapter{inner: over, memo: memo}
+	out, _ := a.InvokableRun(ctx, `{}`)
+	if !strings.Contains(out, "call_budget_exceeded") {
+		t.Fatalf("over total cap should return budget result, got %q", out)
+	}
+	if over.calls.Load() != 0 {
+		t.Fatalf("over total cap tool executed %d times, want 0", over.calls.Load())
+	}
+	if executed != int32(maxTotalToolCallsPerRun) {
+		t.Fatalf("executed before cap = %d, want %d", executed, maxTotalToolCallsPerRun)
 	}
 }
 

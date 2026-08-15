@@ -28,6 +28,7 @@ type toolMemo struct {
 	mu     sync.Mutex
 	m      map[string]string // (tool\x00args) -> result, identical-call cache
 	counts map[string]int    // tool name -> distinct executions this run
+	total  int               // all distinct executions this run
 	last   map[string]string // tool name -> most recent successful result this run
 }
 
@@ -60,6 +61,21 @@ func (t *toolMemo) bump(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.counts[name]++
+	t.total++
+}
+
+func (t *toolMemo) reserve(name string, perToolLimit, totalLimit int) (int, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if perToolLimit > 0 && t.counts[name] >= perToolLimit {
+		return t.counts[name], false
+	}
+	if totalLimit > 0 && t.total >= totalLimit {
+		return t.counts[name], false
+	}
+	t.counts[name]++
+	t.total++
+	return t.counts[name], true
 }
 
 func (t *toolMemo) putLast(name, result string) {
@@ -93,6 +109,8 @@ const (
 // limit is intentionally small and evidence tools have a stricter limit.
 const maxToolCallsPerRun = 6
 
+const maxTotalToolCallsPerRun = 10
+
 func maxCallsForTool(name string) int {
 	switch name {
 	case toolNameQueryPromQL, "query_logql", "query_traceql":
@@ -116,6 +134,10 @@ func countFailedToolCall(name string) bool {
 	default:
 		return true
 	}
+}
+
+func reservesBeforeExecution(name string) bool {
+	return name != toolNameDraftConfigChange
 }
 
 func countSuccessfulToolCall(name, result string) bool {
@@ -415,11 +437,17 @@ func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON stri
 		//    back a "synthesize now" directive. Catches the distinct-args
 		//    repeat loop (query_promql/query_alert_rules called over and over)
 		//    that the memo can't.
-		if a.cacheName != "" && a.memo.count(a.cacheName) >= maxCallsForTool(a.cacheName) {
-			return toolBudgetExceeded(a.cacheName, a.memo.count(a.cacheName)), nil
-		}
 		if blocked, ok := a.draftMetricCatalogPreflight(argumentsInJSON); ok {
 			return blocked, nil
+		}
+		if a.cacheName != "" {
+			if reservesBeforeExecution(a.cacheName) {
+				if n, ok := a.memo.reserve(a.cacheName, maxCallsForTool(a.cacheName), maxTotalToolCallsPerRun); !ok {
+					return toolBudgetExceeded(a.cacheName, n), nil
+				}
+			} else if a.memo.count(a.cacheName) >= maxCallsForTool(a.cacheName) {
+				return toolBudgetExceeded(a.cacheName, a.memo.count(a.cacheName)), nil
+			}
 		}
 	}
 	out, err = a.inner.InvokableRun(ctx, argumentsInJSON, resolved.opts...)
@@ -428,7 +456,7 @@ func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON stri
 		// hammered. draft_config_change is the exception: validation failures
 		// are common while the model corrects structured config args, and only
 		// a successful draft should consume the one-draft-per-turn budget.
-		if a.memo != nil && a.cacheName != "" && countFailedToolCall(a.cacheName) {
+		if a.memo != nil && a.cacheName != "" && countFailedToolCall(a.cacheName) && !reservesBeforeExecution(a.cacheName) {
 			a.memo.bump(a.cacheName)
 		}
 		// Re-shape as a tool-result-style JSON so the LLM gets it as a
@@ -456,7 +484,9 @@ func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON stri
 	// the same user turn. Only a real config_draft consumes the one-draft cap.
 	if a.memo != nil && a.cacheName != "" {
 		if countSuccessfulToolCall(a.cacheName, out) {
-			a.memo.bump(a.cacheName)
+			if !reservesBeforeExecution(a.cacheName) {
+				a.memo.bump(a.cacheName)
+			}
 		}
 		a.memo.putLast(a.cacheName, out)
 	}
