@@ -1305,14 +1305,31 @@ func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, i
 		topologyIntent = false
 	}
 	explicitHostCommand := explicitHostCommandIntent(low, userText)
+	// A directory, path, du, or large-file request is filesystem inspection,
+	// even when it also says "disk". PromQL reports capacity metrics; it
+	// cannot identify which directory consumes space on a device.
+	filesystemIntent := containsAny(low,
+		"directory", "directories", "filesystem", "file system", "path", "du ", "du/", "large file", "large files") ||
+		strings.Contains(userText, "目录") || strings.Contains(userText, "文件系统") ||
+		strings.Contains(userText, "大文件") ||
+		strings.Contains(userText, "文件占用") || strings.Contains(userText, "du")
 	hostIntent := strings.Contains(low, "host_bash") || strings.Contains(low, "journalctl") || strings.Contains(low, "systemctl") ||
 		strings.Contains(low, "dmesg") || strings.Contains(low, "device_id") || strings.Contains(userText, "主机") || strings.Contains(userText, "文件") ||
-		explicitHostCommand
+		filesystemIntent || explicitHostCommand
 	// A direct command must win over broad keyword classifiers. In particular,
 	// "docker" contains the legacy "doc" knowledge keyword, which otherwise
 	// routes `docker images` to query_knowledge before host_bash is visible.
 	if explicitHostCommand {
 		return filterCoordinatorToolNames(bag, "host_bash", "query_devices")
+	}
+	if filesystemIntent {
+		return filterCoordinatorToolNames(bag,
+			"ToolSearch",
+			"query_devices",
+			"host_du_summary",
+			"host_find_large_files",
+			"host_stat_file",
+		)
 	}
 	if !knowledgeIntent && !metricIntent && !logIntent && !traceIntent && !sourceSearchIntent && !dbHealthIntent && !changeEventIntent && !alertRulesIntent && !incidentIntent && !networkInventoryIntent && !complexHint {
 		return bag

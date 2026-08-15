@@ -321,15 +321,15 @@ func TestEinoToolAdapter_PerToolCallCap(t *testing.T) {
 	}
 }
 
-func TestEinoToolAdapter_QueryPromQLUsesGenericCallCap(t *testing.T) {
+func TestEinoToolAdapter_QueryPromQLUsesStrictCallCap(t *testing.T) {
 	t.Parallel()
 	inner := &fakeBaseTool{name: "query_promql", class: "read", runResp: `{"v":1}`}
 	a := &einoToolAdapter{inner: inner, memo: newToolMemo()}
 	ctx := context.Background()
 	limit := maxCallsForTool("query_promql")
 
-	if limit != maxToolCallsPerRun {
-		t.Fatalf("query_promql limit = %d, want generic %d", limit, maxToolCallsPerRun)
+	if limit != 4 {
+		t.Fatalf("query_promql limit = %d, want 4", limit)
 	}
 	for i := 0; i < limit; i++ {
 		out, _ := a.InvokableRun(ctx, fmt.Sprintf(`{"q":"m%d"}`, i))
@@ -353,8 +353,8 @@ func TestEinoToolAdapter_ReadToolsUseGenericCallCap(t *testing.T) {
 	t.Parallel()
 	for name, wantLimit := range map[string]int{
 		"AgentTool":             maxToolCallsPerRun,
-		"query_logql":           maxToolCallsPerRun,
-		"query_traceql":         maxToolCallsPerRun,
+		"query_logql":           4,
+		"query_traceql":         4,
 		"host_bash":             maxToolCallsPerRun,
 		"host_du_summary":       maxToolCallsPerRun,
 		"host_find_large_files": maxToolCallsPerRun,

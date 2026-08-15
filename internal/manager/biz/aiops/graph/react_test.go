@@ -475,8 +475,8 @@ func TestAssembleMessages_NilInputFails(t *testing.T) {
 func TestConfig_Defaults(t *testing.T) {
 	t.Parallel()
 	c := Config{}.applyDefaults()
-	if c.MaxIterations != 30 {
-		t.Errorf("MaxIterations default = %d, want 30", c.MaxIterations)
+	if c.MaxIterations != 12 {
+		t.Errorf("MaxIterations default = %d, want 12", c.MaxIterations)
 	}
 	if c.ToolTimeout.Seconds() != 15 {
 		t.Errorf("ToolTimeout default = %v, want 15s", c.ToolTimeout)

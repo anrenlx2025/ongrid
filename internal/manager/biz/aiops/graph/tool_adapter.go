@@ -88,11 +88,15 @@ const (
 // dozen metrics, query_alert_rules over and over) without converging. Past
 // the cap the tool returns a "synthesize now" directive instead of running,
 // which forces the agent to answer from what it already gathered. Generous
-// enough that normal multi-step investigation isn't clipped.
-const maxToolCallsPerRun = 30
+// enough that normal multi-step investigation isn't clipped. A 30-call cap
+// merely turns a wrong route into a long, expensive failure, so the general
+// limit is intentionally small and evidence tools have a stricter limit.
+const maxToolCallsPerRun = 8
 
 func maxCallsForTool(name string) int {
 	switch name {
+	case toolNameQueryPromQL, "query_logql", "query_traceql":
+		return 4
 	case "draft_config_change":
 		// Only a confirmable config_draft increments this counter;
 		// config_validation_failed remains retryable so the model can repair

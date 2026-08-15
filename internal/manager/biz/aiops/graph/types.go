@@ -153,7 +153,9 @@ type Config struct {
 	// agent default of 0.1.
 	Temperature float32
 
-	// MaxIterations caps the outer ReAct loop. 0 -> 30 (agent.go default).
+	// MaxIterations caps the outer ReAct loop. 0 -> 12. Tool-level budgets
+	// stop repeated evidence gathering earlier; this is the final circuit
+	// breaker for cross-tool loops.
 	MaxIterations int
 
 	// ToolTimeout is the per-tool wall clock ceiling. 0 -> 15s
@@ -168,7 +170,7 @@ type Config struct {
 // mutation of their Config struct.
 func (c Config) applyDefaults() Config {
 	if c.MaxIterations <= 0 {
-		c.MaxIterations = 30
+		c.MaxIterations = 12
 	}
 	if c.ToolTimeout <= 0 {
 		c.ToolTimeout = 15 * time.Second

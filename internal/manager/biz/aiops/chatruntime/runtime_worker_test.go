@@ -536,6 +536,26 @@ func TestFilterCoordinatorToolsForIntent_KeepsHostBashForExplicitDockerRead(t *t
 	}
 }
 
+func TestFilterCoordinatorToolsForIntent_FilesystemInspectionBeatsDiskMetrics(t *testing.T) {
+	bag := []basetool.BaseTool{
+		&fakeTool{name: "ToolSearch", schema: `{"type":"object"}`},
+		&fakeTool{name: "query_devices", schema: `{"type":"object"}`},
+		&fakeTool{name: "host_du_summary", schema: `{"type":"object"}`},
+		&fakeTool{name: "host_find_large_files", schema: `{"type":"object"}`},
+		&fakeTool{name: "host_stat_file", schema: `{"type":"object"}`},
+		&fakeTool{name: "query_promql", schema: `{"type":"object"}`},
+	}
+	names := toolNamesForTest(t, filterCoordinatorToolsForIntent(bag, "查看磁盘占用最高的 top 目录", true))
+	for _, want := range []string{"ToolSearch", "query_devices", "host_du_summary", "host_find_large_files", "host_stat_file"} {
+		if !containsName(names, want) {
+			t.Fatalf("filesystem intent should keep %s, got %v", want, names)
+		}
+	}
+	if containsName(names, "query_promql") {
+		t.Fatalf("directory inspection must not expose query_promql, got %v", names)
+	}
+}
+
 func TestFilterCoordinatorToolsForIntent_HonorsNegativeTopologyIntent(t *testing.T) {
 	bag := []basetool.BaseTool{
 		&fakeTool{name: "query_traceql", schema: `{"type":"object"}`},
