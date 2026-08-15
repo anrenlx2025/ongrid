@@ -217,6 +217,30 @@ func (r *Repo) ListBySessionID(ctx context.Context, sessionID uint64) ([]*model.
 	return captures, nil
 }
 
+func (r *Repo) CountCapturesBySessionIDs(ctx context.Context, sessionIDs []uint64) (map[uint64]int, error) {
+	out := make(map[uint64]int, len(sessionIDs))
+	if len(sessionIDs) == 0 {
+		return out, nil
+	}
+	type row struct {
+		SessionID uint64
+		Count     int64
+	}
+	var rows []row
+	if err := r.db.WithContext(ctx).
+		Model(&model.Capture{}).
+		Select("session_id, COUNT(*) AS count").
+		Where("session_id IN ?", sessionIDs).
+		Group("session_id").
+		Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("packet capture: count session captures: %w", err)
+	}
+	for _, row := range rows {
+		out[row.SessionID] = int(row.Count)
+	}
+	return out, nil
+}
+
 func (r *Repo) SetSessionAnalysis(ctx context.Context, id uint64, state, analysisJSON string) error {
 	res := r.db.WithContext(ctx).Model(&model.Session{}).Where("id = ?", id).Updates(map[string]any{"state": state, "analysis_json": analysisJSON})
 	if res.Error != nil {

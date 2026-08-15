@@ -161,6 +161,14 @@ func (u *Usecase) ListSessions(ctx context.Context, limit, offset int) ([]*model
 	return sessions.ListSessions(ctx, limit, offset)
 }
 
+func (u *Usecase) CountSessionCaptures(ctx context.Context, sessionIDs []uint64) (map[uint64]int, error) {
+	counts, ok := u.repo.(SessionCaptureCountRepo)
+	if !ok {
+		return nil, errs.ErrNotWiredYet
+	}
+	return counts.CountCapturesBySessionIDs(ctx, sessionIDs)
+}
+
 func (u *Usecase) GetSession(ctx context.Context, publicID string) (*SessionDetail, error) {
 	sessions, ok := u.repo.(SessionRepo)
 	if !ok {

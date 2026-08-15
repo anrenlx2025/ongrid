@@ -160,11 +160,21 @@ func toSessionDTO(s *model.Session) sessionDTO {
 		return sessionDTO{}
 	}
 	dto := sessionDTO{ID: s.PublicID, Source: s.Source, State: s.State, Title: s.Title, Description: s.Description, CanonicalFilter: s.CanonicalFilter, DurationSeconds: s.DurationSecs, PlannedStartAt: s.PlannedStartAt, ClockQuality: s.ClockQuality, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
+	return dto
+}
+
+func toSessionListDTO(s *model.Session) sessionDTO {
+	dto := toSessionDTO(s)
+	if s == nil {
+		return dto
+	}
 	if s.AnalysisJSON != "" {
-		// A malformed stored analysis must not make the session list unavailable;
-		// the detail endpoint recomputes analysis from member artifacts.
-		if err := json.Unmarshal([]byte(s.AnalysisJSON), &dto.Analysis); err != nil {
-			dto.Analysis = nil
+		var analysis struct {
+			Summary bizpacketcapture.SessionSummary `json:"summary"`
+		}
+		// A malformed stored analysis must not make the session list unavailable.
+		if err := json.Unmarshal([]byte(s.AnalysisJSON), &analysis); err == nil && analysis.Summary != (bizpacketcapture.SessionSummary{}) {
+			dto.Analysis = analysis
 		}
 	}
 	return dto
@@ -226,14 +236,18 @@ func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]sessionDTO, 0, len(items))
+	sessionIDs := make([]uint64, 0, len(items))
 	for _, item := range items {
-		dto := toSessionDTO(item)
-		detail, detailErr := h.uc.GetSession(r.Context(), item.PublicID)
-		if detailErr != nil {
-			writeErr(w, detailErr)
-			return
-		}
-		dto.PCAPCount = len(detail.Captures)
+		sessionIDs = append(sessionIDs, item.ID)
+	}
+	counts, err := h.uc.CountSessionCaptures(r.Context(), sessionIDs)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	for _, item := range items {
+		dto := toSessionListDTO(item)
+		dto.PCAPCount = counts[item.ID]
 		out = append(out, dto)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": out, "total": total})

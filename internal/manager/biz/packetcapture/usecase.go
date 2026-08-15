@@ -61,6 +61,10 @@ type SessionRepo interface {
 	MarkSessionCompletionNotified(ctx context.Context, id uint64, at time.Time) (bool, error)
 }
 
+type SessionCaptureCountRepo interface {
+	CountCapturesBySessionIDs(ctx context.Context, sessionIDs []uint64) (map[uint64]int, error)
+}
+
 type OperationSessionRepo interface {
 	SetSessionOperation(ctx context.Context, id uint64, operationID string) error
 }

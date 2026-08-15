@@ -179,6 +179,28 @@ func TestRepo_SetParsedArtifact(t *testing.T) {
 	}
 }
 
+func TestRepo_CountCapturesBySessionIDs(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	for _, sessionID := range []uint64{7, 7, 9} {
+		capture := &model.Capture{
+			CreatedBy: 1, Source: "chat", State: model.StateReady, EdgeID: 1, SessionID: sessionID,
+			RequestedTargetJSON: `{}`, ResolvedTargetJSON: `{}`, FilterJSON: `{}`,
+			Description: "", LabelsJSON: "{}", ErrorDetail: "",
+		}
+		if err := repo.Create(ctx, capture); err != nil {
+			t.Fatalf("Create session %d: %v", sessionID, err)
+		}
+	}
+	counts, err := repo.CountCapturesBySessionIDs(ctx, []uint64{7, 8, 9})
+	if err != nil {
+		t.Fatalf("CountCapturesBySessionIDs: %v", err)
+	}
+	if counts[7] != 2 || counts[8] != 0 || counts[9] != 1 {
+		t.Fatalf("counts=%+v", counts)
+	}
+}
+
 func newTestRepo(t *testing.T) *Repo {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
