@@ -49,6 +49,26 @@ type fakeService struct {
 	lastCreateTtl string
 }
 
+type fakeOperationReader struct {
+	op        *model.Operation
+	artifacts []*model.OperationArtifact
+	err       error
+	lastID    string
+	lastUser  uint64
+	lastAdmin bool
+}
+
+func (f *fakeOperationReader) GetOwned(_ context.Context, id string, userID uint64, admin bool) (*model.Operation, error) {
+	f.lastID = id
+	f.lastUser = userID
+	f.lastAdmin = admin
+	return f.op, f.err
+}
+
+func (f *fakeOperationReader) ListArtifacts(_ context.Context, _ string) ([]*model.OperationArtifact, error) {
+	return f.artifacts, f.err
+}
+
 func (f *fakeService) CreateSession(_ context.Context, c svc.Caller, in svc.CreateSessionInput) (*model.Session, error) {
 	f.lastCaller = c
 	f.lastCreateTtl = in.Title
@@ -317,6 +337,71 @@ func TestListMutatingProposalsForbidsNonAdmin(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &body)
 	if body.Code != "forbidden" {
 		t.Fatalf("error code = %q", body.Code)
+	}
+}
+
+func TestGetOperationReturnsStableJSONDTO(t *testing.T) {
+	now := time.Date(2026, 8, 15, 9, 30, 0, 0, time.UTC)
+	reader := &fakeOperationReader{
+		op: &model.Operation{
+			ID:            "op-1",
+			ChatSessionID: "chat-1",
+			CreatedBy:     7,
+			Kind:          "packet_capture_session",
+			State:         "succeeded",
+			Title:         "HTTPS capture",
+			Summary:       "1/1 ready",
+			ActionsJSON:   "[]",
+			DetailURL:     "/artifacts/packet-sessions/pcap-session-1",
+			TerminalAt:    &now,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		},
+		artifacts: []*model.OperationArtifact{{
+			ID:          "artifact-1",
+			OperationID: "op-1",
+			Kind:        "analysis",
+			Title:       "HTTPS capture",
+			URL:         "/artifacts/packet-sessions/pcap-session-1",
+			CreatedAt:   now,
+		}},
+	}
+	h := NewHandler(&fakeService{})
+	h.SetOperationActions(reader, nil)
+	r := buildRouter(h, tenantctx.Tenant{UserID: 7, Role: "user"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operations/op-1", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Operation struct {
+			ID        string `json:"id"`
+			State     string `json:"state"`
+			DetailURL string `json:"detail_url"`
+		} `json:"operation"`
+		Artifacts []struct {
+			OperationID string `json:"operation_id"`
+			URL         string `json:"url"`
+		} `json:"artifacts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Operation.ID != "op-1" || out.Operation.State != "succeeded" || out.Operation.DetailURL == "" {
+		t.Fatalf("operation dto = %+v", out.Operation)
+	}
+	if len(out.Artifacts) != 1 || out.Artifacts[0].OperationID != "op-1" {
+		t.Fatalf("artifacts = %+v", out.Artifacts)
+	}
+	if strings.Contains(w.Body.String(), `"ID"`) || strings.Contains(w.Body.String(), `"DetailURL"`) {
+		t.Fatalf("response leaked Go field names: %s", w.Body.String())
+	}
+	if reader.lastID != "op-1" || reader.lastUser != 7 || reader.lastAdmin {
+		t.Fatalf("ownership lookup = id:%s user:%d admin:%v", reader.lastID, reader.lastUser, reader.lastAdmin)
 	}
 }
 

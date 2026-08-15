@@ -172,7 +172,7 @@ func (h *Handler) Register(r chi.Router) {
 
 // @Summary Get an asynchronous operation
 // @Router /api/v1/operations/{id} [get]
-// @Success 200 {object} model.Operation
+// @Success 200 {object} operationDetailResp
 func (h *Handler) getOperation(w http.ResponseWriter, r *http.Request) {
 	caller, ok := callerFromCtx(r.Context())
 	if !ok {
@@ -193,12 +193,15 @@ func (h *Handler) getOperation(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"operation": op, "artifacts": artifacts})
+	writeJSON(w, http.StatusOK, operationDetailResp{
+		Operation: operationDTOFromModel(op),
+		Artifacts: operationArtifactDTOs(artifacts),
+	})
 }
 
 // @Summary Execute a user-visible operation action
 // @Router /api/v1/operations/{id}/actions/{action} [post]
-// @Success 200 {object} model.Operation
+// @Success 200 {object} operationDTO
 func (h *Handler) executeOperationAction(w http.ResponseWriter, r *http.Request) {
 	caller, ok := callerFromCtx(r.Context())
 	if !ok {
@@ -219,10 +222,81 @@ func (h *Handler) executeOperationAction(w http.ResponseWriter, r *http.Request)
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	writeJSON(w, http.StatusOK, operationDTOFromModel(updated))
 }
 
 // --------- DTOs ---------
+
+type operationDetailResp struct {
+	Operation operationDTO           `json:"operation"`
+	Artifacts []operationArtifactDTO `json:"artifacts"`
+}
+
+type operationDTO struct {
+	ID            string     `json:"id"`
+	ChatSessionID string     `json:"chat_session_id"`
+	CreatedBy     uint64     `json:"created_by"`
+	Kind          string     `json:"kind"`
+	State         string     `json:"state"`
+	Title         string     `json:"title"`
+	Summary       string     `json:"summary,omitempty"`
+	InputJSON     string     `json:"input_json,omitempty"`
+	ActionsJSON   string     `json:"actions_json,omitempty"`
+	DetailURL     string     `json:"detail_url,omitempty"`
+	TerminalAt    *time.Time `json:"terminal_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+type operationArtifactDTO struct {
+	ID           string    `json:"id"`
+	OperationID  string    `json:"operation_id"`
+	Kind         string    `json:"kind"`
+	Title        string    `json:"title"`
+	URL          string    `json:"url"`
+	MetadataJSON string    `json:"metadata_json,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func operationDTOFromModel(op *model.Operation) operationDTO {
+	if op == nil {
+		return operationDTO{}
+	}
+	return operationDTO{
+		ID:            op.ID,
+		ChatSessionID: op.ChatSessionID,
+		CreatedBy:     op.CreatedBy,
+		Kind:          op.Kind,
+		State:         op.State,
+		Title:         op.Title,
+		Summary:       op.Summary,
+		InputJSON:     op.InputJSON,
+		ActionsJSON:   op.ActionsJSON,
+		DetailURL:     op.DetailURL,
+		TerminalAt:    op.TerminalAt,
+		CreatedAt:     op.CreatedAt,
+		UpdatedAt:     op.UpdatedAt,
+	}
+}
+
+func operationArtifactDTOs(items []*model.OperationArtifact) []operationArtifactDTO {
+	out := make([]operationArtifactDTO, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		out = append(out, operationArtifactDTO{
+			ID:           item.ID,
+			OperationID:  item.OperationID,
+			Kind:         item.Kind,
+			Title:        item.Title,
+			URL:          item.URL,
+			MetadataJSON: item.MetadataJSON,
+			CreatedAt:    item.CreatedAt,
+		})
+	}
+	return out
+}
 
 type createSessionReq struct {
 	Title string   `json:"title"`
