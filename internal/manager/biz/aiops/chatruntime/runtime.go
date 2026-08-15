@@ -930,6 +930,14 @@ func resolveTurn(req *Request) (TurnPlan, string) {
 	if req == nil {
 		return PlanTurn(ResolvedFacts{Permitted: false, Reason: "nil request"}), ""
 	}
+	if needsPacketCaptureSessionID(req.UserText) {
+		plan := PlanTurn(ResolvedFacts{Missing: true, Permitted: req.Role != "viewer"})
+		return plan, "当前没有可枚举“最近抓包会话”的助理工具；`get_packet_capture_session` 需要明确的 `pcap-session-*`。请提供抓包会话 ID，或先发起一次新的抓包任务后再分析。"
+	}
+	if needsPacketPathDetails(req.UserText) {
+		plan := PlanTurn(ResolvedFacts{Missing: true, Permitted: req.Role != "viewer"})
+		return plan, "不能确定 NAT 或网关路径。要判断这个包是否经过 NAT 或网关，需要先明确具体包或会话：请提供 `pcap-session-*`、源/目的地址、端口、协议、时间窗，或说明从哪台 edge 到哪台设备/服务。没有这些信息我不能推断包走向。"
+	}
 	captureIntent := isStartCaptureIntent(req.UserText)
 	hostTargetIntent := requiresHostTarget(req.UserText)
 	hasTarget := hasExplicitHostTarget(req)
@@ -941,6 +949,43 @@ func resolveTurn(req *Request) (TurnPlan, string) {
 		return plan, "这个操作需要先确定目标设备。请使用 @ 选择设备，或明确提供 `device_id`。"
 	}
 	return plan, ""
+}
+
+func needsPacketCaptureSessionID(userText string) bool {
+	text := strings.ToLower(userText)
+	if strings.Contains(text, "pcap-session-") {
+		return false
+	}
+	hasCapture := strings.Contains(userText, "抓包") ||
+		strings.Contains(userText, "数据包") ||
+		strings.Contains(text, "packet capture") ||
+		strings.Contains(text, "pcap")
+	if !hasCapture {
+		return false
+	}
+	for _, phrase := range []string{"最近", "最新", "有哪些", "列出", "告诉我", "分析最近", "recent", "latest", "list"} {
+		if strings.Contains(userText, phrase) || strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func needsPacketPathDetails(userText string) bool {
+	text := strings.ToLower(userText)
+	if strings.Contains(text, "pcap-session-") || strings.Contains(text, "device_id") || strings.Contains(userText, "@") {
+		return false
+	}
+	hasPacket := strings.Contains(userText, "这个包") || strings.Contains(userText, "该包") || strings.Contains(text, "this packet")
+	if !hasPacket {
+		return false
+	}
+	return strings.Contains(userText, "NAT") ||
+		strings.Contains(strings.ToLower(userText), "nat") ||
+		strings.Contains(userText, "网关") ||
+		strings.Contains(userText, "链路") ||
+		strings.Contains(text, "gateway") ||
+		strings.Contains(text, "path")
 }
 
 func isStartCaptureIntent(userText string) bool {

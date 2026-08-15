@@ -464,14 +464,10 @@ func TestAssistantChat_OpsScenarioCoverage(t *testing.T) {
 			wantContains: []string{"拓扑证据"},
 		},
 		{
-			id:     "O28",
-			title:  "packet path does not infer nat",
-			prompt: "这个包是不是经过 NAT 或网关了，帮我看一下链路",
-			script: []testenv.LLMReply{
-				{ToolCalls: []testenv.LLMToolCall{{ID: "o28-topology", Name: "get_topology", Arguments: `{}`}}},
-				{Content: "当前只有 edge 侧证据，不能确定 NAT 或网关，只能给出已观测链路。"},
-			},
-			wantTools:    []string{"get_topology"},
+			id:           "O28",
+			title:        "packet path does not infer nat",
+			prompt:       "这个包是不是经过 NAT 或网关了，帮我看一下链路",
+			script:       []testenv.LLMReply{{Content: "不应进入模型；目标不明确时前置澄清。"}},
 			wantContains: []string{"不能确定 NAT"},
 		},
 	}

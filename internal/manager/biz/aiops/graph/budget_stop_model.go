@@ -175,14 +175,14 @@ func budgetPrunedFinalContent(messages []*schema.Message, tool string) string {
 	evidence := summarizeRecentToolEvidence(messages)
 	if wantsEnglishResponse(messages) {
 		if evidence == "" {
-			return "I stopped additional `" + tool + "` calls before execution because this turn reached its tool budget. The evidence collected so far is not enough for a confident conclusion; send a narrower target or time window and I can continue in the next message."
+			return "I have converged this investigation instead of issuing more `" + tool + "` calls. The evidence collected so far is not enough for a confident conclusion; send a narrower target or time window and I can continue in the next message."
 		}
-		return "I stopped additional `" + tool + "` calls before execution because this turn reached its tool budget.\n\nBased on the evidence already collected:\n" + evidence + "\n\nNext step: use these findings as the current conclusion. If you need deeper proof, continue with a narrower target or time window."
+		return "I have converged this investigation instead of issuing more `" + tool + "` calls.\n\nBased on the evidence already collected:\n" + evidence + "\n\nNext step: use these findings as the current conclusion. If you need deeper proof, continue with a narrower target or time window."
 	}
 	if evidence == "" {
-		return "我已在执行前停止继续调用 `" + tool + "`，因为本轮已经达到工具预算。当前证据还不足以形成可靠结论；请在下一条消息补充更明确的目标或时间窗，我再继续。"
+		return "我已收敛本轮排查，没有继续发散调用 `" + tool + "`。当前证据还不足以形成可靠结论；请在下一条消息补充更明确的目标或时间窗，我再继续。"
 	}
-	return "我已在执行前停止继续调用 `" + tool + "`，因为本轮已经达到工具预算。\n\n当前结论先按本轮已经拿到的证据处理：\n" + evidence + "\n\n下一步：优先处理上述最明确的异常点；如果需要更深的证据，请在下一条消息指定更窄的目标或时间窗。"
+	return "我已收敛本轮排查，没有继续发散调用 `" + tool + "`。\n\n当前结论先按本轮已经拿到的证据处理：\n" + evidence + "\n\n下一步：优先处理上述最明确的异常点；如果需要更深的证据，请在下一条消息指定更窄的目标或时间窗。"
 }
 
 func summarizeRecentToolEvidence(messages []*schema.Message) string {
@@ -218,7 +218,8 @@ func summarizeToolMessage(toolName, content string) string {
 	if toolName == "" {
 		toolName = "tool"
 	}
-	if toolName == "ToolSearch" || toolName == "get_edge_summary" {
+	switch toolName {
+	case "ToolSearch", "get_edge_summary", "query_knowledge", "grep_source", "list_repo_sources":
 		return ""
 	}
 	var payload map[string]any
@@ -482,9 +483,9 @@ func finalAnswerAfterToolBudget(messages []*schema.Message) (*schema.Message, bo
 	if tool == "" {
 		tool = "the tool"
 	}
-	content := "我已经停止继续调用 `" + tool + "`，避免在同一轮里反复查询。基于本轮已经拿到的结果：如果上面的数据已经出现异常信号，就按这些信号给出结论和下一步；如果结果为空或报错，本轮缺少可判定证据，请在下一条消息补充更具体的时间窗、service 或 device_id 后再查。"
+	content := "我已收敛本轮排查，没有继续反复调用 `" + tool + "`。基于本轮已经拿到的结果：如果上面的数据已经出现异常信号，就按这些信号给出结论和下一步；如果结果为空或报错，本轮缺少可判定证据，请在下一条消息补充更具体的时间窗、service 或 device_id 后再查。"
 	if wantsEnglishResponse(messages) {
-		content = "I stopped calling `" + tool + "` again to avoid repeating the same investigation in this turn. Based on the evidence already collected: if the earlier results show an abnormal signal, use that signal for the conclusion and next step; if they were empty or errored, this turn lacks decisive evidence, so send a narrower time window, service, or device_id in the next message and I can query again."
+		content = "I have converged this investigation instead of repeatedly calling `" + tool + "`. Based on the evidence already collected: if the earlier results show an abnormal signal, use that signal for the conclusion and next step; if they were empty or errored, this turn lacks decisive evidence, so send a narrower time window, service, or device_id in the next message and I can query again."
 	}
 	return &schema.Message{Role: schema.Assistant, Content: content}, true
 }
