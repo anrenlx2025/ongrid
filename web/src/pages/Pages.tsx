@@ -489,7 +489,7 @@ function PacketCaptureSessionsView() {
           </div>
         </section>
       )}
-      {(total > PACKET_SESSION_PAGE_SIZE || page > 0) && (
+      {!loading && total > 0 && (
         <div className="flex items-center justify-end gap-2 py-3 text-xs text-zinc-400">
           <span className="mr-2 text-zinc-600">
             {tr(`第 ${page + 1} 页 · ${pageStart}-${pageEnd} / ${total}`, `Page ${page + 1} · ${pageStart}-${pageEnd} / ${total}`)}
