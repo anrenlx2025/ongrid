@@ -6,7 +6,7 @@
 // touch the SPA session.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { AppWindow, Bot, Check, Download, ExternalLink, Eye, FileBarChart, FileCode2, Loader2, Search, Share2, Trash2, Workflow } from 'lucide-react';
+import { AppWindow, Bot, Check, ChevronLeft, ChevronRight, Download, ExternalLink, Eye, FileBarChart, FileCode2, Loader2, Search, Share2, Trash2, Workflow } from 'lucide-react';
 
 import { deletePage, fetchPageHTML, listPages, sharePage, type HostedPage } from '@/api/pages';
 import { downloadPacketCapture, listPacketCaptureSessions, packetCaptureArtifactID, type PacketCapture, type PacketCapturePacket, type PacketCaptureSession, type PacketProtocolNode } from '@/api/packetCaptures';
@@ -20,6 +20,7 @@ import { PcapFileIcon } from '@/components/PcapFileIcon';
 import { fullDateTime, relativeTime } from '@/lib/format';
 
 const THUMB_W = 1100;
+const PACKET_SESSION_PAGE_SIZE = 20;
 
 // SourceBadge renders the 生成来源 (origin) for a hosted page: chat-generated vs
 // workflow-generated. Unknown / legacy pages render nothing (the card stays clean).
@@ -402,14 +403,117 @@ export default function PagesPage() {
 }
 
 function PacketCaptureSessionsView() {
-  const { tr } = useI18n(); const navigate = useNavigate();
-  const [items,setItems]=useState<PacketCaptureSession[]>([]); const [loading,setLoading]=useState(true); const [error,setError]=useState('');
-  const refresh=useCallback(async()=>{ try { const result=await listPacketCaptureSessions();setItems(result.items??[]);setError(''); } catch(e){setError(e instanceof Error?e.message:String(e));} finally {setLoading(false);} },[]);
+  const { tr } = useI18n();
+  const navigate = useNavigate();
+  const [items, setItems] = useState<PacketCaptureSession[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await listPacketCaptureSessions({
+        limit: PACKET_SESSION_PAGE_SIZE,
+        offset: page * PACKET_SESSION_PAGE_SIZE,
+      });
+      setItems(result.items ?? []);
+      setTotal(result.total ?? 0);
+      setError('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [page]);
   useEffect(()=>{void refresh();},[refresh]);
-  return <div>
-    {error&&<div className="mb-4 rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">{error}</div>}
-    {loading?<div className="py-16 text-center text-sm text-zinc-500">{tr('加载中…','Loading…')}</div>:items.length===0?<div className="py-16 text-center text-sm text-zinc-500">{tr('暂无抓包会话。让助理对多个 Edge 发起抓包后，会话会在这里汇总成员 PCAP、关联流和时间线。','No capture sessions yet. Ask the assistant to capture on multiple edges; sessions summarize member PCAPs, correlated flows, and timelines here.')}</div>:<section className="overflow-hidden border border-zinc-800 bg-zinc-900/40"><table className="w-full min-w-[780px] text-left text-xs"><thead className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] uppercase tracking-wide text-zinc-500"><tr><th className="px-4 py-3 font-medium">{tr('会话','Session')}</th><th className="px-4 py-3 font-medium">{tr('来源','Source')}</th><th className="px-4 py-3 font-medium">PCAP</th><th className="px-4 py-3 font-medium">{tr('状态','Status')}</th><th className="px-4 py-3 font-medium">{tr('创建时间','Created')}</th></tr></thead><tbody className="divide-y divide-zinc-800">{items.map(item=><tr key={item.id} role="button" tabIndex={0} onClick={()=>navigate(`/artifacts/packet-sessions/${encodeURIComponent(item.id)}`)} onKeyDown={e=>{if(e.key==='Enter'){navigate(`/artifacts/packet-sessions/${encodeURIComponent(item.id)}`)}}} className="cursor-pointer text-zinc-300 transition-colors hover:bg-zinc-800/60"><td className="px-4 py-3"><div className="font-medium text-zinc-100">{item.title||item.id}</div><div className="mt-1 font-mono text-[11px] text-zinc-500">{item.canonical_filter||tr('全部流量','all traffic')}</div></td><td className="px-4 py-3 text-zinc-400">{packetSourceLabel(item.source,tr)}</td><td className="px-4 py-3 text-zinc-300">{item.pcap_count}</td><td className="px-4 py-3 text-zinc-400">{item.analysis?.summary?.ready_count??0}/{item.pcap_count} {tr('已就绪','ready')}</td><td className="px-4 py-3 text-zinc-500">{relativeTime(item.created_at)}</td></tr>)}</tbody></table></section>}
-  </div>;
+  const pageStart = total === 0 ? 0 : page * PACKET_SESSION_PAGE_SIZE + 1;
+  const pageEnd = Math.min(total, page * PACKET_SESSION_PAGE_SIZE + items.length);
+  const hasPrev = page > 0;
+  const hasNext = pageEnd < total;
+
+  return (
+    <div>
+      {error && <div className="mb-4 rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">{error}</div>}
+      {loading ? (
+        <div className="py-16 text-center text-sm text-zinc-500">{tr('加载中…', 'Loading…')}</div>
+      ) : items.length === 0 ? (
+        <div className="py-16 text-center text-sm text-zinc-500">
+          {page > 0
+            ? tr('这一页没有抓包会话。', 'No capture sessions on this page.')
+            : tr('暂无抓包会话。让助理对多个 Edge 发起抓包后，会话会在这里汇总成员 PCAP、关联流和时间线。', 'No capture sessions yet. Ask the assistant to capture on multiple edges; sessions summarize member PCAPs, correlated flows, and timelines here.')}
+        </div>
+      ) : (
+        <section className="overflow-hidden rounded-xl border border-zinc-800/60 bg-zinc-900/40">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[920px] text-left text-xs">
+              <thead className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] uppercase tracking-wide text-zinc-500">
+                <tr>
+                  <th className="px-4 py-3 font-medium">ID</th>
+                  <th className="px-4 py-3 font-medium">{tr('会话', 'Session')}</th>
+                  <th className="px-4 py-3 font-medium">{tr('来源', 'Source')}</th>
+                  <th className="px-4 py-3 font-medium">PCAP</th>
+                  <th className="px-4 py-3 font-medium">{tr('状态', 'Status')}</th>
+                  <th className="px-4 py-3 font-medium">{tr('创建时间', 'Created')}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800">
+                {items.map((item) => (
+                  <tr
+                    key={item.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => navigate(`/artifacts/packet-sessions/${encodeURIComponent(item.id)}`)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') navigate(`/artifacts/packet-sessions/${encodeURIComponent(item.id)}`);
+                    }}
+                    className="cursor-pointer text-zinc-300 transition-colors hover:bg-zinc-800/60"
+                  >
+                    <td className="whitespace-nowrap px-4 py-3 font-mono text-[11px] text-zinc-500">{shortPacketSessionID(item.id)}</td>
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-zinc-100">{item.title || item.id}</div>
+                      <div className="mt-1 max-w-[520px] truncate font-mono text-[11px] text-zinc-500" title={item.id}>{item.id}</div>
+                      <div className="mt-1 max-w-[520px] truncate font-mono text-[11px] text-zinc-600">{item.canonical_filter || tr('全部流量', 'all traffic')}</div>
+                    </td>
+                    <td className="px-4 py-3 text-zinc-400">{packetSourceLabel(item.source, tr)}</td>
+                    <td className="px-4 py-3 text-zinc-300">{item.pcap_count}</td>
+                    <td className="px-4 py-3 text-zinc-400">
+                      <div>{sessionStateLabel(item.state, tr)}</div>
+                      <div className="mt-1 text-[11px] text-zinc-500">{item.analysis?.summary?.ready_count ?? 0}/{item.pcap_count} {tr('已就绪', 'ready')}</div>
+                    </td>
+                    <td className="px-4 py-3 text-zinc-500">{relativeTime(item.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+      {(total > PACKET_SESSION_PAGE_SIZE || page > 0) && (
+        <div className="flex items-center justify-end gap-2 py-3 text-xs text-zinc-400">
+          <span className="mr-2 text-zinc-600">
+            {tr(`第 ${page + 1} 页 · ${pageStart}-${pageEnd} / ${total}`, `Page ${page + 1} · ${pageStart}-${pageEnd} / ${total}`)}
+          </span>
+          <button
+            type="button"
+            disabled={!hasPrev || loading}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 hover:bg-zinc-800 disabled:opacity-40"
+          >
+            <ChevronLeft size={13} /> {tr('上一页', 'Prev')}
+          </button>
+          <button
+            type="button"
+            disabled={!hasNext || loading}
+            onClick={() => setPage((p) => p + 1)}
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 hover:bg-zinc-800 disabled:opacity-40"
+          >
+            {tr('下一页', 'Next')} <ChevronRight size={13} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ReportsTabView is the 报告 tab inside 产物 — a READ-ONLY view of generated
@@ -672,6 +776,27 @@ function packetSourceLabel(source: string, tr: (zh: string, en: string) => strin
     default:
       return source || '-';
   }
+}
+
+function sessionStateLabel(state: PacketCaptureSession['state'], tr: (zh: string, en: string) => string) {
+  switch (state) {
+    case 'collecting':
+      return tr('采集中', 'Collecting');
+    case 'ready':
+      return tr('完成', 'Ready');
+    case 'partial':
+      return tr('部分完成', 'Partial');
+    case 'cancelled':
+      return tr('已取消', 'Cancelled');
+    case 'failed':
+      return tr('失败', 'Failed');
+    default:
+      return state || '-';
+  }
+}
+
+function shortPacketSessionID(id: string) {
+  return id.startsWith('pcap-session-') ? id.slice('pcap-session-'.length, 'pcap-session-'.length + 8) : id.slice(0, 12);
 }
 
 function packetStream(packet: PacketCapturePacket): unknown {

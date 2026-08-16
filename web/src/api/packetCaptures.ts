@@ -167,7 +167,13 @@ export function refreshPacketCapture(id: number) {
   return request<PacketCapture>('POST', `/packet-captures/${id}/refresh`, {});
 }
 
-export function listPacketCaptureSessions() { return request<{ items: PacketCaptureSession[]; total: number }>('GET', '/packet-capture-sessions'); }
+export function listPacketCaptureSessions(params?: { limit?: number; offset?: number }) {
+  const q = new URLSearchParams();
+  if (params?.limit) q.set('limit', String(params.limit));
+  if (params?.offset) q.set('offset', String(params.offset));
+  const suffix = q.toString();
+  return request<{ items: PacketCaptureSession[]; total: number }>('GET', `/packet-capture-sessions${suffix ? `?${suffix}` : ''}`);
+}
 export function getPacketCaptureSession(id: string) { return request<{ session: PacketCaptureSession; captures: PacketCapture[] }>('GET', `/packet-capture-sessions/${encodeURIComponent(id)}`); }
 export function refreshPacketCaptureSession(id: string) { return request<{ session: PacketCaptureSession; captures: PacketCapture[] }>('POST', `/packet-capture-sessions/${encodeURIComponent(id)}/refresh`, {}); }
 
