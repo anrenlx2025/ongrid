@@ -7,8 +7,6 @@ import {
   BarChart3,
   Check,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   Clipboard,
   ExternalLink,
   FileText,
@@ -27,7 +25,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { Modal } from '@/components/Modal';
-import { Button, Card, Chip, EmptyState, PageHeader } from '@/components/ui';
+import { Button, Card, Chip, EmptyState, PageHeader, PaginationFooter } from '@/components/ui';
 import type { IconType } from '@/lib/icon';
 import { ApiError } from '@/api/client';
 import { createSession } from '@/api/chat';
@@ -3700,58 +3698,20 @@ function ResourcePagination({
   filtered?: boolean;
   onPageChange(page: number): void;
 }) {
-  const { tr } = useI18n();
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.min(Math.max(page, 1), totalPages);
   if (totalPages <= 1) return null;
-  const firstRow = total === 0 ? 0 : (currentPage - 1) * pageSize + 1;
-  const lastRow = Math.min(total, firstRow + Math.max(0, shown - 1));
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/60 px-4 py-2 text-xs text-zinc-500">
-      <span>
-        {filtered
-          ? tr(
-              `${formatNumber(firstRow)}–${formatNumber(lastRow)} / 共 ${formatNumber(total)} 条匹配`,
-              `${formatNumber(firstRow)}–${formatNumber(lastRow)} of ${formatNumber(total)} matches`,
-            )
-          : tr(
-              `${formatNumber(firstRow)}–${formatNumber(lastRow)} / 共 ${formatNumber(total)} 条`,
-              `${formatNumber(firstRow)}–${formatNumber(lastRow)} of ${formatNumber(total)}`,
-            )}
-      </span>
-      <div className="flex items-center gap-2">
-        <span>{tr(`第 ${currentPage} / ${totalPages} 页`, `Page ${currentPage} of ${totalPages}`)}</span>
-        <Button
-          className="h-7 px-2"
-          disabled={loading || currentPage <= 1}
-          onClick={() => onPageChange(currentPage - 1)}
-          aria-label={tr('上一页', 'Previous page')}
-        >
-          <ChevronLeft size={12} />
-          {tr('上一页', 'Previous')}
-        </Button>
-        <select
-          value={currentPage}
-          onChange={(event) => onPageChange(Number(event.target.value))}
-          disabled={loading}
-          className="h-7 rounded-md border border-zinc-800 bg-zinc-950 px-2 text-xs text-zinc-200 outline-none transition-colors focus:border-zinc-600 disabled:cursor-not-allowed disabled:opacity-50"
-          aria-label={tr('页码', 'Page')}
-        >
-          {Array.from({ length: totalPages }, (_, index) => index + 1).map((item) => (
-            <option key={item} value={item}>{item}</option>
-          ))}
-        </select>
-        <Button
-          className="h-7 px-2"
-          disabled={loading || currentPage >= totalPages}
-          onClick={() => onPageChange(currentPage + 1)}
-          aria-label={tr('下一页', 'Next page')}
-        >
-          {tr('下一页', 'Next')}
-          <ChevronRight size={12} />
-        </Button>
-      </div>
-    </div>
+    <PaginationFooter
+      page={currentPage - 1}
+      pageSize={pageSize}
+      shown={shown}
+      total={total}
+      loading={loading}
+      matchLabel={filtered}
+      className="px-4"
+      onPageChange={(nextPage) => onPageChange(nextPage + 1)}
+    />
   );
 }
 

@@ -16,6 +16,28 @@ var _ bizreport.ReadRepo = (*Repo)(nil)
 
 // ListReports returns reports matching the filter, newest first.
 func (r *Repo) ListReports(ctx context.Context, f bizreport.ReportFilter) ([]*model.Report, error) {
+	q := r.reportListQuery(ctx, f)
+	limit := f.Limit
+	if limit <= 0 {
+		limit = bizreport.DefaultListLimit
+	}
+	var rows []*model.Report
+	err := q.Order("created_at DESC").Limit(limit).Offset(f.Offset).Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (r *Repo) CountReports(ctx context.Context, f bizreport.ReportFilter) (int64, error) {
+	var total int64
+	if err := r.reportListQuery(ctx, f).Count(&total).Error; err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func (r *Repo) reportListQuery(ctx context.Context, f bizreport.ReportFilter) *gorm.DB {
 	q := r.db.WithContext(ctx).Model(&model.Report{})
 	if f.Status != "" {
 		q = q.Where("status = ?", f.Status)
@@ -29,16 +51,7 @@ func (r *Repo) ListReports(ctx context.Context, f bizreport.ReportFilter) ([]*mo
 	if f.TaskID != "" {
 		q = q.Where("task_id = ?", f.TaskID)
 	}
-	limit := f.Limit
-	if limit <= 0 {
-		limit = bizreport.DefaultListLimit
-	}
-	var rows []*model.Report
-	err := q.Order("created_at DESC").Limit(limit).Offset(f.Offset).Find(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	return rows, nil
+	return q
 }
 
 func (r *Repo) DeleteReport(ctx context.Context, id string) error {

@@ -124,7 +124,12 @@ func (h *Handler) listReports(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"reports": toReportList(rows)})
+	total, err := h.uc.CountReports(r.Context(), f)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reports": toReportList(rows), "total": total})
 }
 
 func (h *Handler) getReport(w http.ResponseWriter, r *http.Request) {

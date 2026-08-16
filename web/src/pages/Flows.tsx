@@ -8,9 +8,11 @@ import { Loader2, Play, Plus, Route as WorkflowIcon, Search, Sparkles, Trash2 } 
 import { createFlow, deleteFlow, generateFlow, listFlows, runFlow, toggleFlow, type Flow } from '@/api/flows';
 import { useI18n } from '@/i18n/locale';
 import { useAuth } from '@/store/auth';
-import { PageHeader, Button } from '@/components/ui';
+import { PageHeader, Button, PaginationFooter } from '@/components/ui';
 import { Modal } from '@/components/Modal';
 import { cn } from '@/lib/cn';
+
+const PAGE_SIZE = 50;
 
 export default function FlowsPage() {
   const { tr } = useI18n();
@@ -19,12 +21,14 @@ export default function FlowsPage() {
   const canWrite = role !== 'viewer';
 
   const [items, setItems] = useState<Flow[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [creating, setCreating] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [notice, setNotice] = useState('');
   const [search, setSearch] = useState('');
+  const [page, setPage] = useState(0);
 
   const shown = items.filter((f) => {
     const q = search.trim().toLowerCase();
@@ -54,15 +58,16 @@ export default function FlowsPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const r = await listFlows({ limit: 100 });
+      const r = await listFlows({ limit: PAGE_SIZE, offset: page * PAGE_SIZE });
       setItems(r.items ?? []);
+      setTotal(r.total ?? 0);
       setError('');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [page]);
 
   useEffect(() => {
     void refresh();
@@ -111,8 +116,8 @@ export default function FlowsPage() {
       <PageHeader
         title={tr('工作流', 'Workflows')}
         subtitle={tr(
-          `可视化工作流：触发 → Agent / 工具 / 条件 / 通知 节点连成自动化流程 · 共 ${items.length} 个`,
-          `Wire trigger → agent / tool / condition / notification nodes into automations · ${items.length} total`,
+          `可视化工作流：触发 → Agent / 工具 / 条件 / 通知 节点连成自动化流程 · 共 ${total} 个`,
+          `Wire trigger → agent / tool / condition / notification nodes into automations · ${total} total`,
         )}
         actions={
           canWrite ? (
@@ -138,7 +143,7 @@ export default function FlowsPage() {
               />
             </label>
             <span className="ml-auto text-xs text-zinc-500">
-              {tr(`${items.length} 个 · 匹配 ${shown.length}`, `${items.length} total · ${shown.length} matched`)}
+              {tr(`本页 ${items.length} 个 · 匹配 ${shown.length}`, `${items.length} on this page · ${shown.length} matched`)}
             </span>
           </div>
         </div>
@@ -232,6 +237,15 @@ export default function FlowsPage() {
           ))}
         </div>
       )}
+      <PaginationFooter
+        page={page}
+        pageSize={PAGE_SIZE}
+        shown={items.length}
+        total={total}
+        loading={loading}
+        className="px-6"
+        onPageChange={setPage}
+      />
       </div>
       <CreateFlowModal
         open={creating}

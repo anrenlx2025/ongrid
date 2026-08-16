@@ -3,7 +3,7 @@ import { Camera, ExternalLink, Filter, Loader2, Plus, RefreshCw, ShieldAlert } f
 import { Link } from 'react-router-dom';
 
 import { Modal } from '@/components/Modal';
-import { Button, Chip, EmptyState, PageHeader } from '@/components/ui';
+import { Button, Chip, EmptyState, PageHeader, PaginationFooter } from '@/components/ui';
 import { createPacketCapture, listPacketCaptures, packetCaptureArtifactID, refreshPacketCapture, type PacketCapture, type PacketCaptureState } from '@/api/packetCaptures';
 import { listDevices, type Device } from '@/api/devices';
 import { fullDateTime, relativeTime } from '@/lib/format';
@@ -45,12 +45,16 @@ const DEFAULT_FORM: FormState = {
   description: '',
 };
 
+const PAGE_SIZE = 20;
+
 export default function PacketCapturesPage() {
   const { tr } = useI18n();
   const { canMutate } = usePermissions();
   const [items, setItems] = useState<PacketCapture[]>([]);
+  const [total, setTotal] = useState(0);
   const [devices, setDevices] = useState<Device[]>([]);
   const [state, setState] = useState<'' | PacketCaptureState>('');
+  const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
@@ -60,10 +64,11 @@ export default function PacketCapturesPage() {
   const load = useCallback(async () => {
     try {
       const [captures, deviceResp] = await Promise.all([
-        listPacketCaptures({ state: state || undefined, limit: 100 }),
+        listPacketCaptures({ state: state || undefined, limit: PAGE_SIZE, offset: page * PAGE_SIZE }),
         listDevices().catch(() => ({ items: [] as Device[], total: 0 })),
       ]);
       setItems(captures.items ?? []);
+      setTotal(captures.total ?? 0);
       setDevices((deviceResp.items ?? []).filter((d) => !d.roles?.includes('network')));
       setError('');
     } catch (err) {
@@ -71,12 +76,16 @@ export default function PacketCapturesPage() {
     } finally {
       setLoading(false);
     }
-  }, [state]);
+  }, [page, state]);
 
   useEffect(() => {
     setLoading(true);
     void load();
   }, [load]);
+
+  useEffect(() => {
+    setPage(0);
+  }, [state]);
 
   const refreshOne = useCallback(
     async (id: number) => {
@@ -192,6 +201,14 @@ export default function PacketCapturesPage() {
             </tbody>
           </table>
         </div>
+        <PaginationFooter
+          page={page}
+          pageSize={PAGE_SIZE}
+          shown={items.length}
+          total={total}
+          loading={loading}
+          onPageChange={setPage}
+        />
       </div>
 
       {createOpen && (
@@ -199,7 +216,9 @@ export default function PacketCapturesPage() {
           devices={devices}
           onClose={() => setCreateOpen(false)}
           onCreated={(capture) => {
-            setItems((cur) => [capture, ...cur]);
+            setPage(0);
+            setItems((cur) => [capture, ...cur].slice(0, PAGE_SIZE));
+            setTotal((cur) => cur + 1);
             setCreateOpen(false);
           }}
         />

@@ -32,6 +32,7 @@ const ShareTTL = 30 * 24 * time.Hour
 // scheduler-only Repo interface (PR-1) stays minimal.
 type ReadRepo interface {
 	ListReports(ctx context.Context, f ReportFilter) ([]*model.Report, error)
+	CountReports(ctx context.Context, f ReportFilter) (int64, error)
 	DeleteReport(ctx context.Context, id string) error
 	ListSchedules(ctx context.Context, ownerID uint64, all bool) ([]*model.ReportSchedule, error)
 	DeleteSchedule(ctx context.Context, id uint64) error
@@ -58,6 +59,10 @@ func (u *Usecase) ListReports(ctx context.Context, f ReportFilter) ([]*model.Rep
 		f.Limit = DefaultListLimit
 	}
 	return u.read.ListReports(ctx, f)
+}
+
+func (u *Usecase) CountReports(ctx context.Context, f ReportFilter) (int64, error) {
+	return u.read.CountReports(ctx, f)
 }
 
 // GetReport returns one report by id.

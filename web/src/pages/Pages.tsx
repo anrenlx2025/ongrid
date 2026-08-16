@@ -6,14 +6,14 @@
 // touch the SPA session.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { AppWindow, Bot, Check, ChevronLeft, ChevronRight, Download, ExternalLink, Eye, FileBarChart, FileCode2, Loader2, Search, Share2, Trash2, Workflow } from 'lucide-react';
+import { AppWindow, Bot, Check, ChevronRight, Download, ExternalLink, Eye, FileBarChart, FileCode2, Loader2, Search, Share2, Trash2, Workflow } from 'lucide-react';
 
 import { deletePage, fetchPageHTML, listPages, sharePage, type HostedPage } from '@/api/pages';
 import { downloadPacketCapture, listPacketCaptureSessions, packetCaptureArtifactID, type PacketCapture, type PacketCapturePacket, type PacketCaptureSession, type PacketProtocolNode } from '@/api/packetCaptures';
 import { cn } from '@/lib/cn';
 import { useI18n } from '@/i18n/locale';
 import { useAuth } from '@/store/auth';
-import { PageHeader, Button, EmptyState } from '@/components/ui';
+import { PageHeader, Button, EmptyState, PaginationFooter } from '@/components/ui';
 import { Modal } from '@/components/Modal';
 import { ReportCards } from '@/components/ReportCards';
 import { PcapFileIcon } from '@/components/PcapFileIcon';
@@ -427,11 +427,6 @@ function PacketCaptureSessionsView() {
     }
   }, [page]);
   useEffect(()=>{void refresh();},[refresh]);
-  const pageStart = total === 0 ? 0 : page * PACKET_SESSION_PAGE_SIZE + 1;
-  const pageEnd = Math.min(total, page * PACKET_SESSION_PAGE_SIZE + items.length);
-  const hasPrev = page > 0;
-  const hasNext = pageEnd < total;
-
   return (
     <div>
       {error && <div className="mb-4 rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">{error}</div>}
@@ -445,16 +440,6 @@ function PacketCaptureSessionsView() {
         </div>
       ) : (
         <>
-          <PacketSessionPagination
-            label={tr(`第 ${page + 1} 页 · ${pageStart}-${pageEnd} / ${total}`, `Page ${page + 1} · ${pageStart}-${pageEnd} / ${total}`)}
-            prevLabel={tr('上一页', 'Prev')}
-            nextLabel={tr('下一页', 'Next')}
-            hasPrev={hasPrev}
-            hasNext={hasNext}
-            loading={loading}
-            onPrev={() => setPage((p) => Math.max(0, p - 1))}
-            onNext={() => setPage((p) => p + 1)}
-          />
           <section className="overflow-hidden rounded-xl border border-zinc-800/60 bg-zinc-900/40">
             <div className="overflow-x-auto">
               <table className="w-full min-w-[920px] text-left text-xs">
@@ -499,50 +484,16 @@ function PacketCaptureSessionsView() {
               </table>
             </div>
           </section>
+          <PaginationFooter
+            page={page}
+            pageSize={PACKET_SESSION_PAGE_SIZE}
+            shown={items.length}
+            total={total}
+            loading={loading}
+            onPageChange={setPage}
+          />
         </>
       )}
-    </div>
-  );
-}
-
-function PacketSessionPagination({
-  label,
-  prevLabel,
-  nextLabel,
-  hasPrev,
-  hasNext,
-  loading,
-  onPrev,
-  onNext,
-}: {
-  label: string;
-  prevLabel: string;
-  nextLabel: string;
-  hasPrev: boolean;
-  hasNext: boolean;
-  loading: boolean;
-  onPrev(): void;
-  onNext(): void;
-}) {
-  return (
-    <div className="mb-2 flex items-center justify-end gap-2 text-xs text-zinc-400">
-      <span className="mr-2 text-zinc-600">{label}</span>
-      <button
-        type="button"
-        disabled={!hasPrev || loading}
-        onClick={onPrev}
-        className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 hover:bg-zinc-800 disabled:opacity-40"
-      >
-        <ChevronLeft size={13} /> {prevLabel}
-      </button>
-      <button
-        type="button"
-        disabled={!hasNext || loading}
-        onClick={onNext}
-        className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 hover:bg-zinc-800 disabled:opacity-40"
-      >
-        {nextLabel} <ChevronRight size={13} />
-      </button>
     </div>
   );
 }

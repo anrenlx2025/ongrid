@@ -19,6 +19,7 @@ import { ApiError } from '@/api/client';
 import { useIncidentBadge } from '@/store/incidentBadge';
 import { usePermissions } from '@/store/me';
 import { useI18n } from '@/i18n/locale';
+import { PaginationFooter } from '@/components/ui';
 
 const STATUS_FILTERS: { key: string; labelZh: string; labelEn: string }[] = [
   { key: '', labelZh: '全部', labelEn: 'All' },
@@ -36,16 +37,19 @@ const SEVERITY_FILTERS: { key: string; labelZh: string; labelEn: string }[] = [
 ];
 
 const POLL_INTERVAL_MS = 30_000;
+const PAGE_SIZE = 50;
 
 export default function AlertsPage() {
   const { tr } = useI18n();
   const { canMutate } = usePermissions();
   const [items, setItems] = useState<Incident[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('open');
   const [severityFilter, setSeverityFilter] = useState<string>('');
+  const [page, setPage] = useState(0);
   const [resolving, setResolving] = useState<{ incident: Incident } | null>(null);
   const [ackBusyId, setAckBusyId] = useState<number | null>(null);
   // device_id → name for the Target column. incident.target_id is the
@@ -76,9 +80,11 @@ export default function AlertsPage() {
         const r = await listIncidents({
           status: statusFilter || undefined,
           severity: severityFilter || undefined,
-          pageSize: 100,
+          page: page + 1,
+          pageSize: PAGE_SIZE,
         });
         setItems(r.items ?? []);
+        setTotal(r.total ?? 0);
         setErr(null);
         // Piggy-back: every fetch (including the 15s silent poll) is
         // also a chance to sync the global badge. Cheap because the
@@ -94,7 +100,7 @@ export default function AlertsPage() {
         setRefreshing(false);
       }
     },
-    [statusFilter, severityFilter, refreshBadge]
+    [statusFilter, severityFilter, page, refreshBadge]
   );
 
   // Load the edge inventory once for Target-column name resolution.
@@ -125,14 +131,14 @@ export default function AlertsPage() {
   usePoll(() => fetchIncidents({ silent: true }), POLL_INTERVAL_MS);
 
   const counts = useMemo(() => {
-    const total = items.length;
+    const pageTotal = items.length;
     let open = 0;
     let critical = 0;
     for (const i of items) {
       if (i.status === 'open') open++;
       if (i.severity === 'critical') critical++;
     }
-    return { total, open, critical };
+    return { total: pageTotal, open, critical };
   }, [items]);
 
   return (
@@ -154,8 +160,8 @@ export default function AlertsPage() {
               </h1>
               <p className="mt-0.5 text-xs text-zinc-500">
                 {tr(
-                  `全局 ${globalOpen} 未确认 · 当前筛选 ${counts.total} 条 · Critical ${counts.critical}`,
-                  `${globalOpen} open globally · ${counts.total} in current filter · ${counts.critical} critical`,
+                  `全局 ${globalOpen} 未确认 · 当前筛选 ${total} 条 · 本页 Critical ${counts.critical}`,
+                  `${globalOpen} open globally · ${total} in current filter · ${counts.critical} critical on this page`,
                 )}
               </p>
             </div>
@@ -184,13 +190,19 @@ export default function AlertsPage() {
             label={tr('状态', 'Status')}
             options={STATUS_FILTERS.map((o) => ({ key: o.key, label: tr(o.labelZh, o.labelEn) }))}
             value={statusFilter}
-            onChange={setStatusFilter}
+            onChange={(next) => {
+              setPage(0);
+              setStatusFilter(next);
+            }}
           />
           <FilterGroup
             label={tr('级别', 'Severity')}
             options={SEVERITY_FILTERS.map((o) => ({ key: o.key, label: tr(o.labelZh, o.labelEn) }))}
             value={severityFilter}
-            onChange={setSeverityFilter}
+            onChange={(next) => {
+              setPage(0);
+              setSeverityFilter(next);
+            }}
           />
         </div>
 
@@ -247,6 +259,16 @@ export default function AlertsPage() {
               </tbody>
             </table>
           )}
+          <PaginationFooter
+            page={page}
+            pageSize={PAGE_SIZE}
+            shown={items.length}
+            total={total}
+            loading={loading || refreshing}
+            matchLabel={Boolean(statusFilter || severityFilter)}
+            className="px-6"
+            onPageChange={setPage}
+          />
         </div>
       </main>
 

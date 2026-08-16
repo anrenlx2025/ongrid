@@ -18,11 +18,12 @@ import {
   type EdgeUpgradeJobStatus,
 } from "@/api/edges";
 import { Modal } from "@/components/Modal";
-import { Button, Card, Chip, EmptyState } from "@/components/ui";
+import { Button, Card, Chip, EmptyState, PaginationFooter } from "@/components/ui";
 import { useI18n } from "@/i18n/locale";
 import { fullDateTime, relativeTime } from "@/lib/format";
 
 const HISTORY_POLL_MS = 5_000;
+const PAGE_SIZE = 20;
 
 type Props = {
   clusterID: number;
@@ -38,6 +39,7 @@ export function ClusterUpgradeHistory({
   const { tr } = useI18n();
   const [jobs, setJobs] = useState<EdgeUpgradeJob[]>([]);
   const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -53,8 +55,8 @@ export function ClusterUpgradeHistory({
       try {
         const response = await listEdgeUpgradeJobs({
           clusterNodeId: clusterID,
-          page: 1,
-          pageSize: 20,
+          page: page + 1,
+          pageSize: PAGE_SIZE,
         });
         setJobs(response.items ?? []);
         setTotal(response.total ?? 0);
@@ -69,7 +71,7 @@ export function ClusterUpgradeHistory({
         setRefreshing(false);
       }
     },
-    [clusterID, tr],
+    [clusterID, page, tr],
   );
 
   const loadDetail = useCallback(
@@ -92,6 +94,10 @@ export function ClusterUpgradeHistory({
   useEffect(() => {
     void load();
   }, [load, refreshKey]);
+
+  useEffect(() => {
+    setPage(0);
+  }, [clusterID]);
 
   const hasActiveJobs = jobs.some((job) => !isTerminal(job.status));
 
@@ -256,6 +262,15 @@ export function ClusterUpgradeHistory({
             </table>
           </div>
         )}
+        <PaginationFooter
+          page={page}
+          pageSize={PAGE_SIZE}
+          shown={jobs.length}
+          total={total}
+          loading={loading || refreshing}
+          className="px-4"
+          onPageChange={setPage}
+        />
       </Card>
 
       <Modal
