@@ -42,7 +42,10 @@ export function PaginationFooter({
     : tr(`第 ${currentPage + 1} 页`, `Page ${currentPage + 1}`);
 
   return (
-    <div className={cn('flex items-center justify-end gap-2 py-3 text-xs text-zinc-400', className)}>
+    <div className={cn(
+      'sticky bottom-0 z-10 mt-2 flex items-center justify-end gap-2 border-t border-zinc-800/60 bg-zinc-950/95 py-3 text-xs text-zinc-400 backdrop-blur',
+      className,
+    )}>
       <span className="mr-2 text-zinc-600">{rangeLabel}</span>
       <button
         type="button"
