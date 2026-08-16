@@ -444,74 +444,105 @@ function PacketCaptureSessionsView() {
             : tr('暂无抓包会话。让助理对多个 Edge 发起抓包后，会话会在这里汇总成员 PCAP、关联流和时间线。', 'No capture sessions yet. Ask the assistant to capture on multiple edges; sessions summarize member PCAPs, correlated flows, and timelines here.')}
         </div>
       ) : (
-        <section className="overflow-hidden rounded-xl border border-zinc-800/60 bg-zinc-900/40">
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[920px] text-left text-xs">
-              <thead className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] uppercase tracking-wide text-zinc-500">
-                <tr>
-                  <th className="px-4 py-3 font-medium">ID</th>
-                  <th className="px-4 py-3 font-medium">{tr('会话', 'Session')}</th>
-                  <th className="px-4 py-3 font-medium">{tr('来源', 'Source')}</th>
-                  <th className="px-4 py-3 font-medium">PCAP</th>
-                  <th className="px-4 py-3 font-medium">{tr('状态', 'Status')}</th>
-                  <th className="px-4 py-3 font-medium">{tr('创建时间', 'Created')}</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-800">
-                {items.map((item) => (
-                  <tr
-                    key={item.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => navigate(`/artifacts/packet-sessions/${encodeURIComponent(item.id)}`)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') navigate(`/artifacts/packet-sessions/${encodeURIComponent(item.id)}`);
-                    }}
-                    className="cursor-pointer text-zinc-300 transition-colors hover:bg-zinc-800/60"
-                  >
-                    <td className="whitespace-nowrap px-4 py-3 font-mono text-[11px] text-zinc-500">{shortPacketSessionID(item.id)}</td>
-                    <td className="px-4 py-3">
-                      <div className="font-medium text-zinc-100">{item.title || item.id}</div>
-                      <div className="mt-1 max-w-[520px] truncate font-mono text-[11px] text-zinc-500" title={item.id}>{item.id}</div>
-                      <div className="mt-1 max-w-[520px] truncate font-mono text-[11px] text-zinc-600">{item.canonical_filter || tr('全部流量', 'all traffic')}</div>
-                    </td>
-                    <td className="px-4 py-3 text-zinc-400">{packetSourceLabel(item.source, tr)}</td>
-                    <td className="px-4 py-3 text-zinc-300">{item.pcap_count}</td>
-                    <td className="px-4 py-3 text-zinc-400">
-                      <div>{sessionStateLabel(item.state, tr)}</div>
-                      <div className="mt-1 text-[11px] text-zinc-500">{item.analysis?.summary?.ready_count ?? 0}/{item.pcap_count} {tr('已就绪', 'ready')}</div>
-                    </td>
-                    <td className="px-4 py-3 text-zinc-500">{relativeTime(item.created_at)}</td>
+        <>
+          <PacketSessionPagination
+            label={tr(`第 ${page + 1} 页 · ${pageStart}-${pageEnd} / ${total}`, `Page ${page + 1} · ${pageStart}-${pageEnd} / ${total}`)}
+            prevLabel={tr('上一页', 'Prev')}
+            nextLabel={tr('下一页', 'Next')}
+            hasPrev={hasPrev}
+            hasNext={hasNext}
+            loading={loading}
+            onPrev={() => setPage((p) => Math.max(0, p - 1))}
+            onNext={() => setPage((p) => p + 1)}
+          />
+          <section className="overflow-hidden rounded-xl border border-zinc-800/60 bg-zinc-900/40">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[920px] text-left text-xs">
+                <thead className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] uppercase tracking-wide text-zinc-500">
+                  <tr>
+                    <th className="px-4 py-3 font-medium">ID</th>
+                    <th className="px-4 py-3 font-medium">{tr('会话', 'Session')}</th>
+                    <th className="px-4 py-3 font-medium">{tr('来源', 'Source')}</th>
+                    <th className="px-4 py-3 font-medium">PCAP</th>
+                    <th className="px-4 py-3 font-medium">{tr('状态', 'Status')}</th>
+                    <th className="px-4 py-3 font-medium">{tr('创建时间', 'Created')}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+                </thead>
+                <tbody className="divide-y divide-zinc-800">
+                  {items.map((item) => (
+                    <tr
+                      key={item.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => navigate(`/artifacts/packet-sessions/${encodeURIComponent(item.id)}`)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') navigate(`/artifacts/packet-sessions/${encodeURIComponent(item.id)}`);
+                      }}
+                      className="cursor-pointer text-zinc-300 transition-colors hover:bg-zinc-800/60"
+                    >
+                      <td className="whitespace-nowrap px-4 py-3 font-mono text-[11px] text-zinc-500">{shortPacketSessionID(item.id)}</td>
+                      <td className="px-4 py-3">
+                        <div className="font-medium text-zinc-100">{item.title || item.id}</div>
+                        <div className="mt-1 max-w-[520px] truncate font-mono text-[11px] text-zinc-500" title={item.id}>{item.id}</div>
+                        <div className="mt-1 max-w-[520px] truncate font-mono text-[11px] text-zinc-600">{item.canonical_filter || tr('全部流量', 'all traffic')}</div>
+                      </td>
+                      <td className="px-4 py-3 text-zinc-400">{packetSourceLabel(item.source, tr)}</td>
+                      <td className="px-4 py-3 text-zinc-300">{item.pcap_count}</td>
+                      <td className="px-4 py-3 text-zinc-400">
+                        <div>{sessionStateLabel(item.state, tr)}</div>
+                        <div className="mt-1 text-[11px] text-zinc-500">{item.analysis?.summary?.ready_count ?? 0}/{item.pcap_count} {tr('已就绪', 'ready')}</div>
+                      </td>
+                      <td className="px-4 py-3 text-zinc-500">{relativeTime(item.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </>
       )}
-      {!loading && total > 0 && (
-        <div className="flex items-center justify-end gap-2 py-3 text-xs text-zinc-400">
-          <span className="mr-2 text-zinc-600">
-            {tr(`第 ${page + 1} 页 · ${pageStart}-${pageEnd} / ${total}`, `Page ${page + 1} · ${pageStart}-${pageEnd} / ${total}`)}
-          </span>
-          <button
-            type="button"
-            disabled={!hasPrev || loading}
-            onClick={() => setPage((p) => Math.max(0, p - 1))}
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 hover:bg-zinc-800 disabled:opacity-40"
-          >
-            <ChevronLeft size={13} /> {tr('上一页', 'Prev')}
-          </button>
-          <button
-            type="button"
-            disabled={!hasNext || loading}
-            onClick={() => setPage((p) => p + 1)}
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 hover:bg-zinc-800 disabled:opacity-40"
-          >
-            {tr('下一页', 'Next')} <ChevronRight size={13} />
-          </button>
-        </div>
-      )}
+    </div>
+  );
+}
+
+function PacketSessionPagination({
+  label,
+  prevLabel,
+  nextLabel,
+  hasPrev,
+  hasNext,
+  loading,
+  onPrev,
+  onNext,
+}: {
+  label: string;
+  prevLabel: string;
+  nextLabel: string;
+  hasPrev: boolean;
+  hasNext: boolean;
+  loading: boolean;
+  onPrev(): void;
+  onNext(): void;
+}) {
+  return (
+    <div className="mb-2 flex items-center justify-end gap-2 text-xs text-zinc-400">
+      <span className="mr-2 text-zinc-600">{label}</span>
+      <button
+        type="button"
+        disabled={!hasPrev || loading}
+        onClick={onPrev}
+        className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 hover:bg-zinc-800 disabled:opacity-40"
+      >
+        <ChevronLeft size={13} /> {prevLabel}
+      </button>
+      <button
+        type="button"
+        disabled={!hasNext || loading}
+        onClick={onNext}
+        className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 hover:bg-zinc-800 disabled:opacity-40"
+      >
+        {nextLabel} <ChevronRight size={13} />
+      </button>
     </div>
   );
 }
