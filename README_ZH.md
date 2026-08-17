@@ -185,7 +185,8 @@ Ongrid 名称、Logo、域名和相关品牌资产不随 AGPLv3 授权，见
 ## 加入群组
 
 <p align="center">
-  <img src="docs/assets/community/wechat-dev-community.jpg" alt="Ongrid 微信群二维码" width="200" />
+  <img src="https://github.com/user-attachments/assets/175ee822-c557-48c4-aedf-a7e1dc8de4b7" alt="Ongrid 微信群二维码" width="200" />
 </p>
+
 
 扫码加入 Ongrid 开发者社区，交流部署、AIOps 场景、工作流和插件扩展。
