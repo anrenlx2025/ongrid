@@ -127,11 +127,6 @@ type PacketCaptureConfig struct {
 	// corresponding public key.
 	// env: ONGRID_PACKET_PARSER_MANAGER_PRIVATE_KEY_FILE; default empty.
 	ParserManagerPrivateKeyFile string
-	// ParserClientCertFile/ParserClientKeyFile are the Manager mTLS client
-	// certificate pair used when calling the private parser service.
-	// env: ONGRID_PACKET_PARSER_CLIENT_CERT_FILE / ONGRID_PACKET_PARSER_CLIENT_KEY_FILE.
-	ParserClientCertFile string
-	ParserClientKeyFile  string
 	// ParserCAFile verifies the private parser service certificate.
 	// env: ONGRID_PACKET_PARSER_CA_FILE; default empty uses system roots.
 	ParserCAFile string
@@ -436,8 +431,6 @@ func Load() (*Config, error) {
 			ParserArtifactBaseURL:       getEnv("ONGRID_PACKET_PARSER_ARTIFACT_BASE_URL", ""),
 			ParserTokenSecret:           getEnv("ONGRID_PACKET_PARSER_TOKEN_SECRET", ""),
 			ParserManagerPrivateKeyFile: getEnv("ONGRID_PACKET_PARSER_MANAGER_PRIVATE_KEY_FILE", ""),
-			ParserClientCertFile:        getEnv("ONGRID_PACKET_PARSER_CLIENT_CERT_FILE", ""),
-			ParserClientKeyFile:         getEnv("ONGRID_PACKET_PARSER_CLIENT_KEY_FILE", ""),
 			ParserCAFile:                getEnv("ONGRID_PACKET_PARSER_CA_FILE", ""),
 			ParserTimeout:               getEnvDuration("ONGRID_PACKET_PARSER_TIMEOUT", 2*time.Minute),
 			ParserMaxPackets:            uint64(getEnvInt("ONGRID_PACKET_PARSER_MAX_PACKETS", 1000)),

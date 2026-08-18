@@ -46,13 +46,13 @@ fi
 # shellcheck source=data-permissions.sh
 source "$DATA_PERMISSIONS_LIB"
 
-PCAP_PARSER_TLS_LIB="$SCRIPT_DIR/pcap-parser-tls.sh"
-if [[ ! -r "$PCAP_PARSER_TLS_LIB" ]]; then
-    log_error "upgrade package is missing pcap-parser-tls.sh"
+PCAP_PARSER_AUTH_LIB="$SCRIPT_DIR/pcap-parser-auth.sh"
+if [[ ! -r "$PCAP_PARSER_AUTH_LIB" ]]; then
+    log_error "upgrade package is missing pcap-parser-auth.sh"
     exit 1
 fi
-# shellcheck source=pcap-parser-tls.sh
-source "$PCAP_PARSER_TLS_LIB"
+# shellcheck source=pcap-parser-auth.sh
+source "$PCAP_PARSER_AUTH_LIB"
 
 generate_self_signed_tls_cert() {
     local cert_dir="$1"
@@ -431,8 +431,8 @@ if ! ongrid_prepare_data_directories "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"; then
     log_error "data directory permissions are not usable; the existing stack was not stopped"
     exit 1
 fi
-if ! ongrid_prepare_pcap_parser_tls "$ONGRID_DATA_DIR"; then
-    log_error "pcap-parser TLS material is not usable; the existing stack was not stopped"
+if ! ongrid_prepare_pcap_parser_auth "$ONGRID_DATA_DIR"; then
+    log_error "pcap-parser request signing material is not usable; the existing stack was not stopped"
     exit 1
 fi
 

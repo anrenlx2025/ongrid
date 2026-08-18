@@ -39,13 +39,13 @@ fi
 # shellcheck source=data-permissions.sh
 source "$DATA_PERMISSIONS_LIB"
 
-PCAP_PARSER_TLS_LIB="$SCRIPT_DIR/pcap-parser-tls.sh"
-if [[ ! -r "$PCAP_PARSER_TLS_LIB" ]]; then
-    log_error "install package is missing pcap-parser-tls.sh"
+PCAP_PARSER_AUTH_LIB="$SCRIPT_DIR/pcap-parser-auth.sh"
+if [[ ! -r "$PCAP_PARSER_AUTH_LIB" ]]; then
+    log_error "install package is missing pcap-parser-auth.sh"
     exit 1
 fi
-# shellcheck source=pcap-parser-tls.sh
-source "$PCAP_PARSER_TLS_LIB"
+# shellcheck source=pcap-parser-auth.sh
+source "$PCAP_PARSER_AUTH_LIB"
 
 generate_self_signed_tls_cert() {
     local cert_dir="$1"
@@ -614,11 +614,11 @@ chown -R 65532:65532 "$ONGRID_DATA_DIR/packet-captures" 2>/dev/null || true
 chown -R 65532:65532 "$ONGRID_DATA_DIR/workspace" 2>/dev/null || true
 chown -R 65532:65532 "$ONGRID_DATA_DIR/tools" 2>/dev/null || true
 
-# pcap-parser is a separate, private image. Bootstrap a dedicated internal
-# PKI before Compose starts; its source and native dissector never enter this
-# repository or the manager image.
-ongrid_prepare_pcap_parser_tls "$ONGRID_DATA_DIR" || {
-    log_error "could not prepare pcap-parser TLS material"
+# pcap-parser is a separate, private image. Bootstrap only the Manager request
+# signer; its Docker-only HTTP path is protected by this signature and the
+# single-use artifact capability, not by an unnecessary internal client cert.
+ongrid_prepare_pcap_parser_auth "$ONGRID_DATA_DIR" || {
+    log_error "could not prepare pcap-parser request signing material"
     exit 1
 }
 

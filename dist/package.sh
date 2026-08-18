@@ -109,7 +109,7 @@ copy_opt "${REPO_ROOT}/deploy/install/uninstall.sh"        "${STAGE_DIR}/uninsta
 copy_opt "${REPO_ROOT}/deploy/install/upgrade.sh"          "${STAGE_DIR}/upgrade.sh"          755
 copy_opt "${REPO_ROOT}/deploy/install/public-url.sh"       "${STAGE_DIR}/public-url.sh"       644
 copy_opt "${REPO_ROOT}/deploy/install/data-permissions.sh"  "${STAGE_DIR}/data-permissions.sh"  644
-copy_opt "${REPO_ROOT}/deploy/install/pcap-parser-tls.sh" "${STAGE_DIR}/pcap-parser-tls.sh" 644
+copy_opt "${REPO_ROOT}/deploy/install/pcap-parser-auth.sh" "${STAGE_DIR}/pcap-parser-auth.sh" 644
 copy_opt "${REPO_ROOT}/deploy/install/docker-compose.yml"  "${STAGE_DIR}/docker-compose.yml"
 copy_opt "${REPO_ROOT}/deploy/install/.env.example"        "${STAGE_DIR}/.env.example"
 if [[ -f "${STAGE_DIR}/.env.example" ]]; then
