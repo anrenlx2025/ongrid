@@ -13,6 +13,7 @@ render_images() {
     MYSQL_ROOT_PASSWORD=ci-root \
     MYSQL_PASSWORD=ci-user \
     ONGRID_JWT_SECRET=ci-jwt-secret \
+    ONGRID_PACKET_PARSER_TOKEN_SECRET=ci-packet-parser-token-secret \
     GRAFANA_ADMIN_PASSWORD=ci-grafana \
         docker compose -f "$compose_file" config --images | sort -u >"$output"
 }
@@ -29,6 +30,7 @@ docker.cnb.cool/ongridio/ongrid/prometheus:v2.54.0
 docker.cnb.cool/ongridio/ongrid/qdrant:v1.11.3
 docker.cnb.cool/ongridio/ongrid/searxng:latest
 docker.cnb.cool/ongridio/ongrid/tempo:2.10.0
+docker.cnb.cool/ongridio/pcap-parser:latest
 EOF
 sort -o "$tmp_dir/install.expected" "$tmp_dir/install.expected"
 diff -u "$tmp_dir/install.expected" "$tmp_dir/install.actual"
