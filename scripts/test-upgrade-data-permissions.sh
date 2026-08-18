@@ -42,7 +42,7 @@ expected_owner_for_path() {
         "$data_dir/prometheus") printf '65534:65534\n' ;;
         "$data_dir/loki"|"$data_dir/tempo") printf '10001:10001\n' ;;
         "$data_dir/grafana") printf '472:472\n' ;;
-        "$data_dir/embeddings"|"$data_dir/skills"|"$data_dir/pages"|\
+        "$data_dir/embeddings"|"$data_dir/skills"|"$data_dir/pages"|"$data_dir/packet-captures"|\
             "$data_dir/workspace"|"$data_dir/tools") printf '65532:65532\n' ;;
         *) printf '0:0\n' ;;
     esac
