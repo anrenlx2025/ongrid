@@ -31,7 +31,7 @@ func TestRankEdgesTool_TopK(t *testing.T) {
 	pq := &fakePromQuerier{
 		resp: &promquery.InstantResult{
 			ResultType: "matrix",
-			Result:     json.RawMessage(`[{"metric":{"edge_id":"1"},"values":[[1,"50"]]}]`),
+			Result:     json.RawMessage(`[{"metric":{"device_id":"1"},"values":[[1,"50"]]}]`),
 		},
 	}
 	uc := edgebiz.NewUsecase(newFakeEdgeRepo(), nil, nil, slog.Default())
@@ -50,6 +50,14 @@ func TestRankEdgesTool_TopK(t *testing.T) {
 	}
 	if got["by"] != "cpu" {
 		t.Errorf("by = %v", got["by"])
+	}
+	rows, ok := got["results"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("results = %#v", got["results"])
+	}
+	row, ok := rows[0].(map[string]any)
+	if !ok || row["device_id"] != float64(1) {
+		t.Fatalf("result row must preserve Prometheus device_id, got %#v", rows[0])
 	}
 }
 

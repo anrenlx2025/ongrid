@@ -31,6 +31,7 @@ import (
 const coordinatorToolRouting = `## 工具选型补充
 - ongrid device/edge ≠ k8s node。问 ongrid 设备用 ongrid 工具；问 k8s 集群用 ` +
 	"`mcp__k8s__*`" + `，不要猜 ` + "`kubectl`" + `。
+- 产品行为、交互设计、页面/产物关联、ToolSearch/Operation/AgentLoop 策略解释，默认直接解释；不要为了这类问题发散调用 ` + "`host_bash`" + ` / 拓扑 / 源码工具。若缺少运行时产物索引，直接说明能力缺口。
 - 复杂跨域任务可同轮并行多个 ` + "`AgentTool`" + `；简单 topN / 快照 / 列表仍直接查。错误来源连续 2 次不匹配就换路或说明缺口。`
 
 func ComposeSystemPrompt(basePrompt string, activeSkills []*Skill, agentProfile *Agent) string {
@@ -233,60 +234,39 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// buildAgentCatalog renders a markdown list of the registered agent
-// personas the coordinator can spawn via AgentTool. Injected into the
-// coordinator's system prompt at runtime so the LLM knows the valid
-// subagent_type values + when to pick which.
-//
-// Only "user" + "disk" sourced personas are listed. The coordinator
-// never spawns reviewer (only review_gate decorator does); skipping it
-// here keeps the LLM from accidentally trying to use it for ad-hoc
-// reviews.
+// buildAgentCatalog renders optional expert capability cards for the default
+// assistant. The cards explain what additional evidence an expert can obtain;
+// they do not turn the expert into the owner of the user conversation.
 func buildAgentCatalog(reg *AgentRegistry) string {
 	if reg == nil {
 		return ""
 	}
-	all := reg.All()
-	if len(all) == 0 {
+	cards := reg.CapabilityCards()
+	if len(cards) == 0 {
 		return ""
 	}
-	type row struct{ name, when, desc string }
-	rows := make([]row, 0, len(all))
-	for _, ag := range all {
-		if ag == nil || ag.Name == "" {
+	type row struct{ agent, id, desc string }
+	rows := make([]row, 0, len(cards))
+	for _, card := range cards {
+		if card.AgentName == "" || card.AgentName == "reviewer" || card.AgentName == "default" {
 			continue
 		}
-		// reviewer is reserved for the SOP twin-sign decorator; don't
-		// expose it to the coordinator's free-form AgentTool routing.
-		// "default" is the virtual top-level persona — listing it as a
-		// spawnable sub-agent would let the coordinator recursively
-		// spawn itself.
-		if ag.Name == "reviewer" || ag.Name == "default" {
-			continue
-		}
-		rows = append(rows, row{name: ag.Name, when: strings.TrimSpace(ag.WhenToUse), desc: strings.TrimSpace(ag.Description)})
+		rows = append(rows, row{agent: card.AgentName, id: card.ID, desc: strings.TrimSpace(card.Description)})
 	}
 	if len(rows) == 0 {
 		return ""
 	}
 	var sb strings.Builder
-	sb.WriteString("## 可用的 specialist 助理（AgentTool 的 subagent_type）\n\n")
-	sb.WriteString("当任务需要多步诊断、根因判断、跨域分析或处置建议时，用 AgentTool 派给对应专家；简单 topN / 快照 / 列表查询由 coordinator 直接调用只读工具完成：\n\n")
+	sb.WriteString("## 可选专家能力（AgentTool 的 subagent_type）\n\n")
+	sb.WriteString("默认助理负责最终答复并可直接使用本轮工具。需要独立复核、额外领域证据或并行分析时，才调用 AgentTool 请求以下专家工作会话：\n\n")
 	for _, r := range rows {
 		sb.WriteString("- `")
-		sb.WriteString(r.name)
-		sb.WriteString("` — ")
+		sb.WriteString(r.agent)
+		sb.WriteString("` (`")
+		sb.WriteString(r.id)
+		sb.WriteString("`) — ")
 		if r.desc != "" {
 			sb.WriteString(r.desc)
-		}
-		if r.when != "" {
-			// Take just the first non-empty line of when_to_use so
-			// the prompt stays compact.
-			firstLine := strings.SplitN(r.when, "\n", 2)[0]
-			if firstLine != "" && firstLine != r.desc {
-				sb.WriteString("。何时派：")
-				sb.WriteString(firstLine)
-			}
 		}
 		sb.WriteString("\n")
 	}

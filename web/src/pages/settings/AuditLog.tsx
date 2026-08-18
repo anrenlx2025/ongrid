@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Filter, Loader2, RefreshCw, Shield, X } from 'lucide-react';
 import { ApiError } from '@/api/client';
 import { listAuditLogs, type AuditLog, type AuditListFilters } from '@/api/audit';
-import { Button, Card, Chip, EmptyState, PageHeader } from '@/components/ui';
+import { Button, Card, Chip, EmptyState, PageHeader, PaginationFooter } from '@/components/ui';
 import { useMe } from '@/store/me';
 import { cn } from '@/lib/cn';
 import { useI18n } from '@/i18n/locale';
+
+const PAGE_SIZE = 50;
 
 // /admin/audit — HLD-010 audit trail viewer. Admin-only. Read-only
 // (audit_logs is append-only by design — even the retention sweep
@@ -19,7 +21,8 @@ export default function SettingsAuditLog() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>('');
-  const [filter, setFilter] = useState<AuditListFilters>({ limit: 100 });
+  const [filter, setFilter] = useState<AuditListFilters>({ limit: PAGE_SIZE, offset: 0 });
+  const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<AuditLog | null>(null);
 
   const load = useCallback(async () => {
@@ -27,7 +30,7 @@ export default function SettingsAuditLog() {
     setLoading(true);
     setErr('');
     try {
-      const r = await listAuditLogs(filter);
+      const r = await listAuditLogs({ ...filter, limit: PAGE_SIZE, offset: page * PAGE_SIZE });
       setItems(r.items);
       setTotal(r.total);
     } catch (e) {
@@ -35,7 +38,7 @@ export default function SettingsAuditLog() {
     } finally {
       setLoading(false);
     }
-  }, [filter, isAdmin]);
+  }, [filter, isAdmin, page]);
 
   useEffect(() => {
     void load();
@@ -103,13 +106,19 @@ export default function SettingsAuditLog() {
           <input
             type="text"
             value={filter.user_email ?? ''}
-            onChange={(e) => setFilter((f) => ({ ...f, user_email: e.target.value || undefined }))}
+            onChange={(e) => {
+              setPage(0);
+              setFilter((f) => ({ ...f, user_email: e.target.value || undefined }));
+            }}
             placeholder={tr('用户邮箱', 'User email')}
             className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-200 outline-none focus:border-zinc-600"
           />
           <select
             value={filter.action ?? ''}
-            onChange={(e) => setFilter((f) => ({ ...f, action: e.target.value || undefined }))}
+            onChange={(e) => {
+              setPage(0);
+              setFilter((f) => ({ ...f, action: e.target.value || undefined }));
+            }}
             className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-200 outline-none focus:border-zinc-600 cursor-pointer"
           >
             <option value="">{tr('全部 action', 'All actions')}</option>
@@ -119,7 +128,10 @@ export default function SettingsAuditLog() {
           </select>
           <select
             value={filter.resource_type ?? ''}
-            onChange={(e) => setFilter((f) => ({ ...f, resource_type: e.target.value || undefined }))}
+            onChange={(e) => {
+              setPage(0);
+              setFilter((f) => ({ ...f, resource_type: e.target.value || undefined }));
+            }}
             className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-200 outline-none focus:border-zinc-600 cursor-pointer"
           >
             <option value="">{tr('全部资源', 'All resources')}</option>
@@ -129,7 +141,10 @@ export default function SettingsAuditLog() {
           </select>
           <select
             value={filter.status ?? ''}
-            onChange={(e) => setFilter((f) => ({ ...f, status: (e.target.value as AuditListFilters['status']) || undefined }))}
+            onChange={(e) => {
+              setPage(0);
+              setFilter((f) => ({ ...f, status: (e.target.value as AuditListFilters['status']) || undefined }));
+            }}
             className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-200 outline-none focus:border-zinc-600 cursor-pointer"
           >
             <option value="">{tr('全部结果', 'All status')}</option>
@@ -138,7 +153,10 @@ export default function SettingsAuditLog() {
             <option value="denied">denied</option>
           </select>
           {(filter.user_email || filter.action || filter.resource_type || filter.status) && (
-            <Button variant="ghost" onClick={() => setFilter({ limit: 100 })}>
+            <Button variant="ghost" onClick={() => {
+              setPage(0);
+              setFilter({ limit: PAGE_SIZE, offset: 0 });
+            }}>
               <X size={14} className="mr-1" />
               {tr('清空筛选', 'Clear filters')}
             </Button>
@@ -202,6 +220,15 @@ export default function SettingsAuditLog() {
           </tbody>
         </table>
       </Card>
+      <PaginationFooter
+        page={page}
+        pageSize={PAGE_SIZE}
+        shown={items.length}
+        total={total}
+        loading={loading}
+        matchLabel={Boolean(filter.user_email || filter.action || filter.resource_type || filter.status)}
+        onPageChange={setPage}
+      />
 
       {selected && <DetailDrawer row={selected} onClose={() => setSelected(null)} />}
     </main>

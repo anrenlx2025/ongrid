@@ -172,6 +172,9 @@ func TestToolSearch_NoMatchReturnsEmpty(t *testing.T) {
 	if resp.Tools == nil || len(resp.Tools) != 0 {
 		t.Errorf("expected empty tools array, got %v", resp.Tools)
 	}
+	if !strings.Contains(resp.Instruction, "Do not retry ToolSearch") {
+		t.Errorf("empty match should stop synonym retries, got instruction %q", resp.Instruction)
+	}
 }
 
 // TestToolSearch_SelectUnknownReturnsEmpty confirms select:DOES_NOT_EXIST

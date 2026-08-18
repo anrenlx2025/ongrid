@@ -68,6 +68,8 @@ func (r *fakeResp) SetStreamID(_ uint64)  {}
 // ---------------------------------------------------------------------
 
 type fakeService struct {
+	End *fakeRawEnd
+
 	mu sync.Mutex
 
 	// last call inputs / configurable response.
@@ -150,6 +152,91 @@ func (f *fakeService) Close() error {
 // silence the unused options import that some toolchains complain about.
 var _ = options.OpenStream
 
+type fakeRawEnd struct {
+	meta []byte
+	peer string
+}
+
+func (e *fakeRawEnd) OpenStream(opts ...*options.OpenStreamOptions) (geminio.Stream, error) {
+	o := options.MergeOpenStreamOptions(opts...)
+	e.meta = append([]byte(nil), o.Meta...)
+	if o.Peer != nil {
+		e.peer = *o.Peer
+	}
+	return &fakeStream{meta: e.meta, peer: e.peer}, nil
+}
+
+type fakeStream struct {
+	meta []byte
+	peer string
+}
+
+func (s *fakeStream) Read(_ []byte) (int, error)       { return 0, errors.New("not implemented") }
+func (s *fakeStream) Write(p []byte) (int, error)      { return len(p), nil }
+func (s *fakeStream) Close() error                     { return nil }
+func (s *fakeStream) LocalAddr() net.Addr              { return nil }
+func (s *fakeStream) RemoteAddr() net.Addr             { return nil }
+func (s *fakeStream) SetDeadline(time.Time) error      { return nil }
+func (s *fakeStream) SetReadDeadline(time.Time) error  { return nil }
+func (s *fakeStream) SetWriteDeadline(time.Time) error { return nil }
+func (s *fakeStream) ID() uint64                       { return 0 }
+func (s *fakeStream) StreamID() uint64                 { return 0 }
+func (s *fakeStream) ClientID() uint64                 { return 0 }
+func (s *fakeStream) Method() string                   { return "" }
+func (s *fakeStream) Timeout() time.Duration           { return 0 }
+func (s *fakeStream) Data() []byte                     { return nil }
+func (s *fakeStream) Custom() []byte                   { return nil }
+func (s *fakeStream) SetTimeout(time.Duration)         {}
+func (s *fakeStream) SetCustom([]byte)                 {}
+func (s *fakeStream) SetClientID(uint64)               {}
+func (s *fakeStream) SetStreamID(uint64)               {}
+func (s *fakeStream) NewRequest(data []byte, _ ...*options.NewRequestOptions) geminio.Request {
+	return &fakeReq{data: data}
+}
+func (s *fakeStream) Call(context.Context, string, geminio.Request, ...*options.CallOptions) (geminio.Response, error) {
+	return nil, errors.New("not implemented")
+}
+func (s *fakeStream) CallAsync(context.Context, string, geminio.Request, chan *geminio.Call, ...*options.CallOptions) (*geminio.Call, error) {
+	return nil, errors.New("not implemented")
+}
+func (s *fakeStream) Register(context.Context, string, geminio.RPC) error       { return nil }
+func (s *fakeStream) Hijack(geminio.HijackRPC, ...*options.HijackOptions) error { return nil }
+func (s *fakeStream) NewMessage(data []byte, _ ...*options.NewMessageOptions) geminio.Message {
+	return &fakeMessage{data: data}
+}
+func (s *fakeStream) Publish(context.Context, geminio.Message, ...*options.PublishOptions) error {
+	return nil
+}
+func (s *fakeStream) PublishAsync(context.Context, geminio.Message, chan *geminio.Publish, ...*options.PublishOptions) (*geminio.Publish, error) {
+	return nil, errors.New("not implemented")
+}
+func (s *fakeStream) Receive(context.Context) (geminio.Message, error) {
+	return nil, errors.New("not implemented")
+}
+func (s *fakeStream) Meta() []byte       { return s.meta }
+func (s *fakeStream) Side() geminio.Side { return geminio.InitiatorSide }
+func (s *fakeStream) Peer() string       { return s.peer }
+
+type fakeMessage struct {
+	data []byte
+}
+
+func (m *fakeMessage) Done() error              { return nil }
+func (m *fakeMessage) Error(error) error        { return nil }
+func (m *fakeMessage) ID() uint64               { return 0 }
+func (m *fakeMessage) StreamID() uint64         { return 0 }
+func (m *fakeMessage) ClientID() uint64         { return 0 }
+func (m *fakeMessage) Timeout() time.Duration   { return 0 }
+func (m *fakeMessage) Topic() string            { return "" }
+func (m *fakeMessage) Cnss() options.Cnss       { return 0 }
+func (m *fakeMessage) Data() []byte             { return m.data }
+func (m *fakeMessage) Custom() []byte           { return nil }
+func (m *fakeMessage) SetTimeout(time.Duration) {}
+func (m *fakeMessage) SetCustom([]byte)         {}
+func (m *fakeMessage) SetTopic(string)          {}
+func (m *fakeMessage) SetClientID(uint64)       {}
+func (m *fakeMessage) SetStreamID(uint64)       {}
+
 // ---------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------
@@ -192,6 +279,28 @@ func TestClient_Call_UsesTransportBinding(t *testing.T) {
 	}
 	if fs.lastEdgeID != 7634846078675816708 {
 		t.Errorf("lastEdgeID = %d, want transport id", fs.lastEdgeID)
+	}
+}
+
+func TestClient_OpenStreamWithMeta_UsesEmbeddedEndOptions(t *testing.T) {
+	raw := &fakeRawEnd{}
+	fs := newFakeService()
+	fs.End = raw
+	c := newWithService(fs, slog.Default())
+	c.bindEdgeTransport(7634846078675816708, 2)
+
+	stream, err := c.OpenStreamWithMeta(context.Background(), 2, []byte(`{"kind":"operator_exec"}`))
+	if err != nil {
+		t.Fatalf("OpenStreamWithMeta: %v", err)
+	}
+	if stream == nil {
+		t.Fatal("stream = nil")
+	}
+	if raw.peer != "7634846078675816708" {
+		t.Fatalf("peer = %q", raw.peer)
+	}
+	if string(raw.meta) != `{"kind":"operator_exec"}` {
+		t.Fatalf("meta = %q", string(raw.meta))
 	}
 }
 

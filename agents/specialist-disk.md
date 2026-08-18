@@ -13,6 +13,12 @@ when_to_use: |
     • 网络问题（用 specialist-network）
     • 进程 / cpu / mem 问题（让 coordinator 直接用 host_processes）
     • 业务逻辑日志解读（用 query_logql）
+capabilities:
+  - id: disk_diagnosis
+    description: Diagnose filesystem capacity, inode exhaustion, large directories, and files.
+    tools: [get_host_load, query_promql, host_du_summary, host_find_large_files, host_stat_file, host_bash]
+    max_tool_calls: 10
+can_delegate: true
 tools:
   - query_knowledge
   - host_find_large_files

@@ -50,11 +50,12 @@ type RankEdgesArgs struct {
 	Direction string `json:"direction,omitempty"`
 }
 
-// RankEdgeRow is one ranked entry. EdgeName is best-effort: when the
-// label set on the Prom result doesn't contain a numeric edge_id we
-// can decode, Name stays empty.
+// RankEdgeRow is one ranked entry. Prometheus host metrics conventionally
+// carry device_id, while a few legacy series carry edge_id; retain both so a
+// follow-up host tool receives the identifier it actually accepts.
 type RankEdgeRow struct {
-	EdgeID   uint64  `json:"edge_id"`
+	DeviceID uint64  `json:"device_id,omitempty"`
+	EdgeID   uint64  `json:"edge_id,omitempty"`
 	EdgeName string  `json:"edge_name"`
 	Value    float64 `json:"value"`
 	Metric   string  `json:"metric"`
@@ -161,9 +162,9 @@ func (r *Registry) executeRankEdges(ctx context.Context, args json.RawMessage) (
 	}
 
 	out, err := json.Marshal(map[string]any{
-		"results": rows,
-		"metric":  label,
-		"by":      in.By,
+		"results":   rows,
+		"metric":    label,
+		"by":        in.By,
 		"direction": op,
 	})
 	if err != nil {
@@ -182,7 +183,8 @@ type promRangeSeries struct {
 // decodeRankSeries pulls (edge_id, last-value) out of a matrix Prom
 // response. Series without a numeric edge_id label are skipped: we have
 // no way to map them back to an Edge row.
-func decodeRankSeries(res interface{ /* satisfied by *promquery.InstantResult */ }, metricLabel string) ([]RankEdgeRow, error) {
+func decodeRankSeries(res interface { /* satisfied by *promquery.InstantResult */
+}, metricLabel string) ([]RankEdgeRow, error) {
 	type irShape struct {
 		ResultType string          `json:"resultType"`
 		Result     json.RawMessage `json:"result"`
@@ -208,7 +210,7 @@ func decodeRankSeries(res interface{ /* satisfied by *promquery.InstantResult */
 		}
 		rows := make([]RankEdgeRow, 0, len(series))
 		for _, s := range series {
-			eid, ok := numericLabel(s.Metric, "edge_id")
+			deviceID, edgeID, ok := rankTargetIDs(s.Metric)
 			if !ok {
 				continue
 			}
@@ -216,7 +218,7 @@ func decodeRankSeries(res interface{ /* satisfied by *promquery.InstantResult */
 			if !ok {
 				continue
 			}
-			rows = append(rows, RankEdgeRow{EdgeID: eid, Value: val, Metric: metricLabel})
+			rows = append(rows, RankEdgeRow{DeviceID: deviceID, EdgeID: edgeID, Value: val, Metric: metricLabel})
 		}
 		return rows, nil
 	case "vector":
@@ -229,7 +231,7 @@ func decodeRankSeries(res interface{ /* satisfied by *promquery.InstantResult */
 		}
 		rows := make([]RankEdgeRow, 0, len(series))
 		for _, s := range series {
-			eid, ok := numericLabel(s.Metric, "edge_id")
+			deviceID, edgeID, ok := rankTargetIDs(s.Metric)
 			if !ok {
 				continue
 			}
@@ -237,11 +239,19 @@ func decodeRankSeries(res interface{ /* satisfied by *promquery.InstantResult */
 			if !ok {
 				continue
 			}
-			rows = append(rows, RankEdgeRow{EdgeID: eid, Value: val, Metric: metricLabel})
+			rows = append(rows, RankEdgeRow{DeviceID: deviceID, EdgeID: edgeID, Value: val, Metric: metricLabel})
 		}
 		return rows, nil
 	}
 	return nil, nil
+}
+
+func rankTargetIDs(labels map[string]string) (deviceID, edgeID uint64, ok bool) {
+	if deviceID, ok = numericLabel(labels, "device_id"); ok {
+		return deviceID, 0, true
+	}
+	edgeID, ok = numericLabel(labels, "edge_id")
+	return 0, edgeID, ok
 }
 
 // numericLabel pulls a uint64-ish label out of the Prom metric map. A

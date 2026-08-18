@@ -13,8 +13,10 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/ongridio/ongrid/internal/edgeagent/packetcapture"
 	skilldispatch "github.com/ongridio/ongrid/internal/edgeagent/skill"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
+	"github.com/ongridio/ongrid/internal/skill/builtin"
 )
 
 // Collector is the contract the edge agent requires of a metric source.
@@ -83,6 +85,10 @@ type Config struct {
 	// MethodAgentUpgrade handler entirely (useful for dev where systemd
 	// isn't available — manager will see "method not found").
 	UpgradeStageDir string
+
+	// PacketCaptureDir is the edge-owned private directory for temporary PCAP
+	// files. Empty selects the standard systemd Edge data directory.
+	PacketCaptureDir string
 }
 
 // Agent is the edge run-loop. It owns the tunnel.Client, periodic
@@ -112,6 +118,8 @@ type Agent struct {
 	// by mu so the heartbeat goroutine reads it race-free.
 	pluginHealthFn              func() []tunnel.PluginHealthWire
 	networkDiscoveryUnsupported bool
+	packetCapture               *packetcapture.Service
+	packetCaptureErr            error
 }
 
 // SetPluginHealthFn wires the plugin-health provider used by the heartbeat
@@ -138,13 +146,28 @@ func NewAgent(client tunnel.Client, collector Collector, cfg Config, log *slog.L
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Agent{
+	agent := &Agent{
 		client:           client,
 		collector:        collector,
 		cfg:              cfg,
 		log:              log,
 		upgradeRequested: make(chan struct{}, 1),
 	}
+	if cfg.Kubernetes != nil {
+		agent.packetCaptureErr = errors.New("packet capture currently supports non-Kubernetes edges only")
+		return agent
+	}
+	captureDir := strings.TrimSpace(cfg.PacketCaptureDir)
+	if captureDir == "" {
+		captureDir = "/var/lib/ongrid-edge/pcap"
+	}
+	capturer, err := packetcapture.New(captureDir)
+	if err != nil {
+		agent.packetCaptureErr = err
+		return agent
+	}
+	agent.packetCapture, agent.packetCaptureErr = packetcapture.NewService(capturer)
+	return agent
 }
 
 // New is retained for backwards compatibility with the Phase 1 wiring
@@ -366,12 +389,42 @@ func (a *Agent) registerHandlers() {
 			}
 			return jsonEncode(a.collector.GetProcessList(ctx, int(req.TopN), req.SortBy))
 		})
+	a.client.RegisterHandler(tunnel.MethodStartPacketCapture,
+		func(ctx context.Context, _ tunnel.Session, _ string, body []byte) ([]byte, error) {
+			return a.handleStartPacketCapture(ctx, body)
+		})
+	a.client.RegisterHandler(tunnel.MethodGetPacketCapture,
+		func(ctx context.Context, _ tunnel.Session, _ string, body []byte) ([]byte, error) {
+			return a.handleGetPacketCapture(ctx, body)
+		})
+	a.client.RegisterHandler(tunnel.MethodReadPacketCapture,
+		func(ctx context.Context, _ tunnel.Session, _ string, body []byte) ([]byte, error) {
+			return a.handleReadPacketCapture(ctx, body)
+		})
+	a.client.RegisterHandler(tunnel.MethodCancelPacketCapture,
+		func(ctx context.Context, _ tunnel.Session, _ string, body []byte) ([]byte, error) {
+			return a.handleCancelPacketCapture(ctx, body)
+		})
+	a.client.RegisterHandler(tunnel.MethodStopPacketCapture,
+		func(ctx context.Context, _ tunnel.Session, _ string, body []byte) ([]byte, error) {
+			return a.handleStopPacketCapture(ctx, body)
+		})
 	// Skill dispatcher: one handler routes every execute_skill RPC by
 	// the skill key in the request body. The skill registry is populated
 	// by init() blocks in internal/skill/builtin/* packages — the agent
 	// just imports them transitively to trigger registration.
 	a.client.RegisterHandler(tunnel.MethodExecuteSkill,
 		func(ctx context.Context, _ tunnel.Session, _ string, body []byte) ([]byte, error) {
+			var req tunnel.ExecuteSkillRequest
+			if err := jsonDecode(body, &req); err != nil {
+				return nil, err
+			}
+			switch req.Key {
+			case builtin.CapturePCAPSkillKey:
+				return a.startPacketCapture(req.Params)
+			case builtin.GetPacketCaptureSkillKey:
+				return a.getPacketCapture(req.Params)
+			}
 			return skilldispatch.Dispatch(ctx, body)
 		})
 	// Remote agent upgrade. Disabled when no stage dir is configured

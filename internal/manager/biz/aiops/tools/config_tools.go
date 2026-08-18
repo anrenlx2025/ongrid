@@ -72,6 +72,7 @@ type ConfigTarget struct {
 
 type ConfigDraft struct {
 	Kind               string                  `json:"kind"`
+	Proposal           *ProposalEnvelope       `json:"proposal,omitempty"`
 	Domain             string                  `json:"domain"`
 	Action             string                  `json:"action"`
 	Summary            string                  `json:"summary"`
@@ -86,6 +87,24 @@ type ConfigDraft struct {
 	Rollback           string                  `json:"rollback,omitempty"`
 	ApplyTool          string                  `json:"apply_tool"`
 	DraftHash          string                  `json:"draft_hash,omitempty"`
+}
+
+// ProposalEnvelope is the generic, UI-facing confirmation contract. Domain
+// payload remains in ConfigDraft for the executor, while the assistant can
+// render confirmation consistently with future proposal kinds.
+type ProposalEnvelope struct {
+	Kind    string           `json:"kind"`
+	Type    string           `json:"type"`
+	State   string           `json:"state"`
+	Title   string           `json:"title"`
+	Summary string           `json:"summary,omitempty"`
+	Actions []ProposalAction `json:"actions"`
+}
+
+type ProposalAction struct {
+	Kind    string `json:"kind"`
+	Label   string `json:"label"`
+	Enabled bool   `json:"enabled"`
 }
 
 type ConfigScopeSummary struct {
@@ -419,6 +438,13 @@ func isZeroAlertRuleInput(in AlertRuleConfigInput) bool {
 }
 
 func marshalConfigToolResult(v interface{}) (string, error) {
+	if draft, ok := v.(*ConfigDraft); ok && draft != nil && draft.Kind == ConfigResultKindDraft {
+		draft.Proposal = &ProposalEnvelope{
+			Kind: "proposal", Type: "config_change", State: "pending_confirmation",
+			Title: draft.Summary, Summary: draft.ConfirmationPrompt,
+			Actions: []ProposalAction{{Kind: "confirm", Label: "Confirm", Enabled: true}, {Kind: "cancel", Label: "Cancel", Enabled: true}},
+		}
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		return "", fmt.Errorf("marshal config result: %w", err)

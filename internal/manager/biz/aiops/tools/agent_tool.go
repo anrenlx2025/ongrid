@@ -139,12 +139,12 @@ func NewAgentTool(spawner WorkerSpawner, registry SubagentRegistry, log *slog.Lo
 	return &AgentTool{spawner: spawner, registry: registry, log: log}
 }
 
-// dedupeKey hashes (subagent_type, prompt) into a stable short key.
-// Two callers with the same brief get the same key — that's the
-// whole point. Whitespace is normalised so trivial reformatting
-// doesn't bypass the cache.
-func dedupeKey(subagentType, prompt string) string {
-	canonical := strings.TrimSpace(subagentType) + "|" + strings.Join(strings.Fields(prompt), " ")
+// dedupeKey hashes the root conversation boundary together with a worker
+// request. Reusing a worker result across sessions can leak one operator's
+// evidence into another's response, so identical prompts dedupe only within
+// the same parent session.
+func dedupeKey(sessionID, subagentType, prompt string) string {
+	canonical := strings.TrimSpace(sessionID) + "|" + strings.TrimSpace(subagentType) + "|" + strings.Join(strings.Fields(prompt), " ")
 	sum := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(sum[:])
 }
@@ -236,6 +236,9 @@ func (t *AgentTool) InvokableRun(ctx context.Context, argsJSON string, opts ...b
 	if strings.TrimSpace(args.SubagentType) == "" {
 		return "", errors.New("AgentTool: subagent_type required")
 	}
+	if args.SubagentType == "default" || args.SubagentType == "reviewer" {
+		return "", fmt.Errorf("AgentTool: subagent_type %q is reserved", args.SubagentType)
+	}
 	if strings.TrimSpace(args.Prompt) == "" {
 		return "", errors.New("AgentTool: prompt required")
 	}
@@ -246,17 +249,18 @@ func (t *AgentTool) InvokableRun(ctx context.Context, argsJSON string, opts ...b
 		}
 	}
 
-	// Dedupe check: same (subagent_type, prompt) within dedupeTTL
+	// Dedupe check: same (parent session, subagent_type, prompt) within dedupeTTL
 	// returns the prior result with an explicit "you already
 	// dispatched this" hint. The coordinator LLM doesn't observe
 	// this short-circuit — the result message looks like a normal
 	// AgentTool reply with a stronger nudge to stop looping.
-	dKey := dedupeKey(args.SubagentType, args.Prompt)
+	parentSession := basetool.SessionIDFromContext(ctx)
+	dKey := dedupeKey(parentSession, args.SubagentType, args.Prompt)
 	now := time.Now()
 	if v, ok := t.dedupe.Load(dKey); ok {
 		if entry, ok := v.(*dedupeEntry); ok && entry != nil && now.Before(entry.expiry) && entry.result != nil {
 			cached := *entry.result // copy so we can rewrite Hint
-			cached.Hint = "重复派活拦截：你刚刚（< " + dedupeTTL.String() + "）已经派过 " + args.SubagentType + " 跑同一份任务，结果就是 result 字段里这份。**立即基于它给用户写最终答复**；不要再调用任何工具。如果你想换个角度，把 prompt 改一下再派、或者换 specialist。"
+			cached.Hint = "重复派活拦截：你刚刚（< " + dedupeTTL.String() + "）已经派过 " + args.SubagentType + " 跑同一份任务，结果在 result 字段。请整合已有证据；仅在需要验证该结论或补齐不同领域证据时再调用直接工具或不同专家，不要重复派同一任务。"
 			body, mErr := json.Marshal(cached)
 			if mErr != nil {
 				return "", fmt.Errorf("AgentTool: marshal cached: %w", mErr)
@@ -277,7 +281,7 @@ func (t *AgentTool) InvokableRun(ctx context.Context, argsJSON string, opts ...b
 	w, err := t.spawner.SpawnWorker(ctx, SpawnWorkerRequest{
 		AgentName:     args.SubagentType,
 		Prompt:        args.Prompt,
-		ParentSession: basetool.SessionIDFromContext(ctx),
+		ParentSession: parentSession,
 		Locale:        basetool.LocaleFromContext(ctx),
 		Provider:      basetool.LLMProviderFromContext(ctx),
 		Model:         basetool.LLMModelFromContext(ctx),
@@ -293,9 +297,9 @@ func (t *AgentTool) InvokableRun(ctx context.Context, argsJSON string, opts ...b
 		Err:    w.Err,
 	}
 	if res.Err != "" {
-		res.Hint = "Specialist " + args.SubagentType + " 已返回错误。请基于这个错误信息直接回答用户；不要重复派同一个 specialist 也不要 inline 探索。"
+		res.Hint = "Specialist " + args.SubagentType + " 已返回错误。向用户说明该证据缺口；如有必要，可改用直接工具或不同专家验证，不要重复派同一份任务。"
 	} else {
-		res.Hint = "Specialist " + args.SubagentType + " 已经返回最终结论（见 result 字段）。直接基于它给用户写最终答复；**不要再调用任何工具**（包括同一 specialist、其他 specialist、inline 工具）。如果用户问的是别的方面，下一轮再派对应 specialist。"
+		res.Hint = "Specialist " + args.SubagentType + " 已返回证据（见 result 字段）。默认助理负责整合并答复；只在需要验证该结论或补齐不同领域证据时继续调用工具，不要重复派同一份任务。"
 	}
 	// Store the fresh result for future dedupe lookups. We
 	// intentionally store the un-hinted form so a cache-hit gets the

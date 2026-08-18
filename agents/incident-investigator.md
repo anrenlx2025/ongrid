@@ -11,6 +11,13 @@ when_to_use: |
   worker 顺因果链**溯源到根因（0 号病人）**，输出：
     根因（点名源头）/ 因果链（源头→症状，每段带证据）/ 现象 / 置信度与验证
 
+capabilities:
+  - id: incident_root_cause
+    description: Correlate incident, metric, log, trace, topology, and change evidence into a causal analysis.
+    tools: [get_incident_detail, correlate_incident, query_promql, query_logql, query_traceql, query_change_events, expand_topology]
+    max_tool_calls: 18
+can_delegate: true
+
 tools:
   - query_knowledge
   - get_incident_detail

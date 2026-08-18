@@ -4,6 +4,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageBubble, type ConfigDraftResult } from './MessageBubble';
 import type { ChatMessage } from '@/api/chat';
+import { executeOperationAction, getOperation } from '@/api/operations';
+import { getPacketCaptureSession } from '@/api/packetCaptures';
+
+vi.mock('@/api/operations', () => ({
+  executeOperationAction: vi.fn(),
+  getOperation: vi.fn(),
+}));
+vi.mock('@/api/packetCaptures', () => ({
+  getPacketCaptureSession: vi.fn(),
+}));
 
 afterEach(() => {
   cleanup();
@@ -219,5 +229,170 @@ describe('MessageBubble config draft card', () => {
 
     expect(screen.getByText('Create metric_raw rule')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /确认应用|Apply/ })).toBeInTheDocument();
+  });
+
+  it('renders the generic proposal envelope on a persisted draft', () => {
+    const draft = {
+      ...draftFor('metric_raw'),
+      proposal: {
+        kind: 'proposal' as const,
+        type: 'config_change',
+        state: 'pending_confirmation',
+        title: 'Create metric_raw rule',
+        actions: [
+          { kind: 'confirm', label: 'Confirm', enabled: true },
+          { kind: 'cancel', label: 'Cancel', enabled: true },
+        ],
+      },
+    };
+
+    render(<MessageBubble message={toolCardMessage(draft)} onConfirmConfigDraft={vi.fn()} />);
+
+    expect(screen.getByText(/提案|Proposal/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /确认应用|Apply/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /取消|Cancel/ })).toBeInTheDocument();
+  });
+});
+
+describe('MessageBubble operation card', () => {
+  it('renders a cancellable running operation card and executes the stop action', async () => {
+    vi.mocked(getOperation).mockRejectedValue(new Error('skip poll'));
+    vi.mocked(executeOperationAction).mockResolvedValue({
+      id: 'op-123',
+      kind: 'packet_capture_session',
+      state: 'cancelled',
+      title: 'HTTPS capture',
+      actions_json: '[]',
+    });
+    const user = userEvent.setup();
+    const message: ChatMessage = {
+      id: 'packet-capture-operation',
+      role: 'tool',
+      tool_name: 'capture_pcap',
+      content: JSON.stringify({
+        operation: {
+          id: 'op-123',
+          kind: 'packet_capture_session',
+          title: 'HTTPS capture',
+          state: 'running',
+          summary: 'tcp port 443',
+          links: { detail: '/artifacts/packet-sessions/pcap-session-running' },
+          actions: [{ kind: 'cancel', label: 'Stop', enabled: true }],
+        },
+      }),
+    };
+
+    render(<MessageBubble message={message} />);
+
+    expect(screen.getByText('HTTPS capture')).toBeInTheDocument();
+    expect(screen.getByText('运行中')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '停止' }));
+
+    expect(executeOperationAction).toHaveBeenCalledWith('op-123', 'cancel');
+    await waitFor(() => expect(screen.getByText('已停止')).toBeInTheDocument());
+  });
+
+  it('polls a running operation card until it reaches a terminal state', async () => {
+    vi.mocked(getOperation).mockResolvedValue({
+      operation: {
+        id: 'op-123',
+        kind: 'packet_capture_session',
+        state: 'succeeded',
+        title: 'HTTPS capture',
+        summary: '1/1 capture artifact(s) available',
+        detail_url: '/artifacts/packet-sessions/pcap-session-running',
+        actions_json: '[]',
+      },
+      artifacts: [],
+    });
+    const message: ChatMessage = {
+      id: 'packet-capture-operation',
+      role: 'tool',
+      tool_name: 'capture_pcap',
+      content: JSON.stringify({
+        operation: {
+          id: 'op-123',
+          kind: 'packet_capture_session',
+          title: 'HTTPS capture',
+          state: 'running',
+          summary: 'collecting',
+          links: { detail: '/artifacts/packet-sessions/pcap-session-running' },
+          actions: [{ kind: 'cancel', label: 'Stop', enabled: true }],
+        },
+      }),
+    };
+
+    render(<MessageBubble message={message} />);
+
+    await waitFor(() => expect(screen.getByText('已完成')).toBeInTheDocument());
+    expect(screen.getByText('1/1 capture artifact(s) available')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+  });
+
+  it('renders a persisted packet capture result as an investigation card', () => {
+    const message: ChatMessage = {
+      id: 'packet-capture-result',
+      role: 'tool',
+      tool_name: 'capture_pcap',
+      content: JSON.stringify({
+        session: {
+          public_id: 'pcap-session-7d5a7c7e',
+          title: 'Checkout latency investigation',
+          state: 'ready',
+          canonical_filter: 'tcp port 443',
+        },
+        result: { capture: { state: 'ready' } },
+      }),
+    };
+
+    render(<MessageBubble message={message} />);
+
+    expect(screen.getByText('抓包任务')).toBeInTheDocument();
+    expect(screen.getByText('Checkout latency investigation')).toBeInTheDocument();
+    expect(screen.getByText('已完成')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '打开会话' })).toHaveAttribute(
+      'href',
+      '/artifacts/packet-sessions/pcap-session-7d5a7c7e',
+    );
+  });
+
+  it('hydrates a legacy packet capture session card from the session API', async () => {
+    vi.mocked(getPacketCaptureSession).mockResolvedValue({
+      session: {
+        id: 'pcap-session-7d5a7c7e',
+        source: 'chat',
+        pcap_count: 1,
+        state: 'ready',
+        title: 'Checkout latency investigation',
+        description: '',
+        canonical_filter: 'tcp port 443',
+        duration_seconds: 60,
+        planned_start_at: '',
+        clock_quality: 'uncalibrated',
+        created_at: '',
+        updated_at: '',
+      },
+      captures: [],
+    });
+    const message: ChatMessage = {
+      id: 'packet-capture-result',
+      role: 'tool',
+      tool_name: 'get_packet_capture_session',
+      content: JSON.stringify({
+        session: {
+          public_id: 'pcap-session-7d5a7c7e',
+          title: 'Checkout latency investigation',
+          state: 'collecting',
+          canonical_filter: 'tcp port 443',
+        },
+      }),
+    };
+
+    render(<MessageBubble message={message} />);
+
+    expect(screen.getByText('运行中')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('已完成')).toBeInTheDocument());
+    expect(screen.getByText('1 个 PCAP · tcp port 443')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Stop|停止/ })).not.toBeInTheDocument();
   });
 });

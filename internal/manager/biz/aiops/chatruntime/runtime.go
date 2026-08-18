@@ -41,6 +41,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -200,19 +202,6 @@ type Config struct {
 	// to the LLM. cmd/ongrid/main.go assembles this once via
 	// Registry.BuildBaseTools + AppendHostFilesTools + Wrap.
 	ToolBag []basetool.BaseTool
-
-	// CoordinatorStubs are name-matching redirect stubs visible only
-	// to the coordinator agent. They occupy hallucination-prone tool
-	// names (host_bash, get_host_load, ...) and return a "use
-	// AgentTool to dispatch to specialist-X" message instead of
-	// executing the real query. Without them, the eino runtime
-	// aborts with "tool not found in toolsNode indexes" the moment
-	// the LLM picks a name not actually in the coordinator's filtered
-	// bag — see internal/manager/biz/aiops/tools/redirect_stub.go.
-	//
-	// Workers (specialists) never see this slice. They have the real
-	// tool under the same name in their own filtered bag.
-	CoordinatorStubs []basetool.BaseTool
 
 	// MentionResolver hydrates @-mentions into markdown bullets.
 	// Optional.
@@ -591,6 +580,20 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	if reply, handled := rt.tryApplyConfirmedConfigDraft(ctx, req, sess, history, emit); handled {
 		return reply, nil
 	}
+	// Resolve and Decide run before the LLM tool loop. This prevents a model
+	// from turning a candidate discovered during reasoning into an executable
+	// capture target. The reply is persisted and streamed like any other turn.
+	turnPlan, clarification := resolveTurn(req)
+	if turnPlan.Decision == DecisionClarify {
+		message := &aiopsmodel.Message{SessionID: sess.ID, Role: aiopsmodel.RoleAssistant, Content: &clarification, CreatedAt: time.Now().UTC()}
+		if err := rt.cfg.Sessions.AppendMessage(ctx, message); err != nil {
+			return nil, fmt.Errorf("chatruntime: persist clarification: %w", err)
+		}
+		emit(Event{Type: EventAssistant, Assistant: &AssistantEvent{MessageID: message.ID, Content: clarification, CreatedAt: message.CreatedAt}})
+		reply := &Reply{Message: message}
+		emit(Event{Type: EventDone, Done: reply})
+		return reply, nil
+	}
 
 	// 5. Resolve active skills + compose the system prompt.
 	policy := Policy{AllowedClasses: []string{"*"}}
@@ -673,39 +676,15 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 				slog.String("agent_id", personaName))
 		}
 	}
-	// Coordinator gets the redirect-stub overlay: same-name shadows
-	// for hallucination-prone tool names that hand the LLM a
-	// "dispatch to specialist-X via AgentTool" message instead of
-	// crashing the graph with "tool not found in toolsNode". Stubs
-	// must come AFTER filterToolsForAgent so they survive any name
-	// collision with the (already-stripped) real tools.
-	if isCoordinator && len(rt.cfg.CoordinatorStubs) > 0 {
-		// Stubs are same-name shadows for tool names the filter STRIPPED.
-		// But if a name is BOTH a kept coordinator tool (e.g. merge added
-		// draft_config_change to coordinatorToolNames) AND has a stub, a
-		// blind append duplicates it — and strict LLM APIs (deepseek)
-		// reject "Tool names must be unique", crashing the whole chat.
-		// De-dupe: a real tool already in the bag always wins over its stub.
-		seen := map[string]bool{}
-		for _, t := range sessionToolBag {
-			if info, err := t.Info(ctx); err == nil && info != nil {
-				seen[info.Name] = true
-			}
-		}
-		for _, stub := range rt.cfg.CoordinatorStubs {
-			info, err := stub.Info(ctx)
-			if err != nil || info == nil || seen[info.Name] {
-				continue
-			}
-			seen[info.Name] = true
-			sessionToolBag = append(sessionToolBag, stub)
-		}
-	}
-	sessionToolBag = filterCoordinatorToolsForIntent(sessionToolBag, req.UserText, isCoordinator)
-	// AgentID="default" is the virtual top-level persona — same wiring
-	// as the no-agent coordinator (BasePrompt + full toolBag + agent
-	// catalog), but the session keeps "default" so the SPA shows the
-	// persona badge and the user can see / pick it on /agents.
+	// Tool exposure is governed by persona and permission policy above. Do
+	// not further prune it with request-keyword heuristics: the legacy kernel
+	// exposed its permitted registry schemas and relied on each tool's own
+	// semantic contract. Keyword pruning hid valid tools (for example,
+	// host_du_summary for a disk-directory request) before the model could
+	// make that choice.
+	// AgentID="default" is the virtual top-level persona. It owns the
+	// complete policy-permitted tool surface and may ask a specialist for
+	// additional evidence, but it never loses ownership of this session.
 	// 5b. Multi-agent catalog: when the session is the coordinator
 	// (no specific persona pinned), append a markdown list of available
 	// specialist personas so the LLM knows what subagent_type values
@@ -741,11 +720,6 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 			graphCfg.MaxIterations = persona.MaxTurns
 		}
 	}
-	g, err := graph.BuildReActGraph(rt.cfg.ChatModel, sessionToolBag, graphCfg)
-	if err != nil {
-		return nil, fmt.Errorf("chatruntime: build graph: %w", err)
-	}
-
 	// 8. Wire the per-request callback chain. Persistence's
 	//    SessionID is filled in here; everything else lives on
 	//    rt.cfg.CallbackDeps. The SSE handler is appended via the
@@ -763,12 +737,21 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 		deps.SSE = nil
 	}
 	handlers := callbacks.NewDefaultHandlers(deps)
+	toolPersistence := callbacks.EnableSynchronousToolPersistence(handlers)
+	graphCfg.ToolPersistence = toolPersistence
+	g, err := graph.BuildReActGraph(rt.cfg.ChatModel, sessionToolBag, graphCfg)
+	if err != nil {
+		return nil, fmt.Errorf("chatruntime: build graph: %w", err)
+	}
 
 	// 9. Compute per-turn dynamic hints from history + persona's
 	//    critical_reminder (if a worker persona is active for this turn).
 	// — these get inlined into the per-turn
 	//    <system-reminder> block by graph.assembleMessages.
 	dynamicHints := rt.calcDynamicHints(history)
+	if turnPlan.Phase == PhaseAct || turnPlan.Phase == PhaseOperate || turnPlan.Phase == PhasePropose {
+		dynamicHints = append(dynamicHints, turnPlan.ModelBoundary())
+	}
 	// AgentReminder is populated when the session is pinned to a
 	// persona (Phase 2). — anti-drift reminder gets
 	// inlined into the per-turn <system-reminder> block. Worker spawns
@@ -793,12 +776,24 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 		invokeOpts = append(invokeOpts, compose.WithChatModelOption(mopts...))
 	}
 	invokeOpts = append(invokeOpts, compose.WithToolsNodeOption(
-		compose.WithToolOption(graph.WithInvokeOpts(basetool.WithUserText(req.UserText))),
+		compose.WithToolOption(
+			graph.WithInvokeOpts(
+				basetool.WithUserText(req.UserText),
+				basetool.WithConfirmedDeviceIDs(confirmedDeviceIDs(req.Mentions)),
+				basetool.WithHostWritePermission(writeEnabled && !viewerOnly),
+			),
+			graph.WithToolInvocationPersistence(toolPersistence),
+		),
 	))
-	// Thread the persona-filtered tool view onto ctx so ToolSearch
-	// (which runs inside the graph) only returns tools the current
-	// persona is allowed to see. Must happen BEFORE the coordinator-
-	// stub append so stubs don't leak into the filtered view.
+	// The tool adapter receives these invoke options, but coordinator-only
+	// tools can synchronously spawn a worker from the graph context. Stamp the
+	// same gate on the request context so that worker inherits the caller's
+	// permission instead of accidentally gaining a broader toolbag.
+	ctx = basetool.WithAgentWriteAllowed(ctx, writeEnabled && !viewerOnly)
+	// Thread the final per-turn tool view onto ctx so ToolSearch only
+	// returns tools callable in this graph. Coordinator routing stubs are
+	// deliberately included: a deferred schema lookup must return a
+	// callable handoff, never an unreachable direct tool schema.
 	ctx = basetool.WithFilteredTools(ctx, sessionToolBag)
 	// Thread the UI locale onto ctx so AgentTool can pick it up and
 	// forward it into the sub-agent's SpawnRequest. Without this, a
@@ -824,7 +819,7 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	// edge to bypass cmdpolicy and run the raw command. `writeEnabled` was
 	// resolved above (same value that gated the toolbag); reuse it so a single
 	// setting read drives both tool exposure and host-command authority.
-	ctx = basetool.WithHostWriteAllowed(ctx, writeEnabled)
+	ctx = basetool.WithHostWriteAllowed(ctx, writeEnabled && !viewerOnly)
 	// Always autoheal any in-flight tool batch on the way out — covers
 	// the "user closed browser mid-tool-batch" case the in-session
 	// ChatModel.OnStart flush can't reach. Defer with a background-rooted
@@ -885,6 +880,9 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	//     row, so we re-fetch the recently-persisted assistant message
 	//     ID for handoff to the SSE adapter when needed.
 	reply := &Reply{Usage: out.Usage, Iterations: out.Iterations}
+	if toolPersistence != nil {
+		reply.ToolCalls = toolPersistence.ToolCalls()
+	}
 	if out.AssistantMessage != nil {
 		// Build a synthetic *aiopsmodel.Message so the upper layer
 		// can re-render the legacy postMessageResp shape. The
@@ -912,6 +910,191 @@ func (rt *Runtime) Handle(ctx context.Context, req *Request) (*Reply, error) {
 	// exactly once at terminal success".
 	emit(Event{Type: EventDone, Done: reply})
 	return reply, nil
+}
+
+func confirmedDeviceIDs(mentions []Mention) []uint64 {
+	ids := make([]uint64, 0, len(mentions))
+	for _, mention := range mentions {
+		if !strings.EqualFold(strings.TrimSpace(mention.Type), "device") {
+			continue
+		}
+		id, err := strconv.ParseUint(strings.TrimSpace(mention.ID), 10, 64)
+		if err == nil && id != 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func resolveTurn(req *Request) (TurnPlan, string) {
+	if req == nil {
+		return PlanTurn(ResolvedFacts{Permitted: false, Reason: "nil request"}), ""
+	}
+	if needsPacketCaptureSessionID(req.UserText) {
+		plan := PlanTurn(ResolvedFacts{Missing: true, Permitted: req.Role != "viewer"})
+		return plan, "当前没有可枚举“最近抓包会话”的助理工具；`get_packet_capture_session` 需要明确的 `pcap-session-*`。请提供抓包会话 ID，或先发起一次新的抓包任务后再分析。"
+	}
+	if needsPacketPathDetails(req.UserText) {
+		plan := PlanTurn(ResolvedFacts{Missing: true, Permitted: req.Role != "viewer"})
+		return plan, "不能确定 NAT 或网关路径。要判断这个包是否经过 NAT 或网关，需要先明确具体包或会话：请提供 `pcap-session-*`、源/目的地址、端口、协议、时间窗，或说明从哪台 edge 到哪台设备/服务。没有这些信息我不能推断包走向。"
+	}
+	captureIntent := isStartCaptureIntent(req.UserText)
+	hostTargetIntent := requiresHostTarget(req.UserText)
+	hasTarget := hasExplicitHostTarget(req)
+	plan := PlanTurn(ResolvedFacts{Missing: (captureIntent || hostTargetIntent) && !hasTarget, Permitted: req.Role != "viewer", LongRunning: captureIntent})
+	if plan.Decision == DecisionClarify {
+		if captureIntent {
+			return plan, "要开始抓包，请先选择目标设备（使用 @ 选择设备），或明确提供 `device_id` 和网卡接口。"
+		}
+		return plan, "这个操作需要先确定目标设备。请使用 @ 选择设备，或明确提供 `device_id`。"
+	}
+	return plan, ""
+}
+
+func needsPacketCaptureSessionID(userText string) bool {
+	text := strings.ToLower(userText)
+	if strings.Contains(text, "pcap-session-") {
+		return false
+	}
+	if strings.Contains(userText, "页面") ||
+		strings.Contains(userText, "产物关联") ||
+		strings.Contains(text, "page not found") ||
+		strings.Contains(text, "why") {
+		return false
+	}
+	hasCapture := strings.Contains(userText, "抓包") ||
+		strings.Contains(userText, "数据包") ||
+		strings.Contains(text, "packet capture") ||
+		strings.Contains(text, "pcap")
+	if !hasCapture {
+		return false
+	}
+	for _, phrase := range []string{"最近", "最新", "有哪些", "列出", "告诉我", "分析最近", "recent", "latest", "list"} {
+		if strings.Contains(userText, phrase) || strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func needsPacketPathDetails(userText string) bool {
+	text := strings.ToLower(userText)
+	if strings.Contains(text, "pcap-session-") || strings.Contains(text, "device_id") || strings.Contains(userText, "@") {
+		return false
+	}
+	hasPacket := strings.Contains(userText, "这个包") || strings.Contains(userText, "该包") || strings.Contains(text, "this packet")
+	if !hasPacket {
+		return false
+	}
+	return strings.Contains(userText, "NAT") ||
+		strings.Contains(strings.ToLower(userText), "nat") ||
+		strings.Contains(userText, "网关") ||
+		strings.Contains(userText, "链路") ||
+		strings.Contains(text, "gateway") ||
+		strings.Contains(text, "path")
+}
+
+func isStartCaptureIntent(userText string) bool {
+	if isCancelIntent(userText) {
+		return false
+	}
+	text := strings.ToLower(userText)
+	if hasReadOnlyCaptureIntent(userText) {
+		return false
+	}
+	startMarkers := []string{"开始", "发起", "启动", "抓包", "抓取", "抓一下", "抓 ", "抓\t", "capture ", "start capture", "run capture"}
+	hasStartMarker := false
+	for _, marker := range startMarkers {
+		if strings.Contains(text, marker) || strings.Contains(userText, marker) {
+			hasStartMarker = true
+			break
+		}
+	}
+	if !hasStartMarker {
+		return false
+	}
+	return strings.Contains(text, "pcap") ||
+		strings.Contains(text, "packet capture") ||
+		strings.Contains(text, "tcp port") ||
+		strings.Contains(text, "udp port") ||
+		strings.Contains(userText, "抓包") ||
+		strings.Contains(userText, "流量") ||
+		strings.Contains(userText, "数据包") ||
+		strings.Contains(userText, "的包")
+}
+
+func hasReadOnlyCaptureIntent(userText string) bool {
+	text := strings.ToLower(userText)
+	for _, phrase := range []string{
+		"分析", "查看", "列出", "最近", "有哪些", "告诉我", "入口", "源码", "实现", "页面", "产物", "会话", "能不能", "是否",
+		"analyze", "inspect", "show", "list", "recent", "artifact", "session", "source", "code", "can ",
+	} {
+		if strings.Contains(text, phrase) || strings.Contains(userText, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCancelIntent(userText string) bool {
+	text := strings.ToLower(userText)
+	for _, phrase := range []string{"停止", "取消", "终止", "stop", "cancel", "abort"} {
+		if strings.Contains(text, phrase) || strings.Contains(userText, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasExplicitHostTarget(req *Request) bool {
+	if req == nil {
+		return false
+	}
+	text := strings.ToLower(req.UserText)
+	if len(confirmedDeviceIDs(req.Mentions)) > 0 || strings.Contains(text, "device_id") || strings.Contains(req.UserText, "@") {
+		return true
+	}
+	targetMarkers := []string{"edge-", "vm-", "node-", "host-", "server-", "device-"}
+	for _, marker := range targetMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return ipv4LikeRe.MatchString(text)
+}
+
+var ipv4LikeRe = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
+
+func requiresHostTarget(userText string) bool {
+	text := strings.ToLower(userText)
+	zh := userText
+	if hasGlobalOrReadOnlyIntent(userText) {
+		return false
+	}
+	hostIntentPhrases := []string{
+		"磁盘", "目录", "文件", "大文件", "进程", "端口", "服务重启", "重启服务", "网络接口", "网卡", "dns", "连通性",
+		"disk", "directory", "file", "process", "port", "restart service", "interface", "reachability",
+	}
+	for _, phrase := range hostIntentPhrases {
+		if strings.Contains(text, phrase) || strings.Contains(zh, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasGlobalOrReadOnlyIntent(userText string) bool {
+	text := strings.ToLower(userText)
+	globalPhrases := []string{
+		"列出", "所有", "各设备", "当前可用", "指标名", "promql", "源码", "实现", "知识", "内置知识", "产物", "会话", "报告",
+		"list", "all", "fleet", "metric catalog", "source", "code", "knowledge", "artifact", "report", "session",
+	}
+	for _, phrase := range globalPhrases {
+		if strings.Contains(text, phrase) || strings.Contains(userText, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // toCallbackEmitter adapts a chatruntime.Emit into the
@@ -1201,260 +1384,6 @@ func chatModelOpts(req *Request) []model.Option {
 	return opts
 }
 
-func filterCoordinatorToolsForIntent(bag []basetool.BaseTool, userText string, isCoordinator bool) []basetool.BaseTool {
-	if !isCoordinator || len(bag) == 0 {
-		return bag
-	}
-	low := strings.ToLower(userText)
-	knowledgeIntent := containsAny(low, "knowledge", "kb", "runbook", "playbook", "doc", "docs", "document") ||
-		strings.Contains(userText, "知识库") || strings.Contains(userText, "文档") || strings.Contains(userText, "手册")
-	metricIntent := containsAny(low, "metric", "promql", "prometheus", "cpu", "memory", "mem", "disk", "swap", "load") ||
-		strings.Contains(userText, "指标") || strings.Contains(userText, "使用率") || strings.Contains(userText, "磁盘") ||
-		strings.Contains(userText, "内存") || strings.Contains(userText, "负载")
-	metricCatalogIntent := containsAny(low, "metric catalog", "metrics catalog", "catalog") ||
-		strings.Contains(userText, "指标目录")
-	rankingIntent := containsAny(low, "rank", "ranking", "top ", "top5", "top 5", "outlier", "outliers") ||
-		strings.Contains(userText, "排序") || strings.Contains(userText, "离群") || strings.Contains(userText, "最高")
-	logIntent := containsTerm(low, "log", "logs") || strings.Contains(low, "logql") || strings.Contains(low, "loki") || strings.Contains(userText, "日志")
-	traceIntent := strings.Contains(low, "trace") || strings.Contains(low, "traceql") || strings.Contains(low, "span") || strings.Contains(userText, "链路")
-	sourceSearchIntent := containsAny(low, "grep", "search source", "search code", "find source", "find code", "function", "symbol", "stack trace", "error string") ||
-		strings.Contains(userText, "搜索") || strings.Contains(userText, "函数") || strings.Contains(userText, "报错串")
-	dbHealthIntent := containsAny(low, "database health", "db health", "mysql", "postgres", "postgresql", "redis", "mongodb", "mongo", "slow query", "connection pressure", "replication") ||
-		strings.Contains(userText, "数据库健康") || strings.Contains(userText, "慢查询") || strings.Contains(userText, "连接数") || strings.Contains(userText, "复制状态")
-	changeEventIntent := containsAny(low, "change event", "change events", "release event", "audit change", "what changed") ||
-		strings.Contains(userText, "变更事件") || strings.Contains(userText, "审计变更") || strings.Contains(userText, "谁改") || strings.Contains(userText, "改过")
-	alertRulesIntent := containsAny(low, "alert rule", "alert rules") || strings.Contains(userText, "告警规则")
-	incidentIntent := containsAny(low, "incident", "incidents") || strings.Contains(userText, "告警")
-	networkInventoryIntent := containsAny(low,
-		"network device", "network devices", "snmp", "switch", "router", "firewall",
-		"network neighbor", "network neighbours", "connected host", "connection history",
-		"network interface", "interface status", "switch port", "port status") ||
-		strings.Contains(userText, "网络设备") || strings.Contains(userText, "网络邻居") ||
-		strings.Contains(userText, "交换机") || strings.Contains(userText, "路由器") ||
-		strings.Contains(userText, "防火墙") || strings.Contains(userText, "连接关系") ||
-		strings.Contains(userText, "SNMP") || strings.Contains(userText, "接口状态") ||
-		strings.Contains(userText, "端口状态")
-	complexHint := complexCoordinatorHint(low, userText)
-	topologyIntent := strings.Contains(low, "topology") || strings.Contains(low, "fleet") || strings.Contains(low, "deployment") ||
-		strings.Contains(userText, "拓扑") || strings.Contains(userText, "规模") || strings.Contains(userText, "版本") || strings.Contains(userText, "部署")
-	if containsAny(low, "do not query topology", "don't query topology", "without topology", "not topology", "no topology") ||
-		strings.Contains(userText, "不要先查拓扑") || strings.Contains(userText, "不要查拓扑") ||
-		strings.Contains(userText, "不查拓扑") || strings.Contains(userText, "别查拓扑") || strings.Contains(userText, "无需拓扑") {
-		topologyIntent = false
-	}
-	hostIntent := strings.Contains(low, "host_bash") || strings.Contains(low, "journalctl") || strings.Contains(low, "systemctl") ||
-		strings.Contains(low, "dmesg") || strings.Contains(low, "device_id") || strings.Contains(userText, "主机") || strings.Contains(userText, "文件")
-	if !knowledgeIntent && !metricIntent && !logIntent && !traceIntent && !sourceSearchIntent && !dbHealthIntent && !changeEventIntent && !alertRulesIntent && !incidentIntent && !networkInventoryIntent && !complexHint {
-		return bag
-	}
-	if knowledgeIntent && knowledgeLookupIntent(low, userText) {
-		return filterCoordinatorToolNames(bag, "query_knowledge")
-	}
-	if topologyIntent && topologyFactsIntent(low, userText) {
-		return filterCoordinatorToolNames(bag, "get_topology")
-	}
-	if networkInventoryIntent && !complexHint {
-		return filterCoordinatorToolNames(bag,
-			"ToolSearch",
-			"query_network_devices",
-			"query_network_interfaces",
-			"get_network_neighbors",
-		)
-	}
-	if metricCatalogIntent {
-		return filterCoordinatorToolNames(bag, "list_metric_catalog")
-	}
-	if complexHint || complexCoordinatorIntent(knowledgeIntent, metricIntent, logIntent, traceIntent, dbHealthIntent, changeEventIntent, incidentIntent, topologyIntent) {
-		return filterCoordinatorControlTools(bag)
-	}
-	if alertRulesIntent && !complexHint {
-		return filterCoordinatorToolNames(bag, "query_alert_rules")
-	}
-	if incidentIntent && incidentLookupIntent(low, userText) && !complexHint {
-		return filterCoordinatorToolNames(bag, "query_incidents")
-	}
-	out := make([]basetool.BaseTool, 0, len(bag))
-	for _, t := range bag {
-		if t == nil {
-			continue
-		}
-		info, err := t.Info(context.Background())
-		if err != nil || info == nil {
-			out = append(out, t)
-			continue
-		}
-		if knowledgeIntent {
-			if info.Name == "query_knowledge" {
-				out = append(out, t)
-			}
-			continue
-		}
-		if changeEventIntent {
-			if info.Name == "query_change_events" {
-				out = append(out, t)
-			}
-			continue
-		}
-		if sourceSearchIntent {
-			if info.Name == "grep_source" {
-				out = append(out, t)
-			}
-			continue
-		}
-		if dbHealthIntent {
-			if info.Name == "analyze_database_status" {
-				out = append(out, t)
-			}
-			continue
-		}
-		if metricIntent && !logIntent && !traceIntent && !topologyIntent && !hostIntent {
-			switch info.Name {
-			case "query_promql", "list_metric_catalog":
-				out = append(out, t)
-			case "rank_edges", "find_outlier_edges":
-				if rankingIntent {
-					out = append(out, t)
-				}
-			}
-			continue
-		}
-		if logIntent && !traceIntent && !topologyIntent && !hostIntent {
-			if info.Name == "query_logql" || info.Name == "query_devices" {
-				out = append(out, t)
-			}
-			continue
-		}
-		if traceIntent && !logIntent && !topologyIntent && !hostIntent {
-			if info.Name == "query_traceql" || info.Name == "query_devices" {
-				out = append(out, t)
-			}
-			continue
-		}
-		if !topologyIntent && info.Name == "get_topology" {
-			continue
-		}
-		if !hostIntent && info.Name == "host_bash" {
-			continue
-		}
-		if logIntent && !hostIntent {
-			switch info.Name {
-			case "query_edges", "get_edge_summary", "get_host_load", "get_host_processes", "rank_edges", "find_outlier_edges":
-				continue
-			}
-		}
-		out = append(out, t)
-	}
-	return out
-}
-
-func filterCoordinatorToolNames(bag []basetool.BaseTool, names ...string) []basetool.BaseTool {
-	allowed := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		allowed[name] = struct{}{}
-	}
-	out := make([]basetool.BaseTool, 0, len(bag))
-	for _, t := range bag {
-		if t == nil {
-			continue
-		}
-		info, err := t.Info(context.Background())
-		if err != nil || info == nil {
-			out = append(out, t)
-			continue
-		}
-		if _, ok := allowed[info.Name]; ok {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-func filterCoordinatorControlTools(bag []basetool.BaseTool) []basetool.BaseTool {
-	out := make([]basetool.BaseTool, 0, len(bag))
-	for _, t := range bag {
-		if t == nil {
-			continue
-		}
-		info, err := t.Info(context.Background())
-		if err != nil || info == nil {
-			out = append(out, t)
-			continue
-		}
-		switch info.Name {
-		case "AgentTool", "SendMessage", "TaskStop", "ToolSearch":
-			out = append(out, t)
-		}
-	}
-	if len(out) > 0 {
-		return out
-	}
-	return bag
-}
-
-func knowledgeLookupIntent(low, original string) bool {
-	return containsAny(low, "is there", "any runbook", "any doc", "any docs", "list relevant", "search knowledge") ||
-		strings.Contains(original, "有没有") || strings.Contains(original, "列出") || strings.Contains(original, "最相关")
-}
-
-func topologyFactsIntent(low, original string) bool {
-	return containsAny(low, "fleet/deployment facts", "deployment facts", "fleet facts", "configuration", "configured") ||
-		strings.Contains(original, "配置") || strings.Contains(original, "版本") || strings.Contains(original, "规模")
-}
-
-func complexCoordinatorHint(low, original string) bool {
-	return containsAny(low,
-		"root cause", "rca", "correlate", "correlation", "blast radius", "impact", "priority",
-		"prioritize", "risk", "rollback", "remediation", "report", "handoff", "forecast",
-		"capacity", "noise", "forensics", "health check", "checkup", "evidence chain",
-		"draft", "spread path", "propagation path") ||
-		strings.Contains(original, "根因") || strings.Contains(original, "关联") || strings.Contains(original, "影响面") ||
-		strings.Contains(original, "优先级") || strings.Contains(original, "风险") || strings.Contains(original, "回滚") ||
-		strings.Contains(original, "处置") || strings.Contains(original, "修复") || strings.Contains(original, "报告") ||
-		strings.Contains(original, "交接") || strings.Contains(original, "容量") || strings.Contains(original, "噪音") ||
-		strings.Contains(original, "噪声") || strings.Contains(original, "草拟") || strings.Contains(original, "传播路径") ||
-		strings.Contains(original, "取证") || strings.Contains(original, "健康检查") || strings.Contains(original, "证据链") ||
-		strings.Contains(original, "排查") || strings.Contains(original, "综合判断") || strings.Contains(original, "判断")
-}
-
-func incidentLookupIntent(low, original string) bool {
-	return containsAny(low, "list", "open incidents", "critical incidents", "current incidents") ||
-		strings.Contains(original, "列出") || strings.Contains(original, "当前") || strings.Contains(original, "只要列表") || strings.Contains(original, "数量")
-}
-
-func complexCoordinatorIntent(intents ...bool) bool {
-	count := 0
-	for _, ok := range intents {
-		if ok {
-			count++
-		}
-	}
-	return count >= 3
-}
-
-func containsAny(s string, needles ...string) bool {
-	for _, needle := range needles {
-		if strings.Contains(s, needle) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsTerm(s string, terms ...string) bool {
-	index := make(map[string]struct{}, len(terms))
-	for _, term := range terms {
-		index[term] = struct{}{}
-	}
-	for _, field := range strings.FieldsFunc(s, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_')
-	}) {
-		if _, ok := index[field]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 // calcDynamicHints produces the per-turn hint bullets that get injected
 // into the <system-reminder> block. Pure: depends only
 // on the persisted history rows; no LLM, no I/O. Returns nil when no
@@ -1470,15 +1399,21 @@ func (rt *Runtime) calcDynamicHints(history []*aiopsmodel.Message) []string {
 		return nil
 	}
 	var hints []string
-	if name, n := consecutiveFailedTool(history, 2); n >= 2 {
-		hints = append(hints, fmt.Sprintf("%s 已连续失败 %d 次：换工具，或问用户澄清", name, n))
-	}
-	// Repeat-call detection — same tool with similar args ≥ 3 times in
-	// the trailing window. This was the dominant failure mode in the
-	// "self-loop diagnose" 30-iter loop: query_promql kept getting called
-	// with slightly different metric names but no narrative progress.
-	if name, args, n := repeatedToolCall(history, 3); n >= 3 {
-		hints = append(hints, fmt.Sprintf("%s 已重复调用 %d 次（args: %s）：从你已有的数据下结论，不要再调用同款工具", name, n, args))
+	_, currentUser := latestUserMessage(history)
+	// Historical loop evidence is advisory only. It must not be injected
+	// into an unrelated new question: the graph's real tool memo is rebuilt
+	// per request, so carrying this hint across questions makes the model
+	// believe a previous turn exhausted this turn's budget.
+	if looksLikeToolLoopContinuation(currentUser) {
+		if name, n := consecutiveFailedTool(history, 2); n >= 2 {
+			hints = append(hints, fmt.Sprintf("%s 已连续失败 %d 次：换工具，或问用户澄清", name, n))
+		}
+		// Repeat-call detection — same tool with similar args ≥ 3 times in
+		// the trailing window. This guards a requested continuation without
+		// turning a prior investigation into a session-wide tool budget.
+		if name, args, n := repeatedToolCall(history, 3); n >= 3 {
+			hints = append(hints, fmt.Sprintf("%s 已重复调用 %d 次（args: %s）：从你已有的数据下结论，不要再调用同款工具", name, n, args))
+		}
 	}
 	if alertDraftGuardNeedsDraftRetry(history) {
 		hints = append(hints, "上一轮告警草案被安全闸门拦截：当前用户消息仍在继续创建告警时，直接调用 draft_config_change 生成 config_draft/draft_hash；metric 类规则需要先用 list_metric_catalog 获取当前指标。不要要求用户重新发送，不要输出文字草案，不要仅解释流程")
@@ -1492,6 +1427,21 @@ func (rt *Runtime) calcDynamicHints(history []*aiopsmodel.Message) []string {
 		hints = append(hints, fmt.Sprintf(`上一轮你说"%s"但没真发 tool_call。如要继续探索请直接发 tool_call，不要再写计划句；如已有结论请直接给用户答复`, excerpt))
 	}
 	return hints
+}
+
+// looksLikeToolLoopContinuation limits historical loop hints to an explicit
+// request to continue the preceding investigation. A new question in the same
+// session always receives a fresh per-tool execution budget.
+func looksLikeToolLoopContinuation(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	return containsAnyString(trimmed, lower, []string{
+		"继续", "接着", "重试", "再试", "上一条", "上一步", "刚才那个",
+		"continue", "retry", "try again", "previous step", "same investigation",
+	})
 }
 
 // repeatedToolCall walks the previous user turn's tool messages looking for the

@@ -84,6 +84,32 @@ func (r *AgentRegistry) All() []*Agent {
 	return out
 }
 
+// CapabilityCards returns a stable snapshot of registered, agent-owned
+// capability declarations. Resolve uses these cards to decide whether the
+// default assistant can continue directly or should ask an expert for extra
+// evidence; a card never transfers ownership of the root conversation.
+func (r *AgentRegistry) CapabilityCards() []AgentCapability {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []AgentCapability
+	for _, ag := range r.agents {
+		if ag == nil {
+			continue
+		}
+		for _, card := range ag.Capabilities {
+			if card.ID == "" {
+				continue
+			}
+			copyCard := card
+			copyCard.AgentName = ag.Name
+			copyCard.Tools = append([]string(nil), card.Tools...)
+			copyCard.Skills = append([]string(nil), card.Skills...)
+			out = append(out, copyCard)
+		}
+	}
+	return out
+}
+
 // Warnings returns a copy of every warning recorded during Load.
 func (r *AgentRegistry) Warnings() []LoadWarning {
 	r.mu.RLock()

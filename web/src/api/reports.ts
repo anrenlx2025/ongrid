@@ -169,7 +169,7 @@ export function listReports(params?: { status?: string; kind?: string; schedule_
   if (params?.limit) q.set('limit', String(params.limit));
   if (params?.offset) q.set('offset', String(params.offset));
   const qs = q.toString();
-  return request<{ reports: ReportListItem[] }>('GET', `/reports${qs ? `?${qs}` : ''}`);
+  return request<{ reports: ReportListItem[]; total?: number }>('GET', `/reports${qs ? `?${qs}` : ''}`);
 }
 
 export function getReport(id: string) {

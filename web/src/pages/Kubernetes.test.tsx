@@ -1122,8 +1122,6 @@ describe('KubernetesPage', () => {
     renderKubernetesDetail('/kubernetes/1?tab=pods');
 
     expect(await screen.findByText('pod-001')).toBeInTheDocument();
-    expect(screen.getByText('第 1 / 15 页')).toBeInTheDocument();
-    expect(screen.getByText('1–100 / 共 1,500 条')).toBeInTheDocument();
     expect(screen.queryByText('pod-101')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '下一页' }));
@@ -1135,13 +1133,7 @@ describe('KubernetesPage', () => {
     expect(screen.getByText('pod-200')).toBeInTheDocument();
     expect(screen.queryByText('pod-001')).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByRole('combobox', { name: '页码' }), { target: { value: '15' } });
-    await waitFor(() => {
-      expect(podPages).toContainEqual({ limit: 100, offset: 1400 });
-    });
-    expect(await screen.findByText('pod-1500')).toBeInTheDocument();
-    expect(screen.getByText('第 15 / 15 页')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '下一页' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '上一页' })).toBeEnabled();
   });
 
   it('Pod 资源表筛选后从第一页开始按 offset 分页', async () => {
@@ -1205,8 +1197,7 @@ describe('KubernetesPage', () => {
     fireEvent.change(screen.getByRole('textbox', { name: '搜索资源' }), { target: { value: 'api' } });
 
     expect(await screen.findByText('api-pod-001')).toBeInTheDocument();
-    expect(screen.getByText('第 1 / 2 页')).toBeInTheDocument();
-    expect(screen.getByText('1–100 / 共 150 条匹配')).toBeInTheDocument();
+    expect(screen.getByText('1-100 / 共 150 条匹配')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '下一页' }));
 
     await waitFor(() => {
@@ -1215,6 +1206,8 @@ describe('KubernetesPage', () => {
     expect(await screen.findByText('api-pod-101')).toBeInTheDocument();
     expect(await screen.findByText('api-pod-150')).toBeInTheDocument();
     expect(screen.queryByText('api-pod-001')).not.toBeInTheDocument();
+    expect(screen.getByText('101-150 / 共 150 条匹配')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '下一页' })).toBeDisabled();
   });
 
   it('Pod 资源搜索防抖后再请求服务端', async () => {

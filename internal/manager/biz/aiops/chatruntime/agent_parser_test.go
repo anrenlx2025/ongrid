@@ -35,6 +35,12 @@ func TestParseAgentMd_Minimal(t *testing.T) {
 	if ag.WhenToUse == "" {
 		t.Error("WhenToUse empty")
 	}
+	if len(ag.Capabilities) != 1 || ag.Capabilities[0].ID != "incident_analysis" {
+		t.Errorf("Capabilities = %+v", ag.Capabilities)
+	}
+	if ag.CanDelegate {
+		t.Error("minimal fixture should not enable delegation")
+	}
 	if !strings.Contains(ag.SystemPrompt, "ongrid alert") {
 		t.Errorf("SystemPrompt body lost: %q", ag.SystemPrompt)
 	}

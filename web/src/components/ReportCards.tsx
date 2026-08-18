@@ -4,11 +4,12 @@
 // the report body + kind/status/period/summary, click → /reports/:id.
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CalendarClock, ChevronLeft, ChevronRight, FileBarChart, Loader2, XCircle } from 'lucide-react';
+import { CalendarClock, ChevronRight, FileBarChart, Loader2, XCircle } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { relativeTime } from '@/lib/format';
 import { usePoll } from '@/lib/usePoll';
 import { useI18n } from '@/i18n/locale';
+import { PaginationFooter } from '@/components/ui';
 import { ReportContentView } from '@/components/ReportContent';
 import { getReport, listReports, listSchedules, type ReportDetail, type ReportListItem, type ReportStatus } from '@/api/reports';
 
@@ -178,6 +179,7 @@ export function ReportCards({
   const { tr } = useI18n();
   const navigate = useNavigate();
   const [items, setItems] = useState<ReportListItem[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('');
   const [kindFilter, setKindFilter] = useState('');
@@ -212,6 +214,7 @@ export function ReportCards({
         task_id: taskRef,
       });
       setItems(res.reports ?? []);
+      setTotal(res.total ?? 0);
     } finally {
       setLoading(false);
     }
@@ -311,27 +314,15 @@ export function ReportCards({
         </div>
       )}
 
-      {(page > 0 || items.length === PAGE_SIZE) && (
-        <div className="flex items-center justify-end gap-2 py-3 text-xs text-zinc-400">
-          <span className="mr-2 text-zinc-600">{tr(`第 ${page + 1} 页`, `Page ${page + 1}`)}</span>
-          <button
-            type="button"
-            disabled={page === 0}
-            onClick={() => setPage((p) => Math.max(0, p - 1))}
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 hover:bg-zinc-800 disabled:opacity-40"
-          >
-            <ChevronLeft size={13} /> {tr('上一页', 'Prev')}
-          </button>
-          <button
-            type="button"
-            disabled={items.length < PAGE_SIZE}
-            onClick={() => setPage((p) => p + 1)}
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 hover:bg-zinc-800 disabled:opacity-40"
-          >
-            {tr('下一页', 'Next')} <ChevronRight size={13} />
-          </button>
-        </div>
-      )}
+      <PaginationFooter
+        page={page}
+        pageSize={PAGE_SIZE}
+        shown={items.length}
+        total={total || undefined}
+        hasNext={items.length === PAGE_SIZE}
+        loading={loading}
+        onPageChange={setPage}
+      />
     </div>
   );
 }

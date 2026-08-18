@@ -94,9 +94,9 @@ func (m *memSessions) ListSessions(_ context.Context, _ uint64, _, _ int, _ *uin
 func (m *memSessions) ListByParent(_ context.Context, _ string) ([]*model.Session, error) {
 	return nil, nil
 }
-func (m *memSessions) CloseSession(_ context.Context, _ string) error      { return nil }
-func (m *memSessions) RenameSession(_ context.Context, _, _ string) error  { return nil }
-func (m *memSessions) DeleteSession(_ context.Context, _ string) error     { return nil }
+func (m *memSessions) CloseSession(_ context.Context, _ string) error     { return nil }
+func (m *memSessions) RenameSession(_ context.Context, _, _ string) error { return nil }
+func (m *memSessions) DeleteSession(_ context.Context, _ string) error    { return nil }
 func (m *memSessions) AppendMessage(_ context.Context, _ *model.Message) error {
 	return nil
 }
@@ -127,11 +127,11 @@ func TestParseKernel_Defaults(t *testing.T) {
 		in   string
 		want Kernel
 	}{
-		{"", KernelLegacy},
+		{"", KernelGraph},
 		{"legacy", KernelLegacy},
 		{"GRAPH", KernelGraph},
 		{"  graph  ", KernelGraph},
-		{"garbage", KernelLegacy},
+		{"garbage", KernelGraph},
 	}
 	for _, c := range cases {
 		if got := ParseKernel(c.in); got != c.want {

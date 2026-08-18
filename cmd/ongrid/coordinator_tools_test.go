@@ -2,65 +2,17 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
 	aiopstools "github.com/ongridio/ongrid/internal/manager/biz/aiops/tools"
-	aiopstoolsbase "github.com/ongridio/ongrid/internal/manager/biz/aiops/tools/basetool"
 	managerimbridgemodel "github.com/ongridio/ongrid/internal/manager/model/imbridge"
 )
-
-type coordinatorToolStub struct{ name string }
-
-func (s coordinatorToolStub) Info(context.Context) (*aiopstoolsbase.ToolInfo, error) {
-	return &aiopstoolsbase.ToolInfo{
-		Name:        s.name,
-		Description: s.name,
-		Parameters:  json.RawMessage(`{"type":"object"}`),
-		Class:       "read",
-	}, nil
-}
 
 type imAppGetterStub struct{ app *managerimbridgemodel.ImApp }
 
 func (s imAppGetterStub) GetApp(context.Context, uint64) (*managerimbridgemodel.ImApp, error) {
 	return s.app, nil
-}
-
-func (s coordinatorToolStub) InvokableRun(context.Context, string, ...aiopstoolsbase.InvokeOption) (string, error) {
-	return `{"ok":true}`, nil
-}
-
-// TestCoordinatorRosterDerivesRegisteredCoreTools guards the regression where
-// registered core tools were present in the ToolBag but absent from the default
-// coordinator persona, so the coordinator could not discover them.
-func TestCoordinatorRosterDerivesRegisteredCoreTools(t *testing.T) {
-	registered := []aiopstoolsbase.BaseTool{
-		coordinatorToolStub{name: "query_devices"},
-		coordinatorToolStub{name: "query_traceql"},
-		coordinatorToolStub{name: "query_knowledge"},
-		coordinatorToolStub{name: "read_source"},
-		coordinatorToolStub{name: "query_promql"},
-		coordinatorToolStub{name: "host_find_large_files"},
-	}
-	got := buildCoordinatorToolNames(registered)
-	for _, want := range []string{"query_devices", "query_traceql", "query_knowledge", "read_source", "query_promql"} {
-		if !containsString(got, want) {
-			t.Errorf("coordinator roster missing registered core tool %q (have %v)", want, got)
-		}
-	}
-	if containsString(got, "host_find_large_files") {
-		t.Errorf("coordinator roster should not include non-core host file tool by registration alone: %v", got)
-	}
-	for _, want := range []string{
-		"host_bash", "rank_edges", "find_outlier_edges", "query_alert_rules", "cloud_bash", "install_skill",
-		aiopstools.ToolSearchToolName, aiopstools.ToolNameQueryNetworkDevices, aiopstools.ToolNameGetNetworkNeighbors,
-	} {
-		if !containsString(got, want) {
-			t.Errorf("coordinator roster missing policy extra %q (have %v)", want, got)
-		}
-	}
 }
 
 func TestBasePromptAllowsLightweightCoordinatorReads(t *testing.T) {
@@ -98,15 +50,19 @@ func TestBasePromptRoutesSimpleTraceQueriesDirectly(t *testing.T) {
 			t.Fatalf("base prompt missing trace direct-routing guidance %q", want)
 		}
 	}
+	for _, want := range []string{"按指标排序", "目录/文件/进程/日志等主机归因", "rank_edges(by=\"disk\")"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("base prompt missing filesystem delegation guidance %q", want)
+		}
+	}
 }
 
-func TestBasePromptRoutesComplexWorkToAgentToolFirst(t *testing.T) {
+func TestBasePromptKeepsDefaultAssistantAsOwner(t *testing.T) {
 	prompt := ongridBasePrompt()
 	for _, want := range []string{
-		"DELEGATE 第一工具必须是 `AgentTool`",
 		"根因、影响面、处置建议",
 		"综合体检、风险评估、优先级、报告、remediation plan",
-		"不要先自己查 `get_topology/query_promql/query_logql/host_bash`",
+		"需要更深证据时可调用 `AgentTool`",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("base prompt missing complex delegation guidance %q", want)
@@ -114,17 +70,13 @@ func TestBasePromptRoutesComplexWorkToAgentToolFirst(t *testing.T) {
 	}
 }
 
-func TestDefaultCoordinatorKeepsThirtyTurns(t *testing.T) {
-	if defaultCoordinatorMaxTurns != 30 {
-		t.Fatalf("default coordinator MaxTurns = %d, want 30", defaultCoordinatorMaxTurns)
+func TestDefaultCoordinatorUsesGraphLoopBudget(t *testing.T) {
+	if defaultCoordinatorMaxTurns != 12 {
+		t.Fatalf("default coordinator MaxTurns = %d, want 12", defaultCoordinatorMaxTurns)
 	}
 }
 
 func TestExecuteK8sActionIsExcludedFromWorkflowToolPalette(t *testing.T) {
-	got := buildCoordinatorToolNames(nil)
-	if !containsString(got, aiopstools.ToolNameExecuteK8sAction) {
-		t.Fatalf("coordinator roster missing %q", aiopstools.ToolNameExecuteK8sAction)
-	}
 	if !isFlowRuntimeUnsupportedTool(aiopstools.ToolNameExecuteK8sAction) {
 		t.Fatalf("%q should be excluded from flow paths without ReviewGate", aiopstools.ToolNameExecuteK8sAction)
 	}
@@ -138,13 +90,6 @@ func TestMessagingToolsAreSharedWithWorkflowToolPalette(t *testing.T) {
 		if isFlowRuntimeUnsupportedTool(name) {
 			t.Fatalf("%q must remain runnable for saved workflows", name)
 		}
-	}
-	coordinator := buildCoordinatorToolNames(nil)
-	if !containsString(coordinator, aiopstools.ToolNameSendNotification) {
-		t.Fatalf("coordinator roster missing %q", aiopstools.ToolNameSendNotification)
-	}
-	if !containsString(coordinator, aiopstools.ToolNameSendIMMessage) {
-		t.Fatalf("coordinator roster missing %q", aiopstools.ToolNameSendIMMessage)
 	}
 }
 

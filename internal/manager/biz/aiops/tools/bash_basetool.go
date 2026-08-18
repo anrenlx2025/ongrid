@@ -325,22 +325,26 @@ func (t *BashTool) InvokableRun(ctx context.Context, argsJSON string, opts ...ba
 	if in.TimeoutSeconds > 300 {
 		in.TimeoutSeconds = 300
 	}
+	invokeCfg := basetool.ResolveOptions(opts)
+	// Keep the context lookup as a compatibility path for direct callers. The
+	// graph runtime uses the explicit option because nested Eino ToolsNode
+	// contexts can drop request-scoped values.
+	hostWriteAllowed := invokeCfg.HostWriteAllowed || basetool.HostWriteAllowedFromContext(ctx)
 	if isHostBashWriteCommand(in.Cmd) {
-		if !basetool.HostWriteAllowedFromContext(ctx) {
+		if !hostWriteAllowed {
 			return `{"status":"blocked","message":"Agent write actions are disabled; the host command was not run."}`, nil
 		}
 		if t.proposer == nil {
 			return "", fmt.Errorf("%s: approval inbox not wired for mutating command", ToolNameBash)
 		}
-		cfg := basetool.ResolveOptions(opts)
-		return t.proposer.ProposeAndAwait(ctx, in.DeviceIDs, in.Cmd, in.TimeoutSeconds, basetool.SessionIDFromContext(ctx), compose.GetToolCallID(ctx), cfg.UserID)
+		return t.proposer.ProposeAndAwait(ctx, in.DeviceIDs, in.Cmd, in.TimeoutSeconds, basetool.SessionIDFromContext(ctx), compose.GetToolCallID(ctx), invokeCfg.UserID)
 	}
 
 	batchCtx, cancel := context.WithTimeout(ctx, bashBatchTimeout)
 	defer cancel()
 
 	results := runBatch(batchCtx, in.DeviceIDs, func(ctx context.Context, id uint64) BashResultEntry {
-		return t.singleBash(ctx, id, in.Cmd, in.TimeoutSeconds, false)
+		return t.singleBash(ctx, id, in.Cmd, in.TimeoutSeconds, hostWriteAllowed)
 	})
 	return marshalBashEnvelope(in.Cmd, results)
 }
@@ -377,12 +381,27 @@ func isHostBashWriteCommand(cmd string) bool {
 	if slices.Contains(writeBins, first) {
 		return true
 	}
+	if first == "docker" {
+		return isDockerWriteCommand(fields[1:])
+	}
 	if first == "systemctl" {
 		for _, f := range fields[1:] {
 			switch f {
 			case "start", "stop", "restart", "reload", "try-restart", "enable", "disable", "mask", "unmask", "kill", "reset-failed", "daemon-reload", "edit":
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func isDockerWriteCommand(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "image", "container", "volume", "network", "system", "builder":
+			continue
+		case "prune", "rm", "rmi", "remove", "run", "create", "start", "stop", "restart", "kill", "pause", "unpause", "exec", "cp", "commit", "load", "import", "tag", "push", "pull", "build":
+			return true
 		}
 	}
 	return false

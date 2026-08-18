@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -11,6 +12,11 @@ import (
 	model "github.com/ongridio/ongrid/internal/manager/model/aiops"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 )
+
+func isDuplicate(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate") || strings.Contains(msg, "unique constraint")
+}
 
 // SessionRepo is the GORM-backed biz/aiops.SessionRepo.
 type SessionRepo struct {
@@ -70,13 +76,12 @@ func (r *SessionRepo) ListByParent(ctx context.Context, parentID string) ([]*mod
 // relatedIncidentID is non-nil only sessions linked to that incident
 // are returned — used by the IncidentDetail agent-timeline panel.
 func (r *SessionRepo) ListSessions(ctx context.Context, userID uint64, limit, offset int, relatedIncidentID *uint64) ([]*model.Session, error) {
-	// kind='user' only — investigation sessions are auto-spawned per
-	// alert RCA and live in the same table for audit, but the chat-list
-	// surface should never show them. The IncidentDetail page reads
-	// investigation_reports directly, not this list.
+	// The primary chat surface shows only user-audience transcripts.
+	// Kind describes workflow semantics; audience is the visibility boundary.
+	// Empty audience is retained for rows written before this field existed.
 	tx := r.db.WithContext(ctx).Model(&model.Session{}).
 		Where("user_id = ?", userID).
-		Where("kind = ?", model.SessionKindUser)
+		Where("(audience = ? OR audience = '')", model.SessionAudienceUser)
 	if relatedIncidentID != nil {
 		tx = tx.Where("related_incident_id = ?", *relatedIncidentID)
 	}
@@ -159,7 +164,13 @@ func (r *SessionRepo) AppendMessage(ctx context.Context, m *model.Message) error
 	if m == nil {
 		return errs.ErrInvalid
 	}
-	return r.db.WithContext(ctx).Create(m).Error
+	if err := r.db.WithContext(ctx).Create(m).Error; err != nil {
+		if isDuplicate(err) {
+			return errs.ErrConflict
+		}
+		return err
+	}
+	return nil
 }
 
 // ListMessages returns messages for sessionID ordered by created_at ASC.

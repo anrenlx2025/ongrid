@@ -117,6 +117,14 @@ const BUILTIN_SKILL_I18N: Record<string, { name: string; desc: { zh: string; en:
     },
     category: { zh: '网络', en: 'Network' },
   },
+  host_probe_ping: {
+    name: 'host_probe_ping',
+    desc: {
+      zh: '对目标 host 发起短时 ICMP ping，返回退出码、耗时和原始输出。',
+      en: 'Run a bounded ICMP ping to a host and return exit code, latency, and raw output.',
+    },
+    category: { zh: '网络', en: 'Network' },
+  },
   host_probe_http: {
     name: 'host_probe_http',
     desc: {
@@ -300,7 +308,7 @@ export function executeSkill(
 ) {
   const body: Record<string, unknown> = { params };
   if (edgeID !== null && edgeID !== '' && edgeID !== undefined) {
-    body.edge_id = typeof edgeID === 'number' ? String(edgeID) : edgeID;
+    body.edge_id = typeof edgeID === 'string' ? Number(edgeID) : edgeID;
   }
   return request<ExecuteResult>('POST', `/skills/${encodeURIComponent(key)}/execute`, body);
 }

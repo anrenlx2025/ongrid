@@ -34,6 +34,7 @@ import (
 	edgecollector "github.com/ongridio/ongrid/internal/edgeagent/collector"
 	edgehostfiles "github.com/ongridio/ongrid/internal/edgeagent/host_files"
 	edgek8s "github.com/ongridio/ongrid/internal/edgeagent/k8s"
+	edgeoperator "github.com/ongridio/ongrid/internal/edgeagent/operator"
 	edgeplugins "github.com/ongridio/ongrid/internal/edgeagent/plugins"
 	edgeplugincustommetrics "github.com/ongridio/ongrid/internal/edgeagent/plugins/custommetrics"
 	edgeplugindatabasemetrics "github.com/ongridio/ongrid/internal/edgeagent/plugins/databasemetrics"
@@ -44,6 +45,7 @@ import (
 	edgeplugintraces "github.com/ongridio/ongrid/internal/edgeagent/plugins/traces"
 	edgerestartservice "github.com/ongridio/ongrid/internal/edgeagent/restart_service"
 	edgesvc "github.com/ongridio/ongrid/internal/edgeagent/service"
+	edgestreamrouter "github.com/ongridio/ongrid/internal/edgeagent/streamrouter"
 	edgewebshell "github.com/ongridio/ongrid/internal/edgeagent/webshell"
 
 	// Builtin skill init() blocks register Executors with the shared
@@ -187,13 +189,22 @@ func main() {
 		if err := edgebash.Register(client, log); err != nil {
 			log.Warn("bash register failed; capability disabled", slog.Any("err", err))
 		}
+		operatorLog := log.With(slog.String("comp", "operator"))
+		edgeoperator.Register(client, operatorLog)
 
 		// WebSSH: edge is a stream port-forwarder. Manager opens a
 		// frontier stream with Meta describing the target (sshd at
 		// 127.0.0.1:22), edge io.Copy's bytes both ways. SSH client
 		// lives entirely on the manager — see internal/manager/server/
 		// webshell. The edge has no SSH lib, no PTY, no session map.
-		edgewebshell.Register(client, log.With(slog.String("comp", "webshell")))
+		webshellLog := log.With(slog.String("comp", "webshell"))
+		edgestreamrouter.Register(client, map[string]edgestreamrouter.Handler{
+			tunnel.StreamKindOperatorExec: func(stream tunnel.StreamConn) {
+				edgeoperator.HandleStream(stream, operatorLog)
+			},
+		}, func(stream tunnel.StreamConn) {
+			edgewebshell.HandleStream(stream, webshellLog)
+		}, log.With(slog.String("comp", "streamrouter")))
 	} else {
 		log.Info("kubernetes controller: host handlers disabled",
 			slog.String("role", k8sInfo.Role),
@@ -215,6 +226,7 @@ func main() {
 		AgentVersion:             version,
 		Kubernetes:               k8sInfo,
 		UpgradeStageDir:          stageDir,
+		PacketCaptureDir:         envOr("ONGRID_PACKET_CAPTURE_DIR", "/var/lib/ongrid-edge/pcap"),
 	}, log)
 	if isK8sController(k8sInfo) {
 		inventoryInterval := parseDurationEnv("ONGRID_K8S_INVENTORY_INTERVAL", 10*time.Minute)

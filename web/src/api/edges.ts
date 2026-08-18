@@ -32,6 +32,7 @@ export const EDGE_ROLE_LABELS_EN: Record<EdgeRole, string> = {
 export type Edge = {
   id: number;
   name: string;
+  device_name?: string;
   status: EdgeStatus;
   // roles is always present (empty array == 未分类). Coding-wise prefer
   // checking includes() rather than .length so the intent reads cleanly.

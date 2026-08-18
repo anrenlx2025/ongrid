@@ -241,6 +241,7 @@ const ToolWebSearch = "web_search"
 // for tests that exercise the legacy path.
 var legacyKernelMutatingTools = map[string]struct{}{
 	"host_restart_service": {},
+	"capture_pcap":         {},
 }
 
 const (

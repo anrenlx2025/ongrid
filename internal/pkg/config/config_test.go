@@ -19,6 +19,7 @@ func TestLoadDefaults(t *testing.T) {
 		"ONGRID_EDGE_COLLECTOR_MODE", "ONGRID_EDGE_SCRAPE_CONFIG_FILE", "ONGRID_EDGE_COLLECTOR_INTERVAL",
 		"ONGRID_FRONTIER_ADDR", "ONGRID_FRONTIER_SERVICE_NAME",
 		"ONGRID_PROM_ENABLED", "ONGRID_PROM_URL", "ONGRID_PROM_REMOTE_WRITE_URL", "ONGRID_PROM_QUERY_URL",
+		"ONGRID_LOG_QUERY_URL", "ONGRID_TRACE_QUERY_URL",
 		"ONGRID_NOTIFY_ENABLED", "ONGRID_NOTIFY_DEFAULT_CHANNELS", "ONGRID_NOTIFY_TIMEOUT",
 		"ONGRID_NOTIFY_LOG_ENABLED", "ONGRID_NOTIFY_LOG_NAME",
 		"ONGRID_NOTIFY_WEBHOOK_ENABLED", "ONGRID_NOTIFY_WEBHOOK_NAME", "ONGRID_NOTIFY_WEBHOOK_URL", "ONGRID_NOTIFY_WEBHOOK_SECRET",
@@ -78,6 +79,12 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Admin.Password != "" {
 		t.Errorf("Admin.Password default = %q, want empty", cfg.Admin.Password)
+	}
+	if cfg.Logs.URL != "http://loki:3100" {
+		t.Errorf("Logs.URL default = %q, want embedded loki", cfg.Logs.URL)
+	}
+	if cfg.Traces.URL != "http://tempo:3200" {
+		t.Errorf("Traces.URL default = %q, want embedded tempo", cfg.Traces.URL)
 	}
 	if cfg.FrontierClient.Addr != "frontier:40011" {
 		t.Errorf("FrontierClient.Addr default = %q, want frontier:40011", cfg.FrontierClient.Addr)
@@ -144,6 +151,22 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Alert.Load1 != 0 {
 		t.Errorf("Alert.Load1 default = %v, want 0", cfg.Alert.Load1)
+	}
+}
+
+func TestLoadTelemetryURLCanBeExplicitlyDisabled(t *testing.T) {
+	t.Setenv("ONGRID_LOG_QUERY_URL", "off")
+	t.Setenv("ONGRID_TRACE_QUERY_URL", "disabled")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Logs.URL != "" {
+		t.Errorf("Logs.URL = %q, want empty when disabled", cfg.Logs.URL)
+	}
+	if cfg.Traces.URL != "" {
+		t.Errorf("Traces.URL = %q, want empty when disabled", cfg.Traces.URL)
 	}
 }
 

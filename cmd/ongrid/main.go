@@ -117,6 +117,8 @@ import (
 	managerbizmarketplace "github.com/ongridio/ongrid/internal/manager/biz/marketplace"
 	managerbizmcp "github.com/ongridio/ongrid/internal/manager/biz/mcp"
 	managerbizmonitor "github.com/ongridio/ongrid/internal/manager/biz/monitor"
+	managerbizoperatorrun "github.com/ongridio/ongrid/internal/manager/biz/operatorrun"
+	managerbizpacketcapture "github.com/ongridio/ongrid/internal/manager/biz/packetcapture"
 	managerbizsecret "github.com/ongridio/ongrid/internal/manager/biz/secret"
 	managerbizsetting "github.com/ongridio/ongrid/internal/manager/biz/setting"
 	managerbizskill "github.com/ongridio/ongrid/internal/manager/biz/skill"
@@ -128,10 +130,12 @@ import (
 	managermarketplacedata "github.com/ongridio/ongrid/internal/manager/data/marketplace/store"
 	managermcpdata "github.com/ongridio/ongrid/internal/manager/data/mcp/store"
 	managermonitordata "github.com/ongridio/ongrid/internal/manager/data/monitor/store"
+	managerpacketcapturedata "github.com/ongridio/ongrid/internal/manager/data/packetcapture/store"
 	managersecretdata "github.com/ongridio/ongrid/internal/manager/data/secret/store"
 	managersettingdata "github.com/ongridio/ongrid/internal/manager/data/setting/store"
 	managerwebshelldata "github.com/ongridio/ongrid/internal/manager/data/webshell/store"
 	managerimbridgemodel "github.com/ongridio/ongrid/internal/manager/model/imbridge"
+	managerpacketcapturemodel "github.com/ongridio/ongrid/internal/manager/model/packetcapture"
 	settingmodel "github.com/ongridio/ongrid/internal/manager/model/setting"
 	wsmodel "github.com/ongridio/ongrid/internal/manager/model/webshell"
 	managerserverimbridge "github.com/ongridio/ongrid/internal/manager/server/imbridge"
@@ -139,6 +143,7 @@ import (
 	managerserverknowledge "github.com/ongridio/ongrid/internal/manager/server/knowledge"
 	managerwebshellserver "github.com/ongridio/ongrid/internal/manager/server/webshell"
 	mcpclient "github.com/ongridio/ongrid/internal/pkg/mcpclient"
+	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 
 	managerbizaudit "github.com/ongridio/ongrid/internal/manager/biz/audit"
 	managerbizflow "github.com/ongridio/ongrid/internal/manager/biz/flow"
@@ -164,6 +169,8 @@ import (
 	managerservermetric "github.com/ongridio/ongrid/internal/manager/server/metric"
 	managermiddleware "github.com/ongridio/ongrid/internal/manager/server/middleware"
 	managerservermonitor "github.com/ongridio/ongrid/internal/manager/server/monitor"
+	managerserveroperatorrun "github.com/ongridio/ongrid/internal/manager/server/operatorrun"
+	managerserverpacketcapture "github.com/ongridio/ongrid/internal/manager/server/packetcapture"
 	managerserverprom "github.com/ongridio/ongrid/internal/manager/server/prometheus"
 	managerserverreport "github.com/ongridio/ongrid/internal/manager/server/report"
 	managerserversecret "github.com/ongridio/ongrid/internal/manager/server/secret"
@@ -276,6 +283,7 @@ func main() {
 		manageraudtdata.Migrate,
 		managerreportdata.Migrate,
 		managerflowdata.Migrate,
+		managerpacketcapturedata.Migrate,
 	); err != nil {
 		log.Error("run migrations", slog.Any("err", err))
 		os.Exit(1)
@@ -1154,6 +1162,7 @@ func main() {
 	// pushes through the live router.
 	webshellRouter := managerwebshellbiz.NewRouter()
 	webshellAuditRepo := managerwebshelldata.NewRepo(db)
+	operatorRunSvc := managerbizoperatorrun.New(fbClient, log.With(slog.String("comp", "operator-run")))
 
 	if err := managersvcfb.Install(rootCtx, fbClient, managersvcfb.Wiring{
 		EdgeAuthn:      edgeAuthn,
@@ -1172,6 +1181,16 @@ func main() {
 		Log:              log.With(slog.String("comp", "frontierbound")),
 	}); err != nil {
 		log.Error("frontierbound: install handlers", slog.Any("err", err))
+		os.Exit(1)
+	}
+	if err := fbClient.Register(rootCtx, tunnel.MethodOperatorPushEvent, func(rpcCtx context.Context, transportID uint64, body []byte) ([]byte, error) {
+		edgeID := fbClient.CanonicalizeEdgeID(transportID)
+		if edgeID == 0 {
+			return nil, fmt.Errorf("operator push_event: edge binding not ready")
+		}
+		return operatorRunSvc.HandlePushEvent(rpcCtx, edgeID, body)
+	}); err != nil {
+		log.Error("frontierbound: install operator push handler", slog.Any("err", err))
 		os.Exit(1)
 	}
 	// Back-fill the reload notifier now that fbClient is alive — earlier
@@ -1225,7 +1244,8 @@ func main() {
 	// default 0=unlimited) drives an llm.InMemoryBudget that the graph-layer
 	// callback chain checks before each ChatModel turn — see Phase 4 cbDeps
 	// build below where the checker is set when the limit > 0.
-	aiopsRepo := manageraiopsdata.NewBizRepo(db)
+	aiopsRepo := manageraiopsdata.NewSessionRepo(db)
+	operationUC := managerbizaiops.NewOperationUsecase(aiopsRepo)
 	mutatingProposalRepo := manageraiopsdata.NewMutatingProposalRepo(db)
 	// PromQuerier is the interface tools/registry takes; passing a typed-nil
 	// *Client would yield a non-nil interface and bypass the conditional
@@ -1246,6 +1266,63 @@ func main() {
 		traceQuerier = pkgtracequery.New(cfg.Traces.URL, log.With(slog.String("comp", "aiops-tracequery")))
 	}
 	toolsReg := aiopstools.NewRegistry(fbClient, edgeUC, deviceUC, promQuerier, logQuerier, traceQuerier, alertUC, log)
+	packetCaptureUC := managerbizpacketcapture.New(
+		managerpacketcapturedata.New(db),
+		fbClient,
+		aiopstools.NewDeviceResolver(deviceUC, edgeUC),
+		log.With(slog.String("comp", "packet-capture")),
+	)
+	packetCaptureRawStore, err := managerbizpacketcapture.NewLocalRawStore(cfg.PacketCapture.RawDir)
+	if err != nil {
+		log.Warn("packet capture raw store disabled", slog.Any("err", err))
+	} else {
+		packetCaptureUC.SetRawStore(packetCaptureRawStore)
+	}
+	packetParserArtifactBaseURL := cfg.PacketCapture.ParserArtifactBaseURL
+	if strings.TrimSpace(packetParserArtifactBaseURL) == "" {
+		packetParserArtifactBaseURL = cfg.PublicURL
+	}
+	if strings.TrimSpace(cfg.PacketCapture.ParserURL) != "" {
+		packetParser, parserErr := managerbizpacketcapture.NewParserClient(managerbizpacketcapture.ParserClientConfig{
+			URL:             cfg.PacketCapture.ParserURL,
+			ArtifactBaseURL: packetParserArtifactBaseURL,
+			TokenSecret:     cfg.PacketCapture.ParserTokenSecret,
+			PrivateKeyFile:  cfg.PacketCapture.ParserManagerPrivateKeyFile,
+			ClientCertFile:  cfg.PacketCapture.ParserClientCertFile,
+			ClientKeyFile:   cfg.PacketCapture.ParserClientKeyFile,
+			CAFile:          cfg.PacketCapture.ParserCAFile,
+			Timeout:         cfg.PacketCapture.ParserTimeout,
+			MaxPackets:      cfg.PacketCapture.ParserMaxPackets,
+			MaxBytes:        cfg.PacketCapture.ParserMaxBytes,
+			IncludeHex:      cfg.PacketCapture.ParserIncludeHex,
+		})
+		if parserErr != nil {
+			log.Warn("packet parser disabled", slog.Any("err", parserErr))
+		} else {
+			packetCaptureUC.SetParser(packetParser)
+		}
+	}
+	packetCaptureHandler := managerserverpacketcapture.NewHandler(packetCaptureUC)
+	toolsReg.SetPacketCaptureCreator(packetCaptureUC)
+	toolsReg.SetPacketCaptureOperationCreator(func(ctx context.Context, in aiopstools.PacketCaptureOperationInput) (aiopstools.PacketCaptureOperation, error) {
+		op, err := operationUC.Create(ctx, managerbizaiops.CreateOperationInput{
+			ChatSessionID: in.ChatSessionID,
+			CreatedBy:     in.CreatedBy,
+			Kind:          "packet_capture_session",
+			Title:         in.Title,
+			Summary:       fmt.Sprintf("%d capture member(s) are being collected", in.MemberCount),
+			Input:         map[string]any{"packet_capture_session_id": in.SessionID},
+			Actions:       []managerbizaiops.OperationAction{{Kind: "cancel", Label: "Stop", Enabled: true}},
+			DetailURL:     "/artifacts/packet-sessions/" + in.SessionID,
+		})
+		if err != nil {
+			return aiopstools.PacketCaptureOperation{}, err
+		}
+		if err := operationUC.Transition(ctx, op.ID, []string{manageraiopsmodel.OperationStateCreated}, manageraiopsmodel.OperationStateRunning, op.Summary, []managerbizaiops.OperationAction{{Kind: "cancel", Label: "Stop", Enabled: true}}, "created", map[string]any{"packet_capture_session_id": in.SessionID}); err != nil {
+			return aiopstools.PacketCaptureOperation{}, err
+		}
+		return aiopstools.PacketCaptureOperation{ID: op.ID, State: manageraiopsmodel.OperationStateRunning, Summary: op.Summary}, nil
+	})
 	toolsReg.SetPluginConfigLister(pluginConfigUC)
 	toolsReg.SetConfigManager(manageraiopsconfig.NewAlertRuleManager(alertSvc))
 	toolsReg.SetK8sSnapshotReader(k8sSvc)
@@ -1284,9 +1361,9 @@ func main() {
 	})
 	aiopsUsage := managerbizaiops.NewUsageUsecase(aiopsRepo, log)
 
-	// PR-9 of optional new graph-based agent kernel. Default
-	// stays "legacy" so chat behaviour is unchanged out of the box;
-	// operators opt into the new path via ONGRID_AGENT_KERNEL=graph.
+	// The graph-based AgentLoop is the default execution path. Operators can
+	// set ONGRID_AGENT_KERNEL=legacy for an explicit rollback while migration
+	// issues are investigated.
 	// When the env is set we build:
 	//   - RoutingChatModel (PR-1) wrapping the existing llmRouter, one
 	//     per provider id ("openai" | "anthropic" | "zhipu" | "gemini").
@@ -1489,6 +1566,59 @@ func main() {
 	aiopsSvc := managersvcaiops.NewWithKernel(aiopsAgent, aiopsRuntime, kernel, aiopsRepo, aiopsUsage, log)
 	aiopsSvc.SetMutatingProposalRepo(mutatingProposalRepo)
 	aiopsHandler := managerserveraiops.NewHandler(aiopsSvc)
+	aiopsHandler.SetOperationActions(operationUC, func(ctx context.Context, operation *manageraiopsmodel.Operation, action string) (*manageraiopsmodel.Operation, error) {
+		if operation == nil || action != "cancel" || operation.Kind != "packet_capture_session" {
+			return nil, errs.ErrNotFound
+		}
+		var input struct {
+			SessionID string `json:"packet_capture_session_id"`
+		}
+		if err := json.Unmarshal([]byte(operation.InputJSON), &input); err != nil {
+			return nil, fmt.Errorf("decode operation input: %w", err)
+		}
+		if strings.TrimSpace(input.SessionID) == "" {
+			return nil, errs.ErrInvalid
+		}
+		actions := []managerbizaiops.OperationAction{{Kind: "cancel", Label: "Stop", Enabled: false}}
+		if err := operationUC.Transition(ctx, operation.ID, []string{manageraiopsmodel.OperationStateCreated, manageraiopsmodel.OperationStateQueued, manageraiopsmodel.OperationStateRunning}, manageraiopsmodel.OperationStateCanceling, "Cancellation requested", actions, "cancel_requested", map[string]any{"packet_capture_session_id": input.SessionID}); err != nil && !errors.Is(err, errs.ErrConflict) {
+			return nil, err
+		}
+		detail, err := packetCaptureUC.CancelSession(ctx, input.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		nextState := manageraiopsmodel.OperationStateCancelled
+		summary := "Capture session stopped"
+		nextActions := []managerbizaiops.OperationAction(nil)
+		eventType := "cancelled"
+		if detail != nil && detail.Session != nil {
+			switch detail.Session.State {
+			case managerpacketcapturemodel.SessionStateReady:
+				nextState = manageraiopsmodel.OperationStateSucceeded
+				summary = fmt.Sprintf("%d/%d capture artifact(s) available", detail.Analysis.Summary.ReadyCount, detail.Analysis.Summary.CaptureCount)
+				eventType = "succeeded_after_cancel"
+			case managerpacketcapturemodel.SessionStatePartial:
+				nextState = manageraiopsmodel.OperationStateSucceeded
+				summary = fmt.Sprintf("Capture session partially complete; %d/%d artifact(s) available", detail.Analysis.Summary.ReadyCount, detail.Analysis.Summary.CaptureCount)
+				eventType = "partial_after_cancel"
+			case managerpacketcapturemodel.SessionStateCollecting:
+				nextState = manageraiopsmodel.OperationStateRunning
+				summary = "Cancellation could not be confirmed; capture session is still collecting"
+				nextActions = []managerbizaiops.OperationAction{{Kind: "cancel", Label: "Stop", Enabled: true}}
+				eventType = "cancel_failed"
+			case managerpacketcapturemodel.SessionStateFailed:
+				nextState = manageraiopsmodel.OperationStateFailed
+				summary = "Capture session failed while cancellation was requested"
+				eventType = "failed_after_cancel"
+			}
+		}
+		if err := operationUC.Transition(ctx, operation.ID,
+			[]string{manageraiopsmodel.OperationStateCanceling}, nextState,
+			summary, nextActions, eventType, map[string]any{"packet_capture_session_id": input.SessionID}); err != nil && !errors.Is(err, errs.ErrConflict) {
+			return nil, err
+		}
+		return operationUC.GetOwned(ctx, operation.ID, operation.CreatedBy, true)
+	})
 
 	// IM bridge: multi-turn chat via Feishu (S1) / DingTalk
 	// (S2 follow-up). Inbound webhooks land outside the bearer-auth
@@ -1870,6 +2000,7 @@ func main() {
 		return out
 	})
 	skillHandler := managerserverskill.NewHandler(skillSvc)
+	operatorRunHandler := managerserveroperatorrun.NewHandler(operatorRunSvc)
 
 	// marketplace wiring. Install / List / Uninstall on
 	// /v1/marketplace/*. The usecase reloads the chatruntime registries
@@ -2236,6 +2367,7 @@ func main() {
 			log.Warn("mcp: list enabled servers failed", slog.Any("err", err))
 		}
 	}
+
 	if secretbox.KeyIsWeak() {
 		log.Warn("secret vault: ONGRID_SECRET_KEY unset — credentials encrypted with an INSECURE built-in key; set ONGRID_SECRET_KEY (32+ random chars) for real at-rest protection")
 	}
@@ -2360,6 +2492,7 @@ func main() {
 		// can't carry our manager JWT. Auth comes from the platform
 		// signature scheme inside the handler.
 		imbridgeHandler.RegisterPublic(api)
+		packetCaptureHandler.RegisterInternal(api)
 		// serve_page: public read of an assistant-hosted HTML page (under /api
 		// so nginx proxies it to the manager). The random token IS the
 		// capability; id is validated to block path traversal.
@@ -2460,6 +2593,7 @@ func main() {
 			systemUpgradeHandler.Register(protected)
 			imbridgeHandler.RegisterProtected(protected)
 			skillHandler.Register(protected)
+			operatorRunHandler.Register(protected)
 			if knowledgeHandler != nil {
 				knowledgeHandler.Register(protected)
 			}
@@ -2473,6 +2607,7 @@ func main() {
 			managerserveraudit.NewHandler(auditUC).Register(protected)
 			reportHandler.Register(protected)
 			flowHandler.Register(protected)
+			packetCaptureHandler.Register(protected)
 		})
 	})
 
@@ -2556,6 +2691,53 @@ func main() {
 			}
 		})
 	}
+
+	// Packet captures outlive the HTTP/SSE turn that created them. Register
+	// their domain reconciler with the generic Operation coordinator; future
+	// operation kinds share this scheduler instead of adding another loop.
+	eg.Go(func() error {
+		notify := func(ctx context.Context, event managerbizpacketcapture.CompletionEvent) error {
+			if event.Session != nil && event.Session.OperationID != "" {
+				state := manageraiopsmodel.OperationStateSucceeded
+				if event.Session.State == managerpacketcapturemodel.SessionStateFailed {
+					state = manageraiopsmodel.OperationStateFailed
+				} else if event.Session.State == managerpacketcapturemodel.SessionStateCancelled {
+					state = manageraiopsmodel.OperationStateCancelled
+				}
+				summary := fmt.Sprintf("%d/%d capture artifact(s) available", event.Analysis.Summary.ReadyCount, event.Analysis.Summary.CaptureCount)
+				if _, err := operationUC.AddArtifact(ctx, event.Session.OperationID, managerbizaiops.OperationArtifactInput{
+					Kind: "analysis", Title: event.Session.Title, URL: "/artifacts/packet-sessions/" + event.Session.PublicID,
+					Metadata: map[string]any{"session_state": event.Session.State, "ready_count": event.Analysis.Summary.ReadyCount},
+				}); err != nil && !errors.Is(err, errs.ErrConflict) {
+					return fmt.Errorf("create operation artifact: %w", err)
+				}
+				if err := operationUC.Transition(ctx, event.Session.OperationID,
+					[]string{manageraiopsmodel.OperationStateCreated, manageraiopsmodel.OperationStateQueued, manageraiopsmodel.OperationStateRunning, manageraiopsmodel.OperationStateCanceling},
+					state, summary, nil, "completed", map[string]any{"packet_capture_session_id": event.Session.PublicID, "session_state": event.Session.State}); err != nil && !errors.Is(err, errs.ErrConflict) {
+					return fmt.Errorf("update operation completion: %w", err)
+				}
+			}
+			body := packetCaptureCompletionMessage(event)
+			message := &manageraiopsmodel.Message{
+				ID:        uuid.NewSHA1(uuid.NameSpaceURL, []byte("packet-capture-completion:"+event.Session.PublicID)).String(),
+				SessionID: event.ChatSessionID,
+				Role:      manageraiopsmodel.RoleAssistant,
+				Content:   &body,
+				CreatedAt: time.Now().UTC(),
+			}
+			if err := aiopsRepo.AppendMessage(ctx, message); err != nil && !errors.Is(err, errs.ErrConflict) {
+				return fmt.Errorf("append completion message: %w", err)
+			}
+			return nil
+		}
+		coordinator := managerbizaiops.NewOperationCoordinator(5*time.Second, log.With(slog.String("comp", "operation-coordinator")))
+		if err := coordinator.Register(operationReconcilerFunc{kind: "packet_capture_session", reconcile: func(ctx context.Context) error {
+			return packetCaptureUC.ReconcileActiveSessions(ctx, 50, notify)
+		}}); err != nil {
+			return err
+		}
+		return coordinator.Run(egCtx)
+	})
 
 	// RCA investigator inflight gauge — samples concurrency cap usage.
 	// Same 15s cadence as the worker sampler; cheap channel-len read.
@@ -3471,65 +3653,10 @@ func loadBootstrapRegistries(log *slog.Logger) (*aiopschatruntime.SkillRegistry,
 // ONGRID_AGENT_KERNEL=graph. Returns (nil, err) on failure so the
 // caller can fall back to the legacy kernel without a panic.
 //
-// coordinatorExtraToolNames are policy exceptions that are intentionally
-// coordinator-owned even though they are not registry core tools in every
-// deployment. The rest of the coordinator whitelist is derived from the
-// registered ToolBag core tier so new core read/query tools do not need a
-// second hard-coded entry here.
-var coordinatorExtraToolNames = []string{
-	// Lightweight direct reads added by this routing fix: cheap snapshots /
-	// rankings should not bounce through AgentTool.
-	"host_bash",
-	"rank_edges",
-	"find_outlier_edges",
-	"query_alert_rules",
-	// Legacy / optional tools that are appended after the initial registry bag,
-	// or still live outside the BaseTool registry in some deployments.
-	aiopstools.ToolNameExecuteK8sAction,
-	"search_web",
-	// Approval/output primitives: these do not execute infrastructure changes
-	// without a human approval or an explicit pre-configured channel/page sink.
-	"cloud_bash",
-	"install_skill",
-	"serve_page",
-	aiopstools.ToolNameSendNotification,
-	aiopstools.ToolNameSendIMMessage,
-	// Network inventory remains specialty/schema-redacted. These entries only
-	// let explicit network-asset requests discover it through ToolSearch.
-	aiopstools.ToolSearchToolName,
-	aiopstools.ToolNameQueryNetworkDevices,
-	aiopstools.ToolNameQueryNetworkInterfaces,
-	aiopstools.ToolNameGetNetworkNeighbors,
-}
-
-const defaultCoordinatorMaxTurns = 30
-
-func buildCoordinatorToolNames(registered []aiopstoolsbase.BaseTool) []string {
-	names := aiopstools.CoreToolNames(registered)
-	return appendUniqueToolNames(names, coordinatorExtraToolNames...)
-}
-
-func appendUniqueToolNames(names []string, extra ...string) []string {
-	seen := make(map[string]bool, len(names)+len(extra))
-	out := make([]string, 0, len(names)+len(extra))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		out = append(out, name)
-	}
-	for _, name := range extra {
-		name = strings.TrimSpace(name)
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		out = append(out, name)
-	}
-	return out
-}
+// Keep the default persona aligned with graph.DefaultConfig's hard ceiling.
+// A persona override must never silently reopen a loop budget that the graph
+// intentionally constrained for every other session.
+const defaultCoordinatorMaxTurns = 12
 
 // Heavy on parameters because every dep flows through this site
 // exactly once — the alternative (build the runtime inline in main)
@@ -3689,7 +3816,14 @@ func buildAIOpsRuntime(
 	}
 	wrapped := make([]aiopstoolsbase.BaseTool, 0, len(baseTools))
 	for _, t := range baseTools {
-		wrapped = append(wrapped, aiopstoolsdec.Wrap(t, deps))
+		toolDeps := deps
+		if info, err := t.Info(context.Background()); err == nil && info != nil && info.Name == aiopstools.ToolNameCapturePCAP {
+			// A short capture includes capture duration plus parser work. Keep
+			// the normal 15s ceiling for every other tool, but let this bounded
+			// evidence collection finish in the same chat turn.
+			toolDeps.Timeout = 45 * time.Second
+		}
+		wrapped = append(wrapped, aiopstoolsdec.Wrap(t, toolDeps))
 	}
 
 	// 3. Skill / Agent registries — pre-loaded by loadBootstrapRegistries
@@ -3698,34 +3832,22 @@ func buildAIOpsRuntime(
 	//    the references handed in here and continue with the chat-wiring
 	//    work below.
 
-	// Register the virtual "default" persona — the top-level chat
-	// coordinator. **Curated toolbag** (not full bag): the coordinator
-	// owns cheap read-only fleet facts / rankings / snapshots, while
-	// multi-step diagnosis and domain-specific RCA still go through
-	// AgentTool specialists. This keeps "CPU top 20" fast and cheap
-	// without letting the coordinator turn into a full deep-dive worker.
-	// AgentTool / SendMessage / TaskStop survive automatically via the
-	// coordinatorOnlyTools carve-out (see filterToolsForAgent in
-	// internal/manager/biz/aiops/chatruntime/worker.go).
-	//
-	// Coordinator whitelist:
-	//   - registered core tools from ToolBag metadata — query_* observability,
-	//     knowledge/code lookup, topology, incident lists, config draft tools,
-	//     Kubernetes read-only tools, and output primitives that advertise
-	//     themselves as always-loaded core
-	//   - coordinatorExtraToolNames — narrow policy exceptions that are safe or
-	//     intentionally cheap enough to keep on the coordinator even when they
-	//     are not part of the core tier in every deployment.
-	//
-	// Everything else (host file probes, mutating tools, broad deep-dive
-	// diagnostics, etc.) should be reached via AgentTool dispatch into a
-	// specialist unless it is registered as core or listed as a narrow
-	// coordinator-owned exception above.
+	// Register the virtual "default" persona — the user-facing root agent.
+	// An empty Tools whitelist inherits the complete tool bag; permission
+	// decorators and ToolSearch govern execution and progressive disclosure.
+	// Specialists improve depth but are never a prerequisite for closure.
 	agentReg.Add(&aiopschatruntime.Agent{
 		Name:        "default",
 		Description: "默认助理",
 		WhenToUse:   "首页发起的会话默认绑定它；适合任何运维 / 排查 / 知识库查询场景。",
-		Tools:       buildCoordinatorToolNames(bag.AllTools()),
+		Capabilities: []aiopschatruntime.AgentCapability{
+			{
+				ID:           "operate_and_investigate",
+				Description:  "Own the user conversation, resolve facts, execute permitted tools, and integrate expert evidence.",
+				MaxToolCalls: defaultCoordinatorMaxTurns,
+			},
+		},
+		Tools: nil,
 		// Keep the coordinator ceiling aligned with the global ReAct
 		// budget. Loop prevention belongs in graph-level guards
 		// (identical-call memo, per-tool execution caps, AgentTool
@@ -3766,31 +3888,15 @@ func buildAIOpsRuntime(
 	// param lints stay quiet across edits.
 	_ = ctx
 	_ = llmRouter
-	// Coordinator-only redirect stubs (see redirect_stub.go). They
-	// catch hallucinated tool names so the LLM gets a "use AgentTool
-	// to dispatch" hint instead of crashing the graph with
-	// "tool not found in toolsNode".
-	coordStubs := make([]aiopstoolsbase.BaseTool, 0)
-	for _, t := range aiopstools.CoordinatorRedirectStubs() {
-		// Same decorator chain as real tools so timeouts / audit
-		// behave consistently (the stub's body is trivial so the
-		// timeout is harmless, audit just records a no-op call).
-		coordStubs = append(coordStubs, aiopstoolsdec.Wrap(t, aiopstoolsdec.Deps{
-			Timeout:    5 * time.Second,
-			Limiter:    aiopstoolsdec.NewTokenBucketLimiter(0),
-			Registerer: reg,
-		}))
-	}
 	rt, err := aiopschatruntime.NewRuntime(aiopschatruntime.Config{
-		SkillRegistry:    skillReg,
-		AgentRegistry:    agentReg,
-		Sessions:         sessions,
-		ChatModel:        chatModel,
-		ToolBag:          wrapped,
-		CoordinatorStubs: coordStubs,
-		MentionResolver:  nil, // wired below if we have a searcher
-		BasePrompt:       ongridBasePrompt(),
-		HistoryLimit:     50,
+		SkillRegistry:   skillReg,
+		AgentRegistry:   agentReg,
+		Sessions:        sessions,
+		ChatModel:       chatModel,
+		ToolBag:         wrapped,
+		MentionResolver: nil, // wired below if we have a searcher
+		BasePrompt:      ongridBasePrompt(),
+		HistoryLimit:    50,
 		GraphCfg: aiopsgraph.Config{
 			Model:         cfg.OpenAI.Model,
 			Temperature:   0.1,
@@ -3841,11 +3947,12 @@ func ongridBasePrompt() string {
 ## 路由
 
 - 工具能力以本轮可见能力（动态）和每个工具的 when_to_use / schema 为准；基础 prompt 只做路由原则。不要臆造不存在的工具，工具名或参数不确定时先用 ` + bt + `ToolSearch` + bt + ` 按能力描述查找。
-- 调工具前先分类：DIRECT_READ 只查一个明确数据面；DELEGATE 是根因、影响面、处置建议、综合体检、风险评估、优先级、报告、remediation plan、容量预测、噪音过滤、跨 metric+log+trace/change/topology/host 的关联。DELEGATE 第一工具必须是 ` + bt + `AgentTool` + bt + `，不要先自己查 ` + bt + `get_topology/query_promql/query_logql/host_bash` + bt + `。
+- 调工具前先分类：DIRECT_READ 只查一个明确数据面；INVESTIGATE 是根因、影响面、处置建议、综合体检、风险评估、优先级、报告、remediation plan、容量预测、噪音过滤、跨 metric+log+trace/change/topology/host 的关联。默认助理始终负责闭环，可直接调用本轮可见工具；需要更深证据、独立复核或并行分析时可调用 ` + bt + `AgentTool` + bt + ` 请求专家工作会话。
+- “按指标排序”本身才是 DIRECT_READ；若排序结果还要求目录/文件/进程/日志等主机归因或下钻，则进入 INVESTIGATE。默认助理可以直接下钻，也可在证据不足时请求对应专家；不要把目录或文件占用误写成 PromQL。全局磁盘使用率排序优先 ` + bt + `rank_edges(by="disk")` + bt + `，不要手写未知的 node_filesystem 指标名。
 - 单一数据源查询由默认助理直接查，不派专家：metric/PromQL→` + bt + `query_promql` + bt + `，log/LogQL→` + bt + `query_logql` + bt + `，trace/span/trace_id/慢 trace/错误 trace/TraceQL→` + bt + `query_traceql` + bt + `，incident 列表→` + bt + `query_incidents` + bt + `，告警规则列表→` + bt + `query_alert_rules` + bt + `，change/release events/审计变更→` + bt + `query_change_events` + bt + `，代码仓库列表→` + bt + `list_repo_sources` + bt + `，源码搜索/grep/函数或报错串定位→` + bt + `grep_source` + bt + `，数据库健康/连接/慢查询/复制/metric coverage→` + bt + `analyze_database_status` + bt + `，数据库源清单→` + bt + `list_database_sources` + bt + `，指定 incident 明细→` + bt + `get_incident_detail/correlate_incident` + bt + `，设备/主机清单→` + bt + `query_devices` + bt + `，设备健康快照→` + bt + `get_edge_summary/get_host_load/get_host_processes` + bt + `。
 - ` + bt + `get_topology` + bt + ` 只查 fleet/deployment facts（规模、版本、Prom/Loki/Tempo/Grafana 配置）。不要为了确认某个数据源是否可用而先调它；对应 query 工具失败时再说明配置缺口。
 - 已知 edge 主机命令或已知文件删除：直接 ` + bt + `host_bash(device_ids=[...], cmd="...")` + bt + `；读命令走只读 sandbox，写命令自动弹内置确认卡。不要为已知删除再派 AgentTool。
-- 复杂诊断、根因、影响面、处置建议、多数据源关联或预计超过 2-3 个工具步骤：第一步就用 ` + bt + `AgentTool` + bt + ` 派专家。不要把单一 metric/log/trace 查询误判成跨域任务，也不要把多数据源任务留给 coordinator 自己循环。worker 看不到本对话，prompt 必须自包含。
+- 复杂诊断、根因、影响面、处置建议、多数据源关联或预计超过 2-3 个工具步骤：默认助理先维护假设、证据和下一步；需要更深证据时可调用 ` + bt + `AgentTool` + bt + `。不要把单一 metric/log/trace 查询误判成跨域任务。专家 worker 看不到本对话，prompt 必须自包含；其结果是证据，不是对用户会话的最终答复。
 - 专家选择：网络→` + bt + `specialist-network` + bt + `；磁盘/文件系统→` + bt + `specialist-disk` + bt + `；CPU/内存/load/进程→` + bt + `specialist-compute` + bt + `；SLO/趋势/优先级→` + bt + `specialist-sre` + bt + `；服务/systemctl/journalctl/部署→` + bt + `specialist-ops` + bt + `；明确 incident_id 端到端 RCA→` + bt + `incident-investigator` + bt + `。
 - 简单 topN / 快照 / 列表不要派 AgentTool；模糊“变慢/卡了”先要时间点、影响面、已采取动作。
 
@@ -5472,6 +5579,39 @@ func runK8sTopologyReconcile(ctx context.Context, uc *managerbizk8s.Usecase, log
 		}
 	}
 }
+
+func packetCaptureCompletionMessage(event managerbizpacketcapture.CompletionEvent) string {
+	if event.Session == nil {
+		return "抓包任务已结束。"
+	}
+	state := "已完成"
+	if event.Session.State == "partial" {
+		state = "部分完成"
+	} else if event.Session.State == "cancelled" {
+		state = "已停止"
+	} else if event.Session.State == "failed" {
+		state = "失败"
+	}
+	return fmt.Sprintf(
+		"抓包会话“%s”%s：%d/%d 个 PCAP 已就绪，发现 %d 条关联流和 %d 个数据包事件。\n\n[打开抓包会话并分析](/artifacts/packet-sessions/%s)",
+		event.Session.Title,
+		state,
+		event.Analysis.Summary.ReadyCount,
+		event.Analysis.Summary.CaptureCount,
+		event.Analysis.Summary.FlowCount,
+		event.Analysis.Summary.EventCount,
+		event.Session.PublicID,
+	)
+}
+
+type operationReconcilerFunc struct {
+	kind      string
+	reconcile func(context.Context) error
+}
+
+func (r operationReconcilerFunc) Kind() string { return r.kind }
+
+func (r operationReconcilerFunc) Reconcile(ctx context.Context) error { return r.reconcile(ctx) }
 
 // seedInfrastructureMenuDefaults is a one-time upgrade migration. Fresh
 // installs never call it; existing installations receive a conservative

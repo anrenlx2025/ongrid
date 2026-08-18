@@ -296,6 +296,20 @@ type Skill struct {
 	UnknownFields map[string]any `yaml:"-" json:"unknown_fields"`
 }
 
+// AgentCapability is a schedulable promise made by an Agent. It names the
+// user task the agent can close and the tool/skill surface it needs; the
+// default assistant may declare the same capability with a smaller budget.
+type AgentCapability struct {
+	// AgentName is populated by AgentRegistry when exposing a card. It is not
+	// authored in frontmatter because the containing Agent is authoritative.
+	AgentName    string   `yaml:"-" json:"agent_name"`
+	ID           string   `yaml:"id" json:"id"`
+	Description  string   `yaml:"description" json:"description"`
+	Tools        []string `yaml:"tools" json:"tools"`
+	Skills       []string `yaml:"skills" json:"skills"`
+	MaxToolCalls int      `yaml:"max_tool_calls" json:"max_tool_calls"`
+}
+
 // Agent is a parsed agent persona (frontmatter markdown).
 // — same on-disk shape as SKILL.md but the body is the agent's system
 // prompt rather than skill prose. Snake_case YAML tags
@@ -309,6 +323,15 @@ type Agent struct {
 	// WhenToUse is the coordinator's spawn-decision hint. Required —
 	// calls this the strict field a coordinator reads.
 	WhenToUse string `yaml:"when_to_use" json:"when_to_use"`
+
+	// Capabilities are structured, registration-time declarations of the
+	// tasks this agent can help close. They are used by Resolve; Tool names
+	// remain the executable implementation details.
+	Capabilities []AgentCapability `yaml:"capabilities" json:"capabilities"`
+	// CanDelegate allows this specialist to request one further internal work
+	// session when its own evidence points to another domain. Runtime depth
+	// limits still apply; this flag never transfers root-session ownership.
+	CanDelegate bool `yaml:"can_delegate" json:"can_delegate"`
 
 	// Tools is the explicit tool whitelist. Empty = inherit from policy.
 	Tools []string `yaml:"tools" json:"tools"`

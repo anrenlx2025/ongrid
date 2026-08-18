@@ -91,6 +91,13 @@ type UserAgentManager interface {
 	Delete(ctx context.Context, caller svc.Caller, name string) error
 }
 
+type OperationReader interface {
+	GetOwned(ctx context.Context, id string, userID uint64, admin bool) (*model.Operation, error)
+	ListArtifacts(ctx context.Context, operationID string) ([]*model.OperationArtifact, error)
+}
+
+type OperationActionExecutor func(ctx context.Context, operation *model.Operation, action string) (*model.Operation, error)
+
 // Handler bundles the aiops service with HTTP-layer state.
 type Handler struct {
 	svc        AIOpsService
@@ -99,6 +106,8 @@ type Handler struct {
 	agents     AgentLister
 	userAgents UserAgentManager
 	llmClient  llm.Client // for /v1/aiops/query-translate; nil = endpoint 503
+	operations OperationReader
+	opAction   OperationActionExecutor
 }
 
 // NewHandler builds the handler. mentions / catalog may be nil; see
@@ -127,6 +136,10 @@ func (h *Handler) SetAgentLister(a AgentLister) { h.agents = a }
 // 503.
 func (h *Handler) SetUserAgentManager(m UserAgentManager) { h.userAgents = m }
 
+func (h *Handler) SetOperationActions(operations OperationReader, execute OperationActionExecutor) {
+	h.operations, h.opAction = operations, execute
+}
+
 // Register attaches aiops routes on r.
 func (h *Handler) Register(r chi.Router) {
 	r.Post("/v1/chat/sessions", h.createSession)
@@ -147,6 +160,8 @@ func (h *Handler) Register(r chi.Router) {
 	r.Post("/v1/agents/custom", h.createUserAgent)
 	r.Patch("/v1/agents/custom/{name}", h.updateUserAgent)
 	r.Delete("/v1/agents/custom/{name}", h.deleteUserAgent)
+	r.Get("/v1/operations/{id}", h.getOperation)
+	r.Post("/v1/operations/{id}/actions/{action}", h.executeOperationAction)
 	// Generic delete: works on any non-builtin / non-default agent.
 	// Disk-source agents (loaded from agents/*.md) get session-scoped
 	// removal — the in-memory registry drops them, but the .md file
@@ -155,7 +170,133 @@ func (h *Handler) Register(r chi.Router) {
 	r.Delete("/v1/agents/{name}", h.deleteAgent)
 }
 
+// @Summary Get an asynchronous operation
+// @Router /api/v1/operations/{id} [get]
+// @Success 200 {object} operationDetailResp
+func (h *Handler) getOperation(w http.ResponseWriter, r *http.Request) {
+	caller, ok := callerFromCtx(r.Context())
+	if !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	if h.operations == nil {
+		writeErr(w, errs.ErrNotWiredYet)
+		return
+	}
+	op, err := h.operations.GetOwned(r.Context(), chi.URLParam(r, "id"), caller.UserID, caller.Role == "admin")
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	artifacts, err := h.operations.ListArtifacts(r.Context(), op.ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, operationDetailResp{
+		Operation: operationDTOFromModel(op),
+		Artifacts: operationArtifactDTOs(artifacts),
+	})
+}
+
+// @Summary Execute a user-visible operation action
+// @Router /api/v1/operations/{id}/actions/{action} [post]
+// @Success 200 {object} operationDTO
+func (h *Handler) executeOperationAction(w http.ResponseWriter, r *http.Request) {
+	caller, ok := callerFromCtx(r.Context())
+	if !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	if h.operations == nil || h.opAction == nil {
+		writeErr(w, errs.ErrNotWiredYet)
+		return
+	}
+	op, err := h.operations.GetOwned(r.Context(), chi.URLParam(r, "id"), caller.UserID, caller.Role == "admin")
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	updated, err := h.opAction(r.Context(), op, strings.TrimSpace(chi.URLParam(r, "action")))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, operationDTOFromModel(updated))
+}
+
 // --------- DTOs ---------
+
+type operationDetailResp struct {
+	Operation operationDTO           `json:"operation"`
+	Artifacts []operationArtifactDTO `json:"artifacts"`
+}
+
+type operationDTO struct {
+	ID            string     `json:"id"`
+	ChatSessionID string     `json:"chat_session_id"`
+	CreatedBy     uint64     `json:"created_by"`
+	Kind          string     `json:"kind"`
+	State         string     `json:"state"`
+	Title         string     `json:"title"`
+	Summary       string     `json:"summary,omitempty"`
+	InputJSON     string     `json:"input_json,omitempty"`
+	ActionsJSON   string     `json:"actions_json,omitempty"`
+	DetailURL     string     `json:"detail_url,omitempty"`
+	TerminalAt    *time.Time `json:"terminal_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+type operationArtifactDTO struct {
+	ID           string    `json:"id"`
+	OperationID  string    `json:"operation_id"`
+	Kind         string    `json:"kind"`
+	Title        string    `json:"title"`
+	URL          string    `json:"url"`
+	MetadataJSON string    `json:"metadata_json,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func operationDTOFromModel(op *model.Operation) operationDTO {
+	if op == nil {
+		return operationDTO{}
+	}
+	return operationDTO{
+		ID:            op.ID,
+		ChatSessionID: op.ChatSessionID,
+		CreatedBy:     op.CreatedBy,
+		Kind:          op.Kind,
+		State:         op.State,
+		Title:         op.Title,
+		Summary:       op.Summary,
+		InputJSON:     op.InputJSON,
+		ActionsJSON:   op.ActionsJSON,
+		DetailURL:     op.DetailURL,
+		TerminalAt:    op.TerminalAt,
+		CreatedAt:     op.CreatedAt,
+		UpdatedAt:     op.UpdatedAt,
+	}
+}
+
+func operationArtifactDTOs(items []*model.OperationArtifact) []operationArtifactDTO {
+	out := make([]operationArtifactDTO, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		out = append(out, operationArtifactDTO{
+			ID:           item.ID,
+			OperationID:  item.OperationID,
+			Kind:         item.Kind,
+			Title:        item.Title,
+			URL:          item.URL,
+			MetadataJSON: item.MetadataJSON,
+			CreatedAt:    item.CreatedAt,
+		})
+	}
+	return out
+}
 
 type createSessionReq struct {
 	Title string   `json:"title"`

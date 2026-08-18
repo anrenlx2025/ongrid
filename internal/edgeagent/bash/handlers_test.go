@@ -77,6 +77,25 @@ func TestHandler_RejectsDeniedCommand(t *testing.T) {
 	}
 }
 
+func TestHandler_UnrestrictedCommandBypassesReadOnlyPolicy(t *testing.T) {
+	sandbox := &cmdpolicy.Sandbox{
+		Policy:        cmdpolicy.DefaultReadOnly(),
+		PathValidator: nil,
+	}
+	h := makeHandler(sandbox, nil)
+
+	resp := invokeHandler(t, h, tunnel.BashExecRequest{
+		Cmd:          "printf approved-write-path",
+		Unrestricted: true,
+	})
+	if !resp.Allowed {
+		t.Fatalf("unrestricted command should execute: %+v", resp)
+	}
+	if resp.Stdout != "approved-write-path" {
+		t.Fatalf("stdout = %q, want approved-write-path", resp.Stdout)
+	}
+}
+
 func TestHandler_AllowsReadCommand(t *testing.T) {
 	sandbox := &cmdpolicy.Sandbox{
 		Policy:        cmdpolicy.DefaultReadOnly(),

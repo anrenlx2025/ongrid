@@ -172,6 +172,39 @@ func TestBuildReActGraph_ToolCallThenFinal(t *testing.T) {
 	}
 }
 
+func TestBuildReActGraph_PersistsNestedToolInvocation(t *testing.T) {
+	t.Parallel()
+	scripted := newScriptedChatModel(
+		makeAssistantToolCall("", "call_host_bash", "host_bash", `{"cmd":"docker images"}`),
+		makeAssistantNoTools("done"),
+	)
+	hostBash := &fakeBaseTool{
+		name:       "host_bash",
+		class:      "read",
+		parameters: `{"type":"object","properties":{"cmd":{"type":"string"}}}`,
+		runResp:    `{"ok":true}`,
+	}
+	sink := &recordingToolPersistence{}
+	g, err := BuildReActGraph(scripted, []basetool.BaseTool{hostBash}, Config{MaxIterations: 5, ToolPersistence: sink})
+	if err != nil {
+		t.Fatalf("BuildReActGraph: %v", err)
+	}
+	out, err := g.Invoke(context.Background(), &Input{UserText: "run docker images"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if out == nil || out.AssistantMessage == nil || out.AssistantMessage.Content != "done" {
+		t.Fatalf("terminal reply = %+v, want done", out)
+	}
+	starts, ends := sink.records()
+	if len(starts) != 1 || starts[0] != `host_bash:{"cmd":"docker images"}` {
+		t.Fatalf("start records = %v", starts)
+	}
+	if len(ends) != 1 || ends[0] != `host_bash:{"ok":true}` {
+		t.Fatalf("end records = %v", ends)
+	}
+}
+
 func TestBuildReActGraph_RecoversFromToolError(t *testing.T) {
 	t.Parallel()
 	scripted := newScriptedChatModel(
@@ -254,6 +287,115 @@ func TestBudgetStopModel_IgnoresPriorTurnToolBudget(t *testing.T) {
 	}
 	if inner.st.generateCalls.Load() != 1 {
 		t.Fatalf("inner model was called %d time(s), want 1", inner.st.generateCalls.Load())
+	}
+}
+
+func TestBudgetStopModel_PrunesSameBatchRepeatedToolCalls(t *testing.T) {
+	t.Parallel()
+	calls := make([]schema.ToolCall, 0, maxCallsForTool("query_k8s_snapshot")+3)
+	for i := 0; i < maxCallsForTool("query_k8s_snapshot")+3; i++ {
+		calls = append(calls, schema.ToolCall{
+			ID:       "call_k8s_" + string(rune('a'+i)),
+			Function: schema.FunctionCall{Name: "query_k8s_snapshot", Arguments: `{}`},
+		})
+	}
+	inner := newScriptedChatModel(&schema.Message{Role: schema.Assistant, ToolCalls: calls})
+	wrapped := wrapBudgetStopModel(inner)
+	got, err := wrapped.Generate(context.Background(), []*schema.Message{
+		schema.UserMessage("找 Kubernetes 异常 Pod"),
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(got.ToolCalls) != maxCallsForTool("query_k8s_snapshot") {
+		t.Fatalf("tool calls = %d, want %d", len(got.ToolCalls), maxCallsForTool("query_k8s_snapshot"))
+	}
+}
+
+func TestBudgetStopModel_PrunesSameBatchAtTotalBudget(t *testing.T) {
+	t.Parallel()
+	calls := make([]schema.ToolCall, 0, maxTotalToolCallsPerRun+3)
+	for i := 0; i < maxTotalToolCallsPerRun+3; i++ {
+		calls = append(calls, schema.ToolCall{
+			ID:       "call_tool_" + string(rune('a'+i)),
+			Function: schema.FunctionCall{Name: "tool_" + string(rune('a'+i)), Arguments: `{}`},
+		})
+	}
+	inner := newScriptedChatModel(&schema.Message{Role: schema.Assistant, ToolCalls: calls})
+	wrapped := wrapBudgetStopModel(inner)
+	got, err := wrapped.Generate(context.Background(), []*schema.Message{
+		schema.UserMessage("做一次宽排查"),
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(got.ToolCalls) != maxTotalToolCallsPerRun {
+		t.Fatalf("tool calls = %d, want total budget %d", len(got.ToolCalls), maxTotalToolCallsPerRun)
+	}
+}
+
+func TestBudgetStopModel_PruneAllReturnsEvidenceSummary(t *testing.T) {
+	t.Parallel()
+	inner := newScriptedChatModel(&schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{{
+			ID:       "call_extra",
+			Function: schema.FunctionCall{Name: "host_du_summary", Arguments: `{}`},
+		}},
+	})
+	wrapped := wrapBudgetStopModel(inner)
+	history := []*schema.Message{schema.UserMessage("对当前告警做一次深入 RCA")}
+	for i := 0; i < maxTotalToolCallsPerRun-2; i++ {
+		history = append(history, schema.ToolMessage(`{"count":0}`, "call_pad_"+string(rune('a'+i)), schema.WithToolName("query_logql")))
+	}
+	history = append(history,
+		schema.ToolMessage(`{"query":"select:host_du_summary","tools":[{"name":"host_du_summary","parameters":{"type":"object"}}]}`, "call_search", schema.WithToolName("ToolSearch")),
+		schema.ToolMessage(`{"count":1,"incidents":[{"title":"disk_high root filesystem over 90%","severity":"warning"}]}`, "call_incident", schema.WithToolName("query_incidents")),
+		schema.ToolMessage(`{"device_id":1,"results":[{"path":"/","subpaths":[{"subpath":"/var","size_human":"12.7 GiB"}]}]}`, "call_du", schema.WithToolName("host_du_summary")),
+		schema.ToolMessage(`{"device_id":1,"results":[{"files":[{"path":"/swap.img","size_human":"1.9 GiB"}]}]}`, "call_files", schema.WithToolName("host_find_large_files")),
+		schema.ToolMessage(`{"cmd":"du -sh /* | sort -rh | head","results":[{"stdout":"13G\t/var\n4.6G\t/usr\n2.7G\t/opt\n"}]}`, "call_bash", schema.WithToolName("host_bash")),
+	)
+
+	got, err := wrapped.Generate(context.Background(), history)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(got.ToolCalls) != 0 {
+		t.Fatalf("tool calls = %d, want 0", len(got.ToolCalls))
+	}
+	if !strings.Contains(got.Content, "disk_high") || !strings.Contains(got.Content, "/var=12.7 GiB") || !strings.Contains(got.Content, "/swap.img=1.9 GiB") || !strings.Contains(got.Content, "13G /var") {
+		t.Fatalf("content missing evidence summary: %q", got.Content)
+	}
+	if strings.Contains(got.Content, "select:host_du_summary") {
+		t.Fatalf("content leaked ToolSearch schema evidence: %q", got.Content)
+	}
+	if !strings.Contains(got.Content, "下一步") {
+		t.Fatalf("content missing next-step guidance: %q", got.Content)
+	}
+}
+
+func TestBudgetStopModel_BlocksHostToolAfterEmptyNamedDeviceLookup(t *testing.T) {
+	t.Parallel()
+	inner := newScriptedChatModel(&schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{{
+			ID:       "call_processes",
+			Function: schema.FunctionCall{Name: "get_host_processes", Arguments: `{"device_ids":[1],"top_n":5}`},
+		}},
+	})
+	wrapped := wrapBudgetStopModel(inner)
+	got, err := wrapped.Generate(context.Background(), []*schema.Message{
+		schema.UserMessage("找 edge-001 最占内存的进程"),
+		schema.ToolMessage(`{"count":0,"items":[]}`, "call_devices", schema.WithToolName("query_devices")),
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(got.ToolCalls) != 0 {
+		t.Fatalf("tool calls = %d, want blocked", len(got.ToolCalls))
+	}
+	if !strings.Contains(got.Content, "edge-001") || !strings.Contains(got.Content, "不会自动改用其他在线设备") {
+		t.Fatalf("content = %q, want explicit no-fallback clarification", got.Content)
 	}
 }
 
@@ -442,8 +584,8 @@ func TestAssembleMessages_NilInputFails(t *testing.T) {
 func TestConfig_Defaults(t *testing.T) {
 	t.Parallel()
 	c := Config{}.applyDefaults()
-	if c.MaxIterations != 30 {
-		t.Errorf("MaxIterations default = %d, want 30", c.MaxIterations)
+	if c.MaxIterations != 12 {
+		t.Errorf("MaxIterations default = %d, want 12", c.MaxIterations)
 	}
 	if c.ToolTimeout.Seconds() != 15 {
 		t.Errorf("ToolTimeout default = %v, want 15s", c.ToolTimeout)

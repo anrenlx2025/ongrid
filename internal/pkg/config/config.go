@@ -58,6 +58,7 @@ type Config struct {
 	Alert          AlertConfig
 	Logs           LogsConfig
 	Traces         TracesConfig
+	PacketCapture  PacketCaptureConfig
 	Skills         SkillsConfig
 }
 
@@ -99,6 +100,52 @@ type TracesConfig struct {
 	// env: ONGRID_TRACE_QUERY_URL; defaults from docker-compose env
 	// block to http://tempo:3200.
 	URL string
+}
+
+// PacketCaptureConfig wires optional private packet dissection. Manager still
+// stores and serves the raw PCAP when the parser is disabled; configured parser
+// output is a Wireshark-style packet list / protocol tree / hex view.
+type PacketCaptureConfig struct {
+	// RawDir is the manager-owned private raw PCAP directory.
+	// env: ONGRID_PACKET_CAPTURE_RAW_DIR; default inside the container data dir.
+	RawDir string
+	// ParserURL is the private pcap-parser HTTP root, for example
+	// http://pcap-parser:8080. Empty disables parser integration.
+	// env: ONGRID_PACKET_PARSER_URL; default empty.
+	ParserURL string
+	// PublicArtifactURL is the manager URL that the private parser can call
+	// back to download a short-lived raw PCAP capability. Defaults to
+	// ONGRID_PUBLIC_URL when empty.
+	// env: ONGRID_PACKET_PARSER_ARTIFACT_BASE_URL; default empty.
+	ParserArtifactBaseURL string
+	// ParserTokenSecret signs short-lived raw download capabilities and
+	// short-lived raw download capabilities. Empty disables parser integration.
+	// env: ONGRID_PACKET_PARSER_TOKEN_SECRET; default empty.
+	ParserTokenSecret string
+	// ParserManagerPrivateKeyFile is an Ed25519 PKIX private key PEM file used
+	// to sign the pcap-parser manager_request_token. The parser receives the
+	// corresponding public key.
+	// env: ONGRID_PACKET_PARSER_MANAGER_PRIVATE_KEY_FILE; default empty.
+	ParserManagerPrivateKeyFile string
+	// ParserClientCertFile/ParserClientKeyFile are the Manager mTLS client
+	// certificate pair used when calling the private parser service.
+	// env: ONGRID_PACKET_PARSER_CLIENT_CERT_FILE / ONGRID_PACKET_PARSER_CLIENT_KEY_FILE.
+	ParserClientCertFile string
+	ParserClientKeyFile  string
+	// ParserCAFile verifies the private parser service certificate.
+	// env: ONGRID_PACKET_PARSER_CA_FILE; default empty uses system roots.
+	ParserCAFile string
+	// ParserTimeout caps a single parser request.
+	// env: ONGRID_PACKET_PARSER_TIMEOUT; default 2m.
+	ParserTimeout time.Duration
+	// ParserMaxPackets/ParserMaxBytes cap parser output separately from
+	// capture limits.
+	// env: ONGRID_PACKET_PARSER_MAX_PACKETS / ONGRID_PACKET_PARSER_MAX_BYTES.
+	ParserMaxPackets uint64
+	ParserMaxBytes   uint64
+	// ParserIncludeHex asks pcap-parser for Packet Bytes data.
+	// env: ONGRID_PACKET_PARSER_INCLUDE_HEX; default true.
+	ParserIncludeHex bool
 }
 
 // GrafanaConfig holds first-boot seed values for the Grafana integration.
@@ -381,8 +428,22 @@ func Load() (*Config, error) {
 		K8sEventRetention:       getEnvDuration("ONGRID_K8S_EVENT_RETENTION", 24*time.Hour),
 		K8sEventMaxPerCluster:   getEnvInt("ONGRID_K8S_EVENT_MAX_PER_CLUSTER", 5000),
 		K8sEventCleanupInterval: getEnvDuration("ONGRID_K8S_EVENT_CLEANUP_INTERVAL", time.Hour),
-		Logs:                    LogsConfig{URL: getEnv("ONGRID_LOG_QUERY_URL", "http://loki:3100")},
-		Traces:                  TracesConfig{URL: getEnv("ONGRID_TRACE_QUERY_URL", "http://tempo:3200")},
+		Logs:                    LogsConfig{URL: getOptionalURL("ONGRID_LOG_QUERY_URL", "http://loki:3100")},
+		Traces:                  TracesConfig{URL: getOptionalURL("ONGRID_TRACE_QUERY_URL", "http://tempo:3200")},
+		PacketCapture: PacketCaptureConfig{
+			RawDir:                      getEnv("ONGRID_PACKET_CAPTURE_RAW_DIR", ""),
+			ParserURL:                   getEnv("ONGRID_PACKET_PARSER_URL", ""),
+			ParserArtifactBaseURL:       getEnv("ONGRID_PACKET_PARSER_ARTIFACT_BASE_URL", ""),
+			ParserTokenSecret:           getEnv("ONGRID_PACKET_PARSER_TOKEN_SECRET", ""),
+			ParserManagerPrivateKeyFile: getEnv("ONGRID_PACKET_PARSER_MANAGER_PRIVATE_KEY_FILE", ""),
+			ParserClientCertFile:        getEnv("ONGRID_PACKET_PARSER_CLIENT_CERT_FILE", ""),
+			ParserClientKeyFile:         getEnv("ONGRID_PACKET_PARSER_CLIENT_KEY_FILE", ""),
+			ParserCAFile:                getEnv("ONGRID_PACKET_PARSER_CA_FILE", ""),
+			ParserTimeout:               getEnvDuration("ONGRID_PACKET_PARSER_TIMEOUT", 2*time.Minute),
+			ParserMaxPackets:            uint64(getEnvInt("ONGRID_PACKET_PARSER_MAX_PACKETS", 1000)),
+			ParserMaxBytes:              uint64(getEnvInt("ONGRID_PACKET_PARSER_MAX_BYTES", 64<<20)),
+			ParserIncludeHex:            getEnvBool("ONGRID_PACKET_PARSER_INCLUDE_HEX", true),
+		},
 	}
 
 	c.DB.Dialect = getEnv("ONGRID_DB_DIALECT", "mysql")
@@ -512,6 +573,19 @@ func getEnv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func getOptionalURL(key, def string) string {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "off", "disabled", "disable", "none", "null":
+		return ""
+	default:
+		return strings.TrimSpace(v)
+	}
 }
 
 // splitProviderModels parses a comma-separated list of model slugs into

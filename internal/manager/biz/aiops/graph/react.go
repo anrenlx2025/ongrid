@@ -89,7 +89,7 @@ func BuildReActGraph(
 	// 1. Build the inner eino react agent. We pass our adapted tools
 	//    in via ToolsConfig.Tools — eino infers the schema by calling
 	//    each tool's Info(ctx).
-	einoTools := WrapBaseTools(tools)
+	einoTools := WrapBaseTools(tools, cfg.ToolPersistence)
 	baseTools := make([]einotool.BaseTool, 0, len(einoTools))
 	for _, t := range einoTools {
 		baseTools = append(baseTools, t)

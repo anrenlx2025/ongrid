@@ -5,5 +5,6 @@ export { Card } from './Card';
 export { Chip } from './Chip';
 export { EmptyState } from './EmptyState';
 export { PageHeader } from './PageHeader';
+export { PaginationFooter } from './PaginationFooter';
 export { Button } from './Button';
 export { RoleSelect, type RoleFilterValue } from './RoleSelect';

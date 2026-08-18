@@ -3,16 +3,12 @@
 // worker is an independent graph.Invoke against a tool-bag filtered by
 // the worker agent's persona (whitelist + disallowed_tools — black wins).
 //
-// Non-goals (first version):
-//   - Worker nesting: a worker cannot spawn another worker. SpawnWorker
-//     is exposed only on the Runtime, and AgentTool's wiring keeps it on
-//     the coordinator.
-//   - Cross-session memory sharing: each worker has its own logical
-//     session id so its message history is opaque to its parent. The
-//     parent → worker relationship is now persisted on chat_sessions
-//     (agent_id / parent_session_id / background columns); the in-memory
-//     map is still authoritative for live status until a worker tile UI
-//     queries those columns directly.
+// Each worker owns an internal work session. The root session remains owned
+// by the default assistant; parent_session_id records only the immediate
+// collaboration edge, while root_session_id preserves the user task chain.
+// Worker-to-worker delegation is introduced only through an explicit budgeted
+// policy at Resolve time, never by giving every worker an unrestricted spawn
+// tool.
 //
 // State machine (figure):
 //
@@ -142,15 +138,15 @@ type SpawnRequest struct {
 	// callers don't need it).
 	ParentEmit Emit
 	// SessionKind overrides the persisted chat_sessions.kind for the
-	// worker session. Empty = "user" (default). The investigator usecase
+	// worker session. Empty = "work". The investigator usecase
 	// sets "investigation" so auto-spawned RCA transcripts stay out of
 	// the /chat list.
 	SessionKind string
 	// OwnerUserID overrides the persisted chat_sessions.user_id when
 	// the worker has no ParentSession to inherit from. The investigator
 	// usecase passes 0 to mark these rows as "system-owned" — they
-	// don't belong to any operator and the /chat filter (which checks
-	// user_id) won't surface them.
+	// don't belong to any operator and the internal audience prevents
+	// them from appearing in the primary chat list.
 	OwnerUserID uint64
 	// Locale is the UI language ("en", "zh-CN", ...) the worker's reply
 	// should use. Threaded from the parent coordinator's request so a
@@ -275,12 +271,26 @@ func (rt *Runtime) SpawnWorker(ctx context.Context, req SpawnRequest) (*Worker, 
 	// flow remains usable in tests / sync calls without a parent row.
 	var ownerUserID uint64
 	var parentRefForRow *string
+	var rootRefForRow *string
+	var ownerAgentRefForRow *string
 	if req.ParentSession != "" && rt.cfg.Sessions != nil {
 		parentSess, err := rt.cfg.Sessions.GetSession(ctx, req.ParentSession)
 		if err == nil && parentSess != nil {
+			if parentSess.ParentSessionID != nil && *parentSess.ParentSessionID != "" {
+				return nil, fmt.Errorf("chatruntime: delegation depth exceeded for parent session %q", req.ParentSession)
+			}
 			ownerUserID = parentSess.UserID
 			pid := req.ParentSession
 			parentRefForRow = &pid
+			rootID := parentSess.ID
+			if parentSess.RootSessionID != nil && *parentSess.RootSessionID != "" {
+				rootID = *parentSess.RootSessionID
+			}
+			rootRefForRow = &rootID
+			if parentSess.OwnerAgentID != nil && *parentSess.OwnerAgentID != "" {
+				owner := *parentSess.OwnerAgentID
+				ownerAgentRefForRow = &owner
+			}
 		}
 		// On lookup failure we proceed without a parent ref so the
 		// worker can still run; the audit row simply has parent_session_id
@@ -297,7 +307,7 @@ func (rt *Runtime) SpawnWorker(ctx context.Context, req SpawnRequest) (*Worker, 
 		// transcript so /chat list can filter; OwnerUserID is used
 		// when there's no ParentSession to inherit from (e.g. the
 		// alert investigator spawns system-owned workers).
-		kind := aiopsmodel.SessionKindUser
+		kind := aiopsmodel.SessionKindWork
 		if req.SessionKind != "" {
 			kind = req.SessionKind
 		}
@@ -309,6 +319,10 @@ func (rt *Runtime) SpawnWorker(ctx context.Context, req SpawnRequest) (*Worker, 
 			ID:              sessID,
 			UserID:          effectiveOwner,
 			Title:           fmt.Sprintf("Worker: %s", agentDef.Name),
+			RootSessionID:   rootRefForRow,
+			Initiator:       aiopsmodel.SessionInitiatorAgent,
+			Audience:        aiopsmodel.SessionAudienceInternal,
+			OwnerAgentID:    ownerAgentRefForRow,
 			AgentID:         &agentName,
 			ParentSessionID: parentRefForRow,
 			Background:      req.Background,
@@ -558,7 +572,10 @@ func (rt *Runtime) GetWorker(workerID string) (*Worker, bool) {
 // matching Handle()'s "user message lands on disk before the LLM call"
 // invariant — same survival semantics on a graph crash.
 func (rt *Runtime) runWorker(ctx context.Context, agentDef *Agent, sessID, userText, locale string, parentEmit Emit, workerID string) (string, error) {
-	workerTools := filterToolsForAgent(rt.toolBagSnapshot(), agentDef, false)
+	// Workers are not an authorization bypass. The coordinator stamps the
+	// resolved gate on context; absent wiring fails closed so a direct spawn
+	// cannot expose mutating tools unexpectedly.
+	workerTools := filterToolsForAgentRole(rt.toolBagSnapshot(), agentDef, false, !basetool.AgentWriteAllowedFromContext(ctx))
 
 	// Thread the persona-filtered tool view onto ctx so ToolSearch
 	// (which runs inside the worker graph) only returns tools the
@@ -577,11 +594,6 @@ func (rt *Runtime) runWorker(ctx context.Context, agentDef *Agent, sessID, userT
 	}
 	if agentDef.Model != "" {
 		cfg.Model = agentDef.Model
-	}
-
-	g, err := graph.BuildReActGraph(rt.cfg.ChatModel, workerTools, cfg)
-	if err != nil {
-		return "", fmt.Errorf("chatruntime: build worker graph: %w", err)
 	}
 
 	// Persist the user-role prompt under the worker's session id. Same
@@ -621,6 +633,11 @@ func (rt *Runtime) runWorker(ctx context.Context, agentDef *Agent, sessID, userT
 		deps.SSE = workerToolForwarder(parentEmit, workerID)
 		handlers = callbacks.NewDefaultHandlers(deps)
 	}
+	cfg.ToolPersistence = callbacks.EnableSynchronousToolPersistence(handlers)
+	g, err := graph.BuildReActGraph(rt.cfg.ChatModel, workerTools, cfg)
+	if err != nil {
+		return "", fmt.Errorf("chatruntime: build worker graph: %w", err)
+	}
 
 	// Thread the coordinator's resolved LLM choice (stamped on ctx via
 	// basetool.WithLLMChoice at the SpawnWorker boundary) onto the
@@ -635,7 +652,10 @@ func (rt *Runtime) runWorker(ctx context.Context, agentDef *Agent, sessID, userT
 		invokeOpts = append(invokeOpts, compose.WithChatModelOption(mopts...))
 	}
 	invokeOpts = append(invokeOpts, compose.WithToolsNodeOption(
-		compose.WithToolOption(graph.WithInvokeOpts(basetool.WithUserText(userText))),
+		compose.WithToolOption(graph.WithInvokeOpts(
+			basetool.WithUserText(userText),
+			basetool.WithHostWritePermission(basetool.HostWriteAllowedFromContext(ctx)),
+		)),
 	))
 	// Sever the worker's callback chain from the coordinator's. The ctx we
 	// were handed carries the parent graph's callback manager (eino propagates
@@ -736,11 +756,9 @@ func (rt *Runtime) notificationFor(w *Worker) Event {
 	return Event{Type: EventTaskNotification, Notification: notif}
 }
 
-// coordinatorOnlyTools is the implicit blacklist applied to every worker
-// in this first-version implementation: the control tools live on
-// the coordinator only. Even if a worker persona accidentally whitelists
-// "AgentTool" we still strip it here, so workers cannot spawn nested
-// workers / send messages / stop tasks.
+// coordinatorOnlyTools are control-plane tools. AgentTool is selectively
+// re-enabled for specialists that explicitly declare can_delegate; the
+// SpawnWorker depth guard remains the authoritative recursion boundary.
 var coordinatorOnlyTools = map[string]bool{
 	"AgentTool":   true,
 	"SendMessage": true,
@@ -765,11 +783,9 @@ var alwaysAvailableTools = map[string]bool{
 //   - DisallowedTools is then subtracted. Pattern "*_skill" is a
 //     suffix wildcard supported for ergonomic blacklists (
 //     example).
-//   - The control tools (AgentTool / SendMessage / TaskStop) are
-//     stripped only for workers (isCoordinator=false) — workers cannot
-//     spawn nested workers in this first version. Coordinator passes
-//     isCoordinator=true so AgentTool stays visible even when the
-//     coordinator persona's Tools whitelist is non-empty.
+//   - SendMessage and TaskStop are root-session control tools. AgentTool is
+//     visible to the default assistant and to a specialist declaring
+//     CanDelegate; SpawnWorker enforces a maximum delegation depth of two.
 //   - viewerOnly==true drops every tool whose Info().Class is
 //     not "read". Viewer chat is degraded to single-agent read-only,
 //     which is fine — the coordinator can still answer with read tools
@@ -836,7 +852,9 @@ func filterToolsForAgentRole(bag []basetool.BaseTool, agentDef *Agent, isCoordin
 		// regardless of any persona whitelist — control plane.
 		if coordinatorOnlyTools[info.Name] {
 			if !isCoordinator {
-				continue
+				if info.Name != "AgentTool" || agentDef == nil || !agentDef.CanDelegate {
+					continue
+				}
 			}
 		} else if agentDef != nil && len(whitelist) > 0 && !whitelist[info.Name] {
 			continue

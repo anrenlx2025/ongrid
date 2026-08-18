@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -26,6 +27,49 @@ type fakeBaseTool struct {
 	calls       atomic.Int32
 	lastArgs    string
 	lastOptsLen int
+}
+
+type recordingToolPersistence struct {
+	mu     sync.Mutex
+	starts []string
+	ends   []string
+}
+
+type concurrentCountTool struct {
+	name  string
+	class string
+	calls atomic.Int32
+}
+
+func (t *concurrentCountTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
+	return &basetool.ToolInfo{
+		Name:       t.name,
+		Class:      t.class,
+		Parameters: json.RawMessage(`{"type":"object","properties":{}}`),
+	}, nil
+}
+
+func (t *concurrentCountTool) InvokableRun(_ context.Context, _ string, _ ...basetool.InvokeOption) (string, error) {
+	t.calls.Add(1)
+	return `{"ok":true}`, nil
+}
+
+func (r *recordingToolPersistence) PersistToolStart(_ context.Context, name, args string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.starts = append(r.starts, name+":"+args)
+}
+
+func (r *recordingToolPersistence) PersistToolEnd(_ context.Context, name, response string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ends = append(r.ends, name+":"+response)
+}
+
+func (r *recordingToolPersistence) records() (starts, ends []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.starts...), append([]string(nil), r.ends...)
 }
 
 func (f *fakeBaseTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
@@ -148,6 +192,26 @@ func TestWrapBaseTool_InvokableRunForwardsArgs(t *testing.T) {
 	}
 	if inner.lastArgs != `{"a":1}` {
 		t.Errorf("lastArgs = %q, want %q", inner.lastArgs, `{"a":1}`)
+	}
+}
+
+func TestWrapBaseTool_PersistsActualInvocationAtAdapterBoundary(t *testing.T) {
+	t.Parallel()
+	inner := &fakeBaseTool{name: "host_bash", class: "read", runResp: `{"devices":[{"ok":true}]}`}
+	sink := &recordingToolPersistence{}
+	wrapped := WrapBaseTool(inner)
+	out, err := wrapped.InvokableRun(context.Background(), `{"device_ids":[1],"cmd":"docker images"}`,
+		WithToolInvocationPersistence(sink),
+	)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	starts, ends := sink.records()
+	if len(starts) != 1 || starts[0] != `host_bash:{"device_ids":[1],"cmd":"docker images"}` {
+		t.Fatalf("start records = %v", starts)
+	}
+	if len(ends) != 1 || ends[0] != "host_bash:"+out {
+		t.Fatalf("end records = %v", ends)
 	}
 }
 
@@ -276,15 +340,15 @@ func TestEinoToolAdapter_PerToolCallCap(t *testing.T) {
 	}
 }
 
-func TestEinoToolAdapter_QueryPromQLUsesGenericCallCap(t *testing.T) {
+func TestEinoToolAdapter_QueryPromQLUsesStrictCallCap(t *testing.T) {
 	t.Parallel()
 	inner := &fakeBaseTool{name: "query_promql", class: "read", runResp: `{"v":1}`}
 	a := &einoToolAdapter{inner: inner, memo: newToolMemo()}
 	ctx := context.Background()
 	limit := maxCallsForTool("query_promql")
 
-	if limit != maxToolCallsPerRun {
-		t.Fatalf("query_promql limit = %d, want generic %d", limit, maxToolCallsPerRun)
+	if limit != 4 {
+		t.Fatalf("query_promql limit = %d, want 4", limit)
 	}
 	for i := 0; i < limit; i++ {
 		out, _ := a.InvokableRun(ctx, fmt.Sprintf(`{"q":"m%d"}`, i))
@@ -307,12 +371,13 @@ func TestEinoToolAdapter_QueryPromQLUsesGenericCallCap(t *testing.T) {
 func TestEinoToolAdapter_ReadToolsUseGenericCallCap(t *testing.T) {
 	t.Parallel()
 	for name, wantLimit := range map[string]int{
-		"AgentTool":             maxToolCallsPerRun,
-		"query_logql":           maxToolCallsPerRun,
-		"query_traceql":         maxToolCallsPerRun,
-		"host_bash":             maxToolCallsPerRun,
+		"AgentTool":             4,
+		"query_logql":           4,
+		"query_traceql":         4,
+		"host_bash":             4,
 		"host_du_summary":       maxToolCallsPerRun,
 		"host_find_large_files": maxToolCallsPerRun,
+		"query_k8s_snapshot":    4,
 	} {
 		name := name
 		wantLimit := wantLimit
@@ -339,6 +404,71 @@ func TestEinoToolAdapter_ReadToolsUseGenericCallCap(t *testing.T) {
 				t.Fatalf("%s executions = %d, want %d", name, got, limit)
 			}
 		})
+	}
+}
+
+func TestEinoToolAdapter_PerToolCallCapReservesBeforeConcurrentExecution(t *testing.T) {
+	t.Parallel()
+	inner := &concurrentCountTool{name: "host_bash", class: "read"}
+	a := &einoToolAdapter{inner: inner, memo: newToolMemo()}
+	ctx := context.Background()
+	limit := maxCallsForTool("host_bash")
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	outs := make(chan string, limit*3)
+	for i := 0; i < limit*3; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			out, _ := a.InvokableRun(ctx, fmt.Sprintf(`{"cmd":"echo %d"}`, i))
+			outs <- out
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(outs)
+
+	var budgeted int
+	for out := range outs {
+		if strings.Contains(out, "call_budget_exceeded") {
+			budgeted++
+		}
+	}
+	if got := inner.calls.Load(); got != int32(limit) {
+		t.Fatalf("concurrent executions = %d, want exactly limit %d", got, limit)
+	}
+	if budgeted == 0 {
+		t.Fatalf("expected over-limit concurrent calls to receive budget results")
+	}
+}
+
+func TestEinoToolAdapter_TotalCallCapStopsWideInvestigation(t *testing.T) {
+	t.Parallel()
+	memo := newToolMemo()
+	ctx := context.Background()
+	var executed int32
+	for i := 0; i < maxTotalToolCallsPerRun; i++ {
+		inner := &concurrentCountTool{name: fmt.Sprintf("tool_%02d", i), class: "read"}
+		a := &einoToolAdapter{inner: inner, memo: memo}
+		out, _ := a.InvokableRun(ctx, `{}`)
+		if strings.Contains(out, "call_budget_exceeded") {
+			t.Fatalf("tool %d should execute before total cap, got %s", i, out)
+		}
+		executed += inner.calls.Load()
+	}
+	over := &concurrentCountTool{name: "tool_over", class: "read"}
+	a := &einoToolAdapter{inner: over, memo: memo}
+	out, _ := a.InvokableRun(ctx, `{}`)
+	if !strings.Contains(out, "call_budget_exceeded") {
+		t.Fatalf("over total cap should return budget result, got %q", out)
+	}
+	if over.calls.Load() != 0 {
+		t.Fatalf("over total cap tool executed %d times, want 0", over.calls.Load())
+	}
+	if executed != int32(maxTotalToolCallsPerRun) {
+		t.Fatalf("executed before cap = %d, want %d", executed, maxTotalToolCallsPerRun)
 	}
 }
 

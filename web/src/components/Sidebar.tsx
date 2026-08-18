@@ -21,6 +21,7 @@ import {
   Route,
   Siren,
   Wrench,
+  Hammer,
   BookOpen,
   GitBranch,
   ChevronDown,
@@ -232,7 +233,7 @@ export function Sidebar() {
 
   if (sidebarCollapsed) {
     return (
-      <aside className="flex h-full w-14 shrink-0 flex-col items-center gap-2 border-r border-zinc-800/60 bg-zinc-900 py-3">
+      <aside className="flex h-full min-h-0 w-14 shrink-0 flex-col items-center gap-2 overflow-hidden border-r border-zinc-800/60 bg-zinc-900 py-3">
         {/* Brand mark + expand toggle: logo doubles as the expand
             affordance — saves a row in the narrow column. */}
         <button
@@ -342,7 +343,7 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-zinc-800/60 bg-zinc-900">
+    <aside className="flex h-full min-h-0 w-64 shrink-0 flex-col overflow-hidden border-r border-zinc-800/60 bg-zinc-900">
       {/* Brand row — keeps the product identity visible while the user
           row below still owns the avatar + menu. Clicking the wordmark
           goes home. */}
@@ -476,6 +477,7 @@ export function Sidebar() {
           defaultOpen={false}
           items={[
             { key: 'tasks', to: '/tasks', icon: CalendarClock, label: tr('任务', 'Tasks') },
+            { key: 'tools', to: '/tools', icon: Hammer, label: tr('工具', 'Tools') },
             { key: 'artifacts', to: '/pages', icon: AppWindow, label: tr('产物', 'Artifacts') },
           ]}
         />
@@ -749,6 +751,7 @@ function CollapsibleSection({
 	initialHiddenKeys?: string[];
 }) {
   const { tr } = useI18n();
+  const location = useLocation();
   const manageRef = useRef<HTMLDivElement | null>(null);
   const manageMenuRef = useRef<HTMLDivElement | null>(null);
   const manageButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -775,6 +778,11 @@ function CollapsibleSection({
       return [];
     }
   });
+  const hasActiveItem = items.some((item) => {
+    if (item.exact) return location.pathname === item.to;
+    const [path] = item.to.split('?');
+    return location.pathname === path || location.pathname.startsWith(`${path}/`);
+  });
 	useEffect(() => {
 		const marker = `sidebar.${storageKey}.upgrade.v0_10`;
 		if (storageKey !== 'resources' || initialHiddenKeys.length === 0 || localStorage.getItem(marker)) return;
@@ -786,6 +794,24 @@ function CollapsibleSection({
 			setHiddenKeys(initialHiddenKeys);
 		} catch { /* localStorage unavailable */ }
 	}, [initialHiddenKeys, storageKey]);
+  useEffect(() => {
+    if (storageKey !== 'operations') return;
+    const marker = 'sidebar.operations.upgrade.tools.v1';
+    try {
+      if (localStorage.getItem(marker)) return;
+      localStorage.setItem(marker, '1');
+      setHiddenKeys((current) => {
+        const next = current.filter((key) => key !== 'tools');
+        localStorage.setItem(`sidebar.section.${storageKey}.hidden`, JSON.stringify(next));
+        return next;
+      });
+    } catch {
+      setHiddenKeys((current) => current.filter((key) => key !== 'tools'));
+    }
+  }, [storageKey]);
+  useEffect(() => {
+    if (hasActiveItem) setOpen(true);
+  }, [hasActiveItem]);
 
   const updateManagePosition = () => {
     const rect = manageButtonRef.current?.getBoundingClientRect();

@@ -28,6 +28,7 @@ type toolMemo struct {
 	mu     sync.Mutex
 	m      map[string]string // (tool\x00args) -> result, identical-call cache
 	counts map[string]int    // tool name -> distinct executions this run
+	total  int               // all distinct executions this run
 	last   map[string]string // tool name -> most recent successful result this run
 }
 
@@ -60,6 +61,21 @@ func (t *toolMemo) bump(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.counts[name]++
+	t.total++
+}
+
+func (t *toolMemo) reserve(name string, perToolLimit, totalLimit int) (int, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if perToolLimit > 0 && t.counts[name] >= perToolLimit {
+		return t.counts[name], false
+	}
+	if totalLimit > 0 && t.total >= totalLimit {
+		return t.counts[name], false
+	}
+	t.counts[name]++
+	t.total++
+	return t.counts[name], true
 }
 
 func (t *toolMemo) putLast(name, result string) {
@@ -88,11 +104,21 @@ const (
 // dozen metrics, query_alert_rules over and over) without converging. Past
 // the cap the tool returns a "synthesize now" directive instead of running,
 // which forces the agent to answer from what it already gathered. Generous
-// enough that normal multi-step investigation isn't clipped.
-const maxToolCallsPerRun = 30
+// enough that normal multi-step investigation isn't clipped. A 30-call cap
+// merely turns a wrong route into a long, expensive failure, so the general
+// limit is intentionally small and evidence tools have a stricter limit.
+const maxToolCallsPerRun = 6
+
+const maxTotalToolCallsPerRun = 8
 
 func maxCallsForTool(name string) int {
 	switch name {
+	case "ToolSearch":
+		return 2
+	case toolNameQueryPromQL, "query_logql", "query_traceql":
+		return 4
+	case "host_bash", "query_k8s_snapshot", "AgentTool":
+		return 4
 	case "draft_config_change":
 		// Only a confirmable config_draft increments this counter;
 		// config_validation_failed remains retryable so the model can repair
@@ -110,6 +136,10 @@ func countFailedToolCall(name string) bool {
 	default:
 		return true
 	}
+}
+
+func reservesBeforeExecution(name string) bool {
+	return name != toolNameDraftConfigChange
 }
 
 func countSuccessfulToolCall(name, result string) bool {
@@ -246,7 +276,26 @@ func WrapBaseTool(t basetool.BaseTool) einotool.InvokableTool {
 // passed through eino's `tool.Option` slot. Unexported so callers
 // route through WithInvokeOpts.
 type einoInvokeOptKey struct {
-	opts []basetool.InvokeOption
+	opts        []basetool.InvokeOption
+	persistence ToolInvocationPersistence
+}
+
+// ToolInvocationPersistence records the lifecycle of an actual adapter
+// invocation. Eino's nested ToolsNode does not reliably propagate component
+// callbacks to the outer graph, so the adapter is the only reliable place to
+// persist a tool result before the next model turn is assembled.
+type ToolInvocationPersistence interface {
+	PersistToolStart(ctx context.Context, toolName, argumentsInJSON string)
+	PersistToolEnd(ctx context.Context, toolName, response string)
+}
+
+// WithToolInvocationPersistence passes the persistence sink through Eino's
+// documented per-tool option channel. ToolsNode may derive a child context
+// without request values, but it preserves tool options for InvokableRun.
+func WithToolInvocationPersistence(sink ToolInvocationPersistence) einotool.Option {
+	return einotool.WrapImplSpecificOptFn(func(k *einoInvokeOptKey) {
+		k.persistence = sink
+	})
 }
 
 // WithInvokeOpts is the eino-side option helper that carries
@@ -274,7 +323,8 @@ func WithInvokeOpts(opts ...basetool.InvokeOption) einotool.Option {
 // PR-3 decorator chain wrapped *around* the inner tool *before* it
 // reaches this adapter.
 type einoToolAdapter struct {
-	inner basetool.BaseTool
+	inner       basetool.BaseTool
+	persistence ToolInvocationPersistence
 	// memo is the per-run identical-call cache (nil = memoization off, e.g.
 	// the single-tool WrapBaseTool path used by tests). Shared across all
 	// adapters built by one WrapBaseTools call.
@@ -357,13 +407,25 @@ func (a *einoToolAdapter) Info(ctx context.Context) (*schema.ToolInfo, error) {
 // True nil-receiver / unrecoverable bugs (we wrote the wrong inner)
 // still surface as Go error so eino can panic-loud, since those are
 // not user-fixable.
-func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
+func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (out string, err error) {
 	if a == nil || a.inner == nil {
 		return "", fmt.Errorf("graph: tool adapter has nil inner tool")
 	}
+	// Persist at the adapter boundary instead of depending on the nested
+	// ToolsNode callback. The latter may omit Tool.OnEnd, leaving a valid tool
+	// execution represented as an auto-healed failure in chat history.
+	a.resolveInfo(ctx)
+	resolved := einotool.GetImplSpecificOptions(&einoInvokeOptKey{}, opts...)
+	sink := a.persistence
+	if sink == nil {
+		sink = resolved.persistence
+	}
+	if sink != nil && a.cacheName != "" {
+		sink.PersistToolStart(ctx, a.cacheName, argumentsInJSON)
+		defer func() { sink.PersistToolEnd(ctx, a.cacheName, out) }()
+	}
 	var memoKey string
 	if a.memo != nil {
-		a.resolveInfo(ctx)
 		// 1. Identical-call memo (read tools only): a byte-identical repeat
 		//    returns the prior result without re-executing.
 		if a.cacheable && a.cacheName != "" {
@@ -377,21 +439,26 @@ func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON stri
 		//    back a "synthesize now" directive. Catches the distinct-args
 		//    repeat loop (query_promql/query_alert_rules called over and over)
 		//    that the memo can't.
-		if a.cacheName != "" && a.memo.count(a.cacheName) >= maxCallsForTool(a.cacheName) {
-			return toolBudgetExceeded(a.cacheName, a.memo.count(a.cacheName)), nil
-		}
 		if blocked, ok := a.draftMetricCatalogPreflight(argumentsInJSON); ok {
 			return blocked, nil
 		}
+		if a.cacheName != "" {
+			if reservesBeforeExecution(a.cacheName) {
+				if n, ok := a.memo.reserve(a.cacheName, maxCallsForTool(a.cacheName), maxTotalToolCallsPerRun); !ok {
+					return toolBudgetExceeded(a.cacheName, n), nil
+				}
+			} else if a.memo.count(a.cacheName) >= maxCallsForTool(a.cacheName) {
+				return toolBudgetExceeded(a.cacheName, a.memo.count(a.cacheName)), nil
+			}
+		}
 	}
-	resolved := einotool.GetImplSpecificOptions(&einoInvokeOptKey{}, opts...)
-	out, err := a.inner.InvokableRun(ctx, argumentsInJSON, resolved.opts...)
+	out, err = a.inner.InvokableRun(ctx, argumentsInJSON, resolved.opts...)
 	if err != nil {
 		// Count most failures toward the cap so a failing tool cannot be
 		// hammered. draft_config_change is the exception: validation failures
 		// are common while the model corrects structured config args, and only
 		// a successful draft should consume the one-draft-per-turn budget.
-		if a.memo != nil && a.cacheName != "" && countFailedToolCall(a.cacheName) {
+		if a.memo != nil && a.cacheName != "" && countFailedToolCall(a.cacheName) && !reservesBeforeExecution(a.cacheName) {
 			a.memo.bump(a.cacheName)
 		}
 		// Re-shape as a tool-result-style JSON so the LLM gets it as a
@@ -419,7 +486,9 @@ func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON stri
 	// the same user turn. Only a real config_draft consumes the one-draft cap.
 	if a.memo != nil && a.cacheName != "" {
 		if countSuccessfulToolCall(a.cacheName, out) {
-			a.memo.bump(a.cacheName)
+			if !reservesBeforeExecution(a.cacheName) {
+				a.memo.bump(a.cacheName)
+			}
 		}
 		a.memo.putLast(a.cacheName, out)
 	}
@@ -435,17 +504,21 @@ func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON stri
 // eino tool.BaseTool ready to feed into compose.ToolsNodeConfig.Tools.
 // Nil entries in the input are skipped so callers can pass a sparse
 // list (e.g. from a skill activation filter).
-func WrapBaseTools(tools []basetool.BaseTool) []einotool.BaseTool {
+func WrapBaseTools(tools []basetool.BaseTool, persistence ...ToolInvocationPersistence) []einotool.BaseTool {
 	// One memo shared by every tool in this build = scoped to one run
 	// (the graph is rebuilt per request). The single-tool WrapBaseTool
 	// path deliberately leaves memo nil (tests / non-graph callers).
 	memo := newToolMemo()
+	var sink ToolInvocationPersistence
+	if len(persistence) > 0 {
+		sink = persistence[0]
+	}
 	out := make([]einotool.BaseTool, 0, len(tools))
 	for _, t := range tools {
 		if t == nil {
 			continue
 		}
-		out = append(out, &einoToolAdapter{inner: t, memo: memo})
+		out = append(out, &einoToolAdapter{inner: t, memo: memo, persistence: sink})
 	}
 	return out
 }

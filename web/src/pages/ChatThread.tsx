@@ -1,7 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { ChatInput, type ModelSelection, type SubmitPayload } from '@/components/ChatInput';
-import { MessageBubble, type ConfigDraftResult } from '@/components/MessageBubble';
+import {
+  MessageBubble,
+  OperationCard,
+  isTerminalOperationState,
+  operationFromToolResult,
+  type ConfigDraftResult,
+  type OperationCardData,
+} from '@/components/MessageBubble';
 import { AgentBadge } from '@/components/AgentBadge';
 import { PageHeader } from '@/components/ui';
 import {
@@ -505,6 +512,33 @@ export default function ChatThreadPage() {
         typeof m.tool_call.result === 'object' &&
         (m.tool_call.result as { status?: string }).status === 'pending_approval',
     );
+  const activeOperations = useMemo(() => collectActiveOperations(messages), [messages]);
+  const [dismissedOperationIDs, setDismissedOperationIDs] = useState<Set<string>>(() => new Set());
+  const visibleActiveOperations = activeOperations.filter((op) => !dismissedOperationIDs.has(operationKey(op)));
+
+  useEffect(() => {
+    setDismissedOperationIDs((cur) => {
+      if (cur.size === 0) return cur;
+      const activeKeys = new Set(activeOperations.map(operationKey));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of cur) {
+        if (activeKeys.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : cur;
+    });
+  }, [activeOperations]);
+
+  const markOperationTerminal = useCallback((id: string) => {
+    if (!id) return;
+    setDismissedOperationIDs((cur) => {
+      if (cur.has(id)) return cur;
+      const next = new Set(cur);
+      next.add(id);
+      return next;
+    });
+  }, []);
 
   return (
     <main className="flex flex-1 flex-col overflow-hidden">
@@ -531,6 +565,7 @@ export default function ChatThreadPage() {
                   key={m.id}
                   message={m}
                   onConfirmConfigDraft={isViewer ? undefined : confirmConfigDraft}
+                  hideActiveOperations
                 />
               ))
             )}
@@ -552,6 +587,20 @@ export default function ChatThreadPage() {
                 className="self-center rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300"
               >
                 {error}
+              </div>
+            )}
+            {visibleActiveOperations.length > 0 && (
+              <div className="space-y-2 border-t border-zinc-800/40 pt-3">
+                <div className="text-[11px] font-medium text-zinc-500">
+                  {tr('进行中任务', 'Active tasks')}
+                </div>
+                {visibleActiveOperations.map((operation) => (
+                  <OperationCard
+                    key={operationKey(operation)}
+                    operation={operation}
+                    onTerminal={markOperationTerminal}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -585,4 +634,27 @@ export default function ChatThreadPage() {
         </div>
       </main>
   );
+}
+
+function collectActiveOperations(messages: ChatMessage[]): OperationCardData[] {
+  const byKey = new Map<string, OperationCardData>();
+  for (const message of messages) {
+    const fromToolContent = message.role === 'tool' && message.content
+      ? operationFromToolResult(message.content)
+      : null;
+    if (fromToolContent && !isTerminalOperationState(fromToolContent.state)) {
+      byKey.set(operationKey(fromToolContent), fromToolContent);
+    }
+    const direct = message.tool_call ? operationFromToolResult(message.tool_call.result ?? message.tool_call.result_raw) : null;
+    if (direct && !isTerminalOperationState(direct.state)) byKey.set(operationKey(direct), direct);
+    for (const call of message.tool_calls ?? []) {
+      const operation = operationFromToolResult(call.result ?? call.result_raw);
+      if (operation && !isTerminalOperationState(operation.state)) byKey.set(operationKey(operation), operation);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
+function operationKey(operation: OperationCardData): string {
+  return operation.id || operation.legacySessionID || `${operation.kind}:${operation.title}`;
 }

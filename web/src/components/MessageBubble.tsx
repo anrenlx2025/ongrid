@@ -1,16 +1,32 @@
 import { useState, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Wrench, ChevronDown, ChevronRight, Loader2, AlertCircle, CheckCircle2, ShieldAlert, Check, X, XCircle } from 'lucide-react';
+import {
+  AlertCircle,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Clock3,
+  ExternalLink,
+  Loader2,
+  ShieldAlert,
+  Wrench,
+  X,
+  XCircle,
+} from 'lucide-react';
 import type { ChatMessage, ToolCallSummary } from '@/api/chat';
 import { approveApproval, rejectApproval, getApproval } from '@/api/approvals';
 import { cn } from '@/lib/cn';
 import { isConfigDraftConfirmationMessage } from '@/lib/configDraftConfirmation';
 import { useI18n } from '@/i18n/locale';
-import { Button } from '@/components/ui';
+import { Button, Chip } from '@/components/ui';
+import { executeOperationAction, getOperation, type Operation } from '@/api/operations';
+import { getPacketCaptureSession } from '@/api/packetCaptures';
 
 export type ConfigDraftResult = {
   kind: 'config_draft';
+	proposal?: { kind: 'proposal'; type: string; state: string; title: string; summary?: string; actions: { kind: string; label: string; enabled: boolean }[] };
   domain?: string;
   action?: string;
   summary?: string;
@@ -28,16 +44,29 @@ export type ConfigDraftResult = {
 
 type ConfirmConfigDraft = (draft: ConfigDraftResult) => boolean | void | Promise<boolean | void>;
 
+export type OperationCardData = {
+  kind: string;
+  id: string;
+  title: string;
+  state: string;
+  summary?: string;
+  detailURL?: string;
+  legacySessionID?: string;
+  links?: Record<string, string>;
+  actions: { kind: string; label: string; enabled: boolean }[];
+};
+
 type Props = {
   message: ChatMessage;
   onConfirmConfigDraft?: ConfirmConfigDraft;
+  hideActiveOperations?: boolean;
 };
 
-export function MessageBubble({ message, onConfirmConfigDraft }: Props) {
+export function MessageBubble({ message, onConfirmConfigDraft, hideActiveOperations }: Props) {
   if (message.kind === 'tool_card' && message.tool_call) {
-    return <ToolCallSummaryBlock call={fromSummary(message.tool_call)} onConfirmConfigDraft={onConfirmConfigDraft} />;
+    return <ToolCallSummaryBlock call={fromSummary(message.tool_call)} onConfirmConfigDraft={onConfirmConfigDraft} hideActiveOperations={hideActiveOperations} />;
   }
-  if (message.role === 'tool') return <ToolBubble message={message} onConfirmConfigDraft={onConfirmConfigDraft} />;
+  if (message.role === 'tool') return <ToolBubble message={message} onConfirmConfigDraft={onConfirmConfigDraft} hideActiveOperations={hideActiveOperations} />;
   if (message.role === 'user') return <UserBubble message={message} />;
   // Tool-only assistant rows (empty content + has tool_calls) shouldn't
   // appear during streaming; on history reload they would, so suppress.
@@ -48,7 +77,7 @@ export function MessageBubble({ message, onConfirmConfigDraft }: Props) {
   ) {
     return null;
   }
-  return <AssistantBubble message={message} onConfirmConfigDraft={onConfirmConfigDraft} />;
+  return <AssistantBubble message={message} onConfirmConfigDraft={onConfirmConfigDraft} hideActiveOperations={hideActiveOperations} />;
 }
 
 // fromSummary maps the wire-level ToolCallSummary (server SSE shape) to
@@ -98,7 +127,7 @@ function compactUserContent(
   return tr('确认创建这条告警规则', 'Confirm creating this alert rule');
 }
 
-function AssistantBubble({ message, onConfirmConfigDraft }: Props) {
+function AssistantBubble({ message, onConfirmConfigDraft, hideActiveOperations }: Props) {
   // Codex-style: no rounded card around assistant prose. Render markdown
   // flush against the column so headings/lists/code blocks read like a
   // document. Tool calls (when attached) appear as their own rows inside
@@ -115,13 +144,13 @@ function AssistantBubble({ message, onConfirmConfigDraft }: Props) {
         </div>
       )}
       {message.tool_calls?.map((tc, i) => (
-        <ToolCallSummaryBlock key={`${tc.name}-${i}`} call={tc} onConfirmConfigDraft={onConfirmConfigDraft} />
+        <ToolCallSummaryBlock key={`${tc.name}-${i}`} call={tc} onConfirmConfigDraft={onConfirmConfigDraft} hideActiveOperations={hideActiveOperations} />
       ))}
     </div>
   );
 }
 
-function ToolBubble({ message, onConfirmConfigDraft }: Props) {
+function ToolBubble({ message, onConfirmConfigDraft, hideActiveOperations }: Props) {
   // History-reload path: the message persisted by the agent loop only
   // carries the tool name + JSON result string. We don't have args for
   // these (would need to join chat_tool_calls); show what we have.
@@ -134,6 +163,7 @@ function ToolBubble({ message, onConfirmConfigDraft }: Props) {
         status: 'success',
         result,
       }}
+      hideActiveOperations={hideActiveOperations}
     />
   );
 }
@@ -141,6 +171,7 @@ function ToolBubble({ message, onConfirmConfigDraft }: Props) {
 function ToolCallSummaryBlock({
   call,
   onConfirmConfigDraft,
+  hideActiveOperations,
 }: {
   call: {
     name: string;
@@ -152,6 +183,7 @@ function ToolCallSummaryBlock({
     error?: string;
 	  };
 	  onConfirmConfigDraft?: ConfirmConfigDraft;
+    hideActiveOperations?: boolean;
 	}) {
   const { tr } = useI18n();
   const [open, setOpen] = useState(false);
@@ -165,6 +197,11 @@ function ToolCallSummaryBlock({
   const approval = pendingApproval(call.result);
   if (approval) {
     return <PendingApprovalCard approvalID={approval.id} kind={approval.kind} command={argCommandText(call.arguments)} />;
+  }
+  const operation = !isError ? operationFromToolResult(call.result) : null;
+  if (operation) {
+    if (hideActiveOperations && !isTerminalOperationState(operation.state)) return null;
+    return <OperationCard operation={operation} />;
   }
   const configDraft = !isError ? asConfigDraft(call.result) : null;
   return (
@@ -243,6 +280,384 @@ function ToolCallSummaryBlock({
   );
 }
 
+export function operationFromToolResult(result: unknown): OperationCardData | null {
+  const value = typeof result === 'string' ? safeParse(result) : result;
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const operation = record.operation && typeof record.operation === 'object'
+    ? record.operation as Record<string, unknown>
+    : null;
+  if (operation) {
+    const id = typeof operation.id === 'string' ? operation.id : '';
+    const links = operation.links && typeof operation.links === 'object'
+      ? operation.links as Record<string, unknown>
+      : {};
+    return {
+      kind: typeof operation.kind === 'string' ? operation.kind : 'operation',
+      id,
+      title: typeof operation.title === 'string' && operation.title ? operation.title : 'Operation',
+      state: typeof operation.state === 'string' ? operation.state : 'running',
+      summary: typeof operation.summary === 'string' ? operation.summary : undefined,
+      detailURL: typeof links.detail === 'string' ? links.detail : undefined,
+      links: Object.fromEntries(Object.entries(links).filter(([, value]) => typeof value === 'string')) as Record<string, string>,
+      actions: Array.isArray(operation.actions) ? operation.actions.filter((a): a is { kind: string; label: string; enabled: boolean } => !!a && typeof a === 'object' && typeof (a as { kind?: unknown }).kind === 'string' && typeof (a as { label?: unknown }).label === 'string' && typeof (a as { enabled?: unknown }).enabled === 'boolean') : [],
+    };
+  }
+  return asLegacyOperation(record);
+}
+
+// Read-only compatibility adapter for assistant messages persisted before
+// Operation envelopes existed. It deliberately exposes no action: historic
+// records cannot be controlled through the new generic action API.
+function asLegacyOperation(record: Record<string, unknown>): OperationCardData | null {
+  if (!record.session || typeof record.session !== 'object') return null;
+  const session = record.session as Record<string, unknown>;
+  const id = typeof session.public_id === 'string' ? session.public_id : '';
+  if (!id.startsWith('pcap-session-')) return null;
+  return {
+    kind: 'packet_capture_session',
+    id: '',
+    legacySessionID: id,
+    title: typeof session.title === 'string' && session.title ? session.title : 'Packet capture',
+    state: typeof session.state === 'string' ? session.state : 'collecting',
+    summary: typeof session.canonical_filter === 'string' ? session.canonical_filter : undefined,
+    detailURL: `/artifacts/packet-sessions/${encodeURIComponent(id)}`,
+    actions: [],
+  };
+}
+
+export function OperationCard({ operation, onTerminal }: { operation: OperationCardData; onTerminal?: (id: string) => void }) {
+  const { tr } = useI18n();
+  const [state, setState] = useState(operation.state);
+  const [summary, setSummary] = useState(operation.summary);
+  const [detailURL, setDetailURL] = useState(operation.detailURL);
+  const [actions, setActions] = useState(operation.actions);
+  const [cancelling, setCancelling] = useState(false);
+  const terminal = isTerminalOperationState(state);
+  const presentation = operationPresentation(state, tr);
+  const enabledActions = actions.filter((action) => action.enabled);
+  const visibleCancel = actions.find((action) => action.kind === 'cancel');
+  const canCancel = !!visibleCancel?.enabled && !!operation.id && !terminal;
+  const kindLabel = operation.kind === 'packet_capture_session'
+    ? tr('抓包任务', 'Packet capture task')
+    : tr('任务', 'Operation');
+  const actionHint = operationActionHint(state, operation.kind, tr);
+  const actionLabel = terminal
+    ? tr('已归档', 'Archived')
+    : tr('自动同步中', 'Auto-syncing');
+
+  useEffect(() => {
+    setState(operation.state);
+    setSummary(operation.summary);
+    setDetailURL(operation.detailURL);
+    setActions(operation.actions);
+  }, [operation.id, operation.legacySessionID, operation.state, operation.summary, operation.detailURL, operation.actions]);
+
+  useEffect(() => {
+    if (!terminal) return;
+    onTerminal?.(operation.id || operation.legacySessionID || '');
+  }, [operation.id, operation.legacySessionID, onTerminal, terminal]);
+
+  useEffect(() => {
+    if ((!operation.id && !operation.legacySessionID) || terminal) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        if (operation.id) {
+          const detail = await getOperation(operation.id);
+          if (cancelled || !detail.operation) return;
+          applyOperationUpdate(detail.operation, detail.artifacts?.[0]?.url);
+          return;
+        }
+        if (operation.legacySessionID) {
+          const detail = await getPacketCaptureSession(operation.legacySessionID);
+          if (cancelled || !detail.session) return;
+          setState(detail.session.state);
+          setSummary(sessionSummary(detail.session.pcap_count, detail.session.canonical_filter, tr));
+          setDetailURL(`/artifacts/packet-sessions/${encodeURIComponent(operation.legacySessionID)}`);
+          setActions([]);
+        }
+      } catch {
+        // Keep the last known state. The chat history poll will still refresh
+        // appended completion messages if this point lookup is temporarily down.
+      }
+    };
+    const timer = window.setInterval(refresh, 3000);
+    void refresh();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operation.id, operation.legacySessionID, terminal, tr]);
+
+  function applyOperationUpdate(updated: Operation, artifactURL?: string) {
+    if (updated.state) setState(updated.state);
+    setSummary(updated.summary || undefined);
+    if (updated.detail_url) setDetailURL(updated.detail_url);
+    else if (artifactURL) setDetailURL(artifactURL);
+    setActions(parseOperationActions(updated.actions_json));
+  }
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-zinc-800/60 bg-zinc-900/40 text-xs shadow-sm shadow-black/10">
+      <div className="flex min-w-0 items-start gap-3 px-3 py-3">
+        <div className="flex min-w-0 flex-1 items-start gap-2.5">
+          <div className={cn('mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border', presentation.iconBoxClass)}>
+            {presentation.icon}
+          </div>
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', presentation.dotClass)} />
+              <h3 className="min-w-0 truncate text-sm font-medium text-zinc-100">
+                {operation.title || kindLabel}
+              </h3>
+              <Chip tone={presentation.tone} dense className="shrink-0">{presentation.label}</Chip>
+            </div>
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-500">
+              <span>{kindLabel}</span>
+              {(operation.id || operation.legacySessionID) && (
+                <>
+                  <span className="text-zinc-700">/</span>
+                  <span className="font-mono">{shortOperationID(operation.id || operation.legacySessionID || '')}</span>
+                </>
+              )}
+              {summary && (
+                <>
+                  <span className="text-zinc-700">/</span>
+                  <span className="min-w-[120px] max-w-full truncate text-zinc-400" title={summary}>{summary}</span>
+                </>
+              )}
+            </div>
+            {actionHint && <div className="text-[11px] leading-5 text-zinc-500">{actionHint}</div>}
+          </div>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-2">
+          {detailURL && (
+            <a
+              href={detailURL}
+              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800 hover:text-zinc-100"
+            >
+              <ExternalLink size={13} />
+              {operation.kind === 'packet_capture_session' ? tr('打开会话', 'Open session') : tr('打开产物', 'Open artifact')}
+            </a>
+          )}
+          {visibleCancel && (
+            <button
+              type="button"
+              className={cn(
+                'inline-flex h-8 items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors',
+                canCancel
+                  ? 'border-red-500/30 bg-zinc-900 text-red-300 hover:border-red-500/50 hover:bg-red-500/10'
+                  : 'border-zinc-800 bg-zinc-900 text-zinc-600',
+              )}
+              disabled={!canCancel || cancelling}
+              onClick={async () => {
+                if (!canCancel) return;
+                setCancelling(true);
+                try {
+                  const updated = await executeOperationAction(operation.id, visibleCancel.kind);
+                  applyOperationUpdate(updated);
+                } finally {
+                  setCancelling(false);
+                }
+              }}
+            >
+              {cancelling || state === 'canceling' ? <Loader2 size={13} className="animate-spin" /> : <X size={13} />}
+              {cancelling || state === 'canceling'
+                ? tr('停止中', 'Stopping')
+                : visibleCancel.kind === 'cancel'
+                  ? tr('停止', 'Stop')
+                  : visibleCancel.label}
+            </button>
+          )}
+          {enabledActions.filter((action) => action.kind !== 'cancel').map((action) => (
+            <Button key={action.kind} variant="ghost" disabled={cancelling || !operation.id} onClick={async () => {
+              const updated = await executeOperationAction(operation.id, action.kind);
+              applyOperationUpdate(updated);
+            }}>
+              {action.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+      <div className="flex items-center justify-between border-t border-zinc-800/40 bg-zinc-900/20 px-3 py-1.5 text-[10px] text-zinc-600">
+        <span>{actionLabel}</span>
+        {!terminal && (
+          <div className="h-0.5 w-24 overflow-hidden rounded-full bg-zinc-800">
+            <div className={cn('h-full rounded-full transition-all', presentation.progressClass)} style={{ width: presentation.progressWidth }} />
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function parseOperationActions(raw?: string): OperationCardData['actions'] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((action): action is { kind: string; label: string; enabled: boolean } =>
+      !!action &&
+      typeof action === 'object' &&
+      typeof (action as { kind?: unknown }).kind === 'string' &&
+      typeof (action as { label?: unknown }).label === 'string' &&
+      typeof (action as { enabled?: unknown }).enabled === 'boolean',
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function isTerminalOperationState(state: string) {
+  return state === 'ready' || state === 'partial' || state === 'succeeded' || state === 'failed' || state === 'cancelled';
+}
+
+function operationActionHint(
+  state: string,
+  kind: string,
+  tr: (zh: string, en: string) => string,
+) {
+  if (state === 'queued') return tr('等待可用执行端', 'Waiting for an available runner');
+  if (state === 'created') return tr('任务已登记', 'Task registered');
+  if (state === 'running' || state === 'collecting' || state === 'capturing') {
+    return kind === 'packet_capture_session'
+      ? tr('边端正在采集，可随时停止并保留已生成产物', 'Capturing on the edge; stopping preserves generated artifacts')
+      : tr('任务正在执行', 'Task is running');
+  }
+  if (state === 'canceling') return tr('等待执行端确认停止', 'Waiting for runner stop confirmation');
+  if (state === 'failed') return tr('失败原因和可用产物已保留', 'Failure reason and available artifacts are preserved');
+  if (state === 'partial') return tr('部分产物可用于继续分析', 'Partial artifacts are available for analysis');
+  if (state === 'cancelled') return tr('任务已停止', 'Task stopped');
+  if (state === 'ready' || state === 'succeeded') return tr('产物和分析入口已就绪', 'Artifacts and analysis entry are ready');
+  return '';
+}
+
+function sessionSummary(
+  pcapCount: number | undefined,
+  filter: string | undefined,
+  tr: (zh: string, en: string) => string,
+) {
+  const parts: string[] = [];
+  if (typeof pcapCount === 'number') {
+    parts.push(tr(`${pcapCount} 个 PCAP`, `${pcapCount} PCAP${pcapCount === 1 ? '' : 's'}`));
+  }
+  if (filter) parts.push(filter);
+  return parts.join(' · ') || undefined;
+}
+
+function operationPresentation(state: string, tr: (zh: string, en: string) => string): {
+  label: string;
+  tone: 'default' | 'success' | 'warning' | 'danger' | 'info' | 'accent';
+  icon: JSX.Element;
+  iconBoxClass: string;
+  dotClass: string;
+  progressClass: string;
+  progressWidth: string;
+} {
+  switch (state) {
+    case 'created':
+      return {
+        label: tr('已创建', 'Created'),
+        tone: 'default',
+        icon: <Clock3 size={15} className="text-zinc-400" />,
+        iconBoxClass: 'border-zinc-800 bg-zinc-900',
+        dotClass: 'bg-zinc-500',
+        progressClass: 'bg-zinc-500',
+        progressWidth: '18%',
+      };
+    case 'queued':
+      return {
+        label: tr('排队中', 'Queued'),
+        tone: 'default',
+        icon: <Clock3 size={15} className="text-zinc-400" />,
+        iconBoxClass: 'border-zinc-800 bg-zinc-900',
+        dotClass: 'bg-zinc-500',
+        progressClass: 'bg-zinc-500',
+        progressWidth: '28%',
+      };
+    case 'creating':
+      return {
+        label: tr('正在创建', 'Creating'),
+        tone: 'info',
+        icon: <Loader2 size={15} className="animate-spin text-sky-500" />,
+        iconBoxClass: 'border-sky-500/20 bg-sky-500/10',
+        dotClass: 'bg-sky-500',
+        progressClass: 'bg-sky-500',
+        progressWidth: '36%',
+      };
+    case 'ready':
+    case 'succeeded':
+      return {
+        label: tr('已完成', 'Ready'),
+        tone: 'success',
+        icon: <CheckCircle2 size={15} className="text-emerald-500" />,
+        iconBoxClass: 'border-emerald-500/20 bg-emerald-500/10',
+        dotClass: 'bg-emerald-500',
+        progressClass: 'bg-emerald-500',
+        progressWidth: '100%',
+      };
+    case 'partial':
+      return {
+        label: tr('部分完成', 'Partial'),
+        tone: 'warning',
+        icon: <AlertCircle size={15} className="text-amber-500" />,
+        iconBoxClass: 'border-amber-500/20 bg-amber-500/10',
+        dotClass: 'bg-amber-500',
+        progressClass: 'bg-amber-500',
+        progressWidth: '72%',
+      };
+    case 'failed':
+      return {
+        label: tr('失败', 'Failed'),
+        tone: 'danger',
+        icon: <XCircle size={15} className="text-red-500" />,
+        iconBoxClass: 'border-red-500/20 bg-red-500/10',
+        dotClass: 'bg-red-500',
+        progressClass: 'bg-red-500',
+        progressWidth: '100%',
+      };
+    case 'cancelled':
+      return {
+        label: tr('已停止', 'Stopped'),
+        tone: 'default',
+        icon: <XCircle size={15} className="text-zinc-500" />,
+        iconBoxClass: 'border-zinc-800 bg-zinc-900',
+        dotClass: 'bg-zinc-500',
+        progressClass: 'bg-zinc-500',
+        progressWidth: '100%',
+      };
+    case 'canceling':
+      return {
+        label: tr('停止中', 'Stopping'),
+        tone: 'warning',
+        icon: <Loader2 size={15} className="animate-spin text-amber-500" />,
+        iconBoxClass: 'border-amber-500/20 bg-amber-500/10',
+        dotClass: 'bg-amber-500',
+        progressClass: 'bg-amber-500',
+        progressWidth: '64%',
+      };
+    default:
+      return {
+        label: tr('运行中', 'Running'),
+        tone: 'info',
+        icon: <Loader2 size={15} className="animate-spin text-sky-500" />,
+        iconBoxClass: 'border-sky-500/20 bg-sky-500/10',
+        dotClass: 'bg-sky-500',
+        progressClass: 'bg-sky-500',
+        progressWidth: '52%',
+      };
+  }
+}
+
+function shortOperationID(id: string) {
+  if (!id) return '';
+  if (id.length <= 18) return id;
+  return `${id.slice(0, 12)}...${id.slice(-6)}`;
+}
+
 function ConfigDraftCard({
   draft,
   onConfirm,
@@ -257,12 +672,14 @@ function ConfigDraftCard({
   const payload = payloadSummary(draft.payload);
   const scope = scopeSummary(draft.scope, tr, !draft.confirmation_prompt);
   const disabled = state !== 'idle' || !onConfirm;
+	const proposal = draft.proposal;
 
   return (
     <div className="border-t border-zinc-800/80 bg-zinc-950/30 px-3 py-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
+			{proposal && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-300">{tr('提案', 'Proposal')}</span>}
             <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-300">
               {domainLabel(draft.domain, tr)}
             </span>
@@ -273,9 +690,9 @@ function ConfigDraftCard({
               <span className="truncate text-[11px] text-zinc-500">{draft.target.name}</span>
             )}
           </div>
-          <div className="text-sm font-medium text-zinc-100">
-            {draft.summary || tr('配置草案', 'Configuration draft')}
-          </div>
+		  <div className="text-sm font-medium text-zinc-100">
+			{proposal?.title || draft.summary || tr('配置草案', 'Configuration draft')}
+		  </div>
           {scope && <div className="text-[11px] leading-5 text-zinc-300">{scope}</div>}
           {draft.confirmation_prompt && (
             <div className="text-[11px] leading-5 text-zinc-400">{draft.confirmation_prompt}</div>

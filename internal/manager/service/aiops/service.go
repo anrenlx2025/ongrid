@@ -46,7 +46,7 @@ const (
 )
 
 // Kernel enumerates the two agent kernels the service can dispatch
-// to. PR-9 of ships both side-by-side; default is legacy.
+// to. The graph runtime is the default; legacy remains an explicit rollback.
 type Kernel string
 
 const (
@@ -58,13 +58,15 @@ const (
 )
 
 // ParseKernel normalises a string env value into a Kernel. Empty or
-// unrecognised values default to KernelLegacy. Used by cmd/ongrid/main.go.
+// unrecognised values default to KernelGraph. Used by cmd/ongrid/main.go.
 func ParseKernel(s string) Kernel {
 	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "legacy":
+		return KernelLegacy
 	case "graph":
 		return KernelGraph
 	default:
-		return KernelLegacy
+		return KernelGraph
 	}
 }
 
@@ -210,6 +212,8 @@ func (s *Service) CreateSession(ctx context.Context, caller Caller, in CreateSes
 		UserID:            caller.UserID,
 		Title:             title,
 		RelatedIncidentID: in.RelatedIncidentID,
+		Initiator:         model.SessionInitiatorUser,
+		Audience:          model.SessionAudienceUser,
 		CreatedAt:         time.Now().UTC(),
 		UpdatedAt:         time.Now().UTC(),
 	}
