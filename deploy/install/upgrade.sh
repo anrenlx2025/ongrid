@@ -130,6 +130,30 @@ set_env_value() {
     fi
 }
 
+ensure_pcap_parser_upgrade_env() {
+    local parser_image token
+
+    parser_image=$(grep -E '^ONGRID_PCAP_PARSER_IMAGE=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)
+    if [[ -z "$parser_image" ]]; then
+        set_env_value ONGRID_PCAP_PARSER_IMAGE 'docker.cnb.cool/ongridio/pcap-parser:latest'
+        log_info "backfilled ONGRID_PCAP_PARSER_IMAGE"
+    fi
+
+    token=$(grep -E '^ONGRID_PACKET_PARSER_TOKEN_SECRET=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)
+    if [[ -z "$token" ]]; then
+        token=$(openssl rand -base64 48 | tr -d '=+/\n' | cut -c1-64) || {
+            log_error "could not generate ONGRID_PACKET_PARSER_TOKEN_SECRET"
+            return 1
+        }
+        [[ -n "$token" ]] || {
+            log_error "generated an empty ONGRID_PACKET_PARSER_TOKEN_SECRET"
+            return 1
+        }
+        set_env_value ONGRID_PACKET_PARSER_TOKEN_SECRET "$token"
+        log_info "backfilled ONGRID_PACKET_PARSER_TOKEN_SECRET"
+    fi
+}
+
 host_from_url() {
     local url="$1" hostport host
     hostport="${url#*://}"
@@ -379,6 +403,11 @@ if [[ -n "$CONFIGURED_PUBLIC_URL" ]] && ! ongrid_is_valid_public_url "$CONFIGURE
     log_error "correct it before retrying; the existing stack was not stopped"
     exit 1
 fi
+
+# Older installations predate the private pcap-parser service. Add its required
+# Compose inputs before rendering or pulling the new stack so a missing value
+# cannot take the running version down during an upgrade.
+ensure_pcap_parser_upgrade_env
 
 # Download, extract, and checksum the Edge payload while the current service is
 # still online. A network, architecture, or checksum failure therefore leaves
@@ -651,7 +680,6 @@ backfill_plain() {
 # v0.7.20+: Grafana admin pin needed for SA token bootstrap.
 backfill_plain  GRAFANA_ADMIN_USER     admin
 backfill_secret GRAFANA_ADMIN_PASSWORD 20
-backfill_secret ONGRID_PACKET_PARSER_TOKEN_SECRET 64
 ensure_tunnel_addr_env
 ensure_host_gateway_env
 

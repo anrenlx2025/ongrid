@@ -323,7 +323,7 @@ services:
   # Native Wireshark packet dissector. This service has no `ports` mapping:
   # only the Manager can reach its mTLS HTTP/gRPC listeners over ongrid_net.
   pcap-parser:
-    image: ${ONGRID_PCAP_PARSER_IMAGE:?ONGRID_PCAP_PARSER_IMAGE is required in .env}
+    image: ${ONGRID_PCAP_PARSER_IMAGE:-docker.cnb.cool/ongridio/pcap-parser:latest}
     container_name: ongrid-pcap-parser
     restart: unless-stopped
     environment:

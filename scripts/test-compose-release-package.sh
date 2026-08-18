@@ -140,6 +140,8 @@ for arch in amd64 arm64; do
     "$extract_dir/$package_root/docker-compose.yml"
   grep -Fq 'PCAP_PARSER_ARTIFACT_HOSTS: nginx' \
     "$extract_dir/$package_root/docker-compose.yml"
+  grep -Fq 'image: ${ONGRID_PCAP_PARSER_IMAGE:-docker.cnb.cool/ongridio/pcap-parser:latest}' \
+    "$extract_dir/$package_root/docker-compose.yml"
   grep -Fq 'listen 8443 ssl;' "$extract_dir/$package_root/nginx.conf"
   parser_service=$(awk '
     /^  pcap-parser:$/ { active=1; next }
@@ -157,6 +159,14 @@ for arch in amd64 arm64; do
     exit 1
   fi
 done
+
+upgrade_script="$repo_root/deploy/install/upgrade.sh"
+parser_env_line=$(grep -n 'ensure_pcap_parser_upgrade_env' "$upgrade_script" | tail -n 1 | cut -d: -f1)
+preflight_line=$(grep -n 'preflight_runtime_images$' "$upgrade_script" | tail -n 1 | cut -d: -f1)
+if [[ -z "$parser_env_line" || -z "$preflight_line" || "$parser_env_line" -ge "$preflight_line" ]]; then
+  echo "upgrade.sh must backfill pcap-parser inputs before the new Compose preflight" >&2
+  exit 1
+fi
 
 # Opting into an offline package is a completeness promise. Missing binaries
 # must fail the package build instead of producing an archive that cannot be
