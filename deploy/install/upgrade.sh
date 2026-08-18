@@ -46,6 +46,14 @@ fi
 # shellcheck source=data-permissions.sh
 source "$DATA_PERMISSIONS_LIB"
 
+PCAP_PARSER_TLS_LIB="$SCRIPT_DIR/pcap-parser-tls.sh"
+if [[ ! -r "$PCAP_PARSER_TLS_LIB" ]]; then
+    log_error "upgrade package is missing pcap-parser-tls.sh"
+    exit 1
+fi
+# shellcheck source=pcap-parser-tls.sh
+source "$PCAP_PARSER_TLS_LIB"
+
 generate_self_signed_tls_cert() {
     local cert_dir="$1"
     local cert_file="$cert_dir/tls.crt"
@@ -394,6 +402,10 @@ if ! ongrid_prepare_data_directories "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"; then
     log_error "data directory permissions are not usable; the existing stack was not stopped"
     exit 1
 fi
+if ! ongrid_prepare_pcap_parser_tls "$ONGRID_DATA_DIR"; then
+    log_error "pcap-parser TLS material is not usable; the existing stack was not stopped"
+    exit 1
+fi
 
 # Detect legacy docker named volumes from pre-bind-mount installs. If
 # any are still around, the new compose would start with empty bind
@@ -639,6 +651,7 @@ backfill_plain() {
 # v0.7.20+: Grafana admin pin needed for SA token bootstrap.
 backfill_plain  GRAFANA_ADMIN_USER     admin
 backfill_secret GRAFANA_ADMIN_PASSWORD 20
+backfill_secret ONGRID_PACKET_PARSER_TOKEN_SECRET 64
 ensure_tunnel_addr_env
 ensure_host_gateway_env
 

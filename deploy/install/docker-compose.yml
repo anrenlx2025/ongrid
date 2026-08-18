@@ -155,6 +155,15 @@ services:
       # populates from operator's domain at first run.
       ONGRID_PUBLIC_URL: ${ONGRID_PUBLIC_URL:-}
       ONGRID_TUNNEL_ADDR: ${ONGRID_TUNNEL_ADDR:-}
+      # Private native PCAP parser. mTLS and signed request material are
+      # mounted read-only below; parser source never enters this image.
+      ONGRID_PACKET_PARSER_URL: https://pcap-parser:8080
+      ONGRID_PACKET_PARSER_ARTIFACT_BASE_URL: https://nginx:8443
+      ONGRID_PACKET_PARSER_TOKEN_SECRET: ${ONGRID_PACKET_PARSER_TOKEN_SECRET:?ONGRID_PACKET_PARSER_TOKEN_SECRET is required in .env}
+      ONGRID_PACKET_PARSER_MANAGER_PRIVATE_KEY_FILE: /var/lib/ongrid/pcap-parser/request.key
+      ONGRID_PACKET_PARSER_CLIENT_CERT_FILE: /var/lib/ongrid/pcap-parser/client.crt
+      ONGRID_PACKET_PARSER_CLIENT_KEY_FILE: /var/lib/ongrid/pcap-parser/client.key
+      ONGRID_PACKET_PARSER_CA_FILE: /var/lib/ongrid/pcap-parser/ca.crt
       ONGRID_K8S_EVENT_RETENTION: ${ONGRID_K8S_EVENT_RETENTION:-24h}
       ONGRID_K8S_EVENT_MAX_PER_CLUSTER: ${ONGRID_K8S_EVENT_MAX_PER_CLUSTER:-5000}
       ONGRID_K8S_EVENT_CLEANUP_INTERVAL: ${ONGRID_K8S_EVENT_CLEANUP_INTERVAL:-1h}
@@ -256,6 +265,7 @@ services:
       # reading them back from the Edge, then serves authenticated downloads and
       # private parser fetches from the same durable path.
       - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/packet-captures:/var/lib/ongrid/packet-captures
+      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/pcap-parser/manager:/var/lib/ongrid/pcap-parser:ro
     logging:
       driver: json-file
       options:
@@ -295,6 +305,7 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro
+      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/pcap-parser/nginx:/etc/nginx/pcap-parser:ro
       # Public edge artifact dir: install.sh + cross-arch binaries served
       # at https://<host>/install.sh and /edge/<file>.
       - ./edge:/usr/share/nginx/html/edge:ro
@@ -302,7 +313,33 @@ services:
       - "${ONGRID_HTTP_PORT:-443}:443"
       - "${ONGRID_HTTP_REDIRECT_PORT:-80}:80"
     expose:
-      - "8081"
+      - "8443"
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "5"
+
+  # Native Wireshark packet dissector. This service has no `ports` mapping:
+  # only the Manager can reach its mTLS HTTP/gRPC listeners over ongrid_net.
+  pcap-parser:
+    image: ${ONGRID_PCAP_PARSER_IMAGE:?ONGRID_PCAP_PARSER_IMAGE is required in .env}
+    container_name: ongrid-pcap-parser
+    restart: unless-stopped
+    environment:
+      PCAP_PARSER_MANAGER_PUBLIC_KEY_FILE: /run/pcap-parser/request.pub
+      PCAP_PARSER_ARTIFACT_HOSTS: nginx
+      PCAP_PARSER_TLS_CERT_FILE: /run/pcap-parser/server.crt
+      PCAP_PARSER_TLS_KEY_FILE: /run/pcap-parser/server.key
+      PCAP_PARSER_CLIENT_CA_FILE: /run/pcap-parser/ca.crt
+      # Go's root pool uses this CA for https://nginx:8443, whose certificate
+      # is issued by the installation-local parser CA and names only nginx.
+      SSL_CERT_FILE: /run/pcap-parser/ca.crt
+    volumes:
+      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/pcap-parser/parser:/run/pcap-parser:ro
+    expose:
+      - "8080"
+      - "9090"
     logging:
       driver: json-file
       options:

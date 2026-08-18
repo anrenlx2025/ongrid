@@ -108,6 +108,7 @@ for arch in amd64 arm64; do
     "$package_root/upgrade.sh" \
     "$package_root/public-url.sh" \
     "$package_root/data-permissions.sh" \
+    "$package_root/pcap-parser-tls.sh" \
     "$package_root/docker-compose.yml" \
     "$package_root/prometheus.yml" \
     "$package_root/edge/fetch-edge-assets.sh" \
@@ -134,6 +135,21 @@ for arch in amd64 arm64; do
     "$extract_dir/$package_root/install.sh"
   grep -Fq -- '--no-deps --force-recreate ongrid nginx' \
     "$extract_dir/$package_root/install.sh"
+  grep -Fq 'pcap-parser:' "$extract_dir/$package_root/docker-compose.yml"
+  grep -Fq 'ONGRID_PACKET_PARSER_URL: https://pcap-parser:8080' \
+    "$extract_dir/$package_root/docker-compose.yml"
+  grep -Fq 'PCAP_PARSER_ARTIFACT_HOSTS: nginx' \
+    "$extract_dir/$package_root/docker-compose.yml"
+  grep -Fq 'listen 8443 ssl;' "$extract_dir/$package_root/nginx.conf"
+  parser_service=$(awk '
+    /^  pcap-parser:$/ { active=1; next }
+    active && /^  [[:alnum:]_-]+:$/ { exit }
+    active { print }
+  ' "$extract_dir/$package_root/docker-compose.yml")
+  if grep -Eq '^[[:space:]]*(ports|build):' <<<"$parser_service"; then
+    echo "pcap-parser must use the published image on the private Compose network" >&2
+    exit 1
+  fi
 
   if find "$extract_dir/$package_root/edge" -maxdepth 1 -type f \
       -name '*-linux-*' -print -quit | grep -q .; then

@@ -39,6 +39,14 @@ fi
 # shellcheck source=data-permissions.sh
 source "$DATA_PERMISSIONS_LIB"
 
+PCAP_PARSER_TLS_LIB="$SCRIPT_DIR/pcap-parser-tls.sh"
+if [[ ! -r "$PCAP_PARSER_TLS_LIB" ]]; then
+    log_error "install package is missing pcap-parser-tls.sh"
+    exit 1
+fi
+# shellcheck source=pcap-parser-tls.sh
+source "$PCAP_PARSER_TLS_LIB"
+
 generate_self_signed_tls_cert() {
     local cert_dir="$1"
     local cert_file="$cert_dir/tls.crt"
@@ -606,6 +614,14 @@ chown -R 65532:65532 "$ONGRID_DATA_DIR/packet-captures" 2>/dev/null || true
 chown -R 65532:65532 "$ONGRID_DATA_DIR/workspace" 2>/dev/null || true
 chown -R 65532:65532 "$ONGRID_DATA_DIR/tools" 2>/dev/null || true
 
+# pcap-parser is a separate, private image. Bootstrap a dedicated internal
+# PKI before Compose starts; its source and native dissector never enter this
+# repository or the manager image.
+ongrid_prepare_pcap_parser_tls "$ONGRID_DATA_DIR" || {
+    log_error "could not prepare pcap-parser TLS material"
+    exit 1
+}
+
 # Image uids — pinned to what the upstream images run as. Bumping the
 # image tag in docker-compose.yml without updating these here will fail
 # on first boot (chown to the wrong uid → service can't write).
@@ -711,6 +727,11 @@ fi
 if is_blank ONGRID_JWT_SECRET; then
     fill_blank ONGRID_JWT_SECRET "$(gen_secret 64)"
     log_info "generated ONGRID_JWT_SECRET"
+fi
+
+if is_blank ONGRID_PACKET_PARSER_TOKEN_SECRET; then
+    fill_blank ONGRID_PACKET_PARSER_TOKEN_SECRET "$(gen_secret 64)"
+    log_info "generated ONGRID_PACKET_PARSER_TOKEN_SECRET"
 fi
 
 # ONGRID_ADMIN_PASSWORD (record it for the final banner)
