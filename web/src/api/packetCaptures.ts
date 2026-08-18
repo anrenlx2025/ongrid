@@ -24,6 +24,7 @@ export type PacketCapture = {
   device_id: number;
 	  session_id?: number;
   interface_name: string;
+  network_namespace?: string;
   canonical_filter: string;
   direction: string;
   format: string;
@@ -36,6 +37,7 @@ export type PacketCapture = {
   description: string;
   captured_bytes: number;
   captured_packets: number;
+  live_preview?: string[];
   artifact_id?: string;
   raw_available?: boolean;
   analysis?: PacketCaptureAnalysis;
@@ -120,6 +122,7 @@ export type PacketHexLine = {
 export type PacketCaptureInput = {
   device_id: number;
   interface: string;
+  network_namespace?: string;
   filter?: string;
   duration_seconds?: number;
   max_bytes?: number;
@@ -129,6 +132,18 @@ export type PacketCaptureInput = {
   title?: string;
   description?: string;
   request_idempotency_key?: string;
+};
+
+export type PacketCaptureSessionInput = {
+  targets: Array<{ device_id: number; interface: string; network_namespace?: string }>;
+  filter?: string;
+  duration_seconds?: number;
+  max_bytes?: number;
+  max_packets?: number;
+  snaplen?: number;
+  promiscuous?: boolean;
+  title?: string;
+  description?: string;
 };
 
 export function listPacketCaptures(params?: {
@@ -155,6 +170,14 @@ export function createPacketCapture(input: PacketCaptureInput) {
   return request<PacketCapture>('POST', '/packet-captures', input);
 }
 
+export function createPacketCaptureSession(input: PacketCaptureSessionInput) {
+  return request<{ session: PacketCaptureSession; captures: PacketCapture[]; member_errors?: string[] }>(
+    'POST',
+    '/packet-capture-sessions',
+    input,
+  );
+}
+
 export function getPacketCapture(id: number) {
   return request<PacketCapture>('GET', `/packet-captures/${id}`);
 }
@@ -167,6 +190,14 @@ export function refreshPacketCapture(id: number) {
   return request<PacketCapture>('POST', `/packet-captures/${id}/refresh`, {});
 }
 
+export function cancelPacketCapture(id: number) {
+  return request<PacketCapture>('POST', `/packet-captures/${id}/cancel`, {});
+}
+
+export function stopPacketCapture(id: number) {
+  return request<PacketCapture>('POST', `/packet-captures/${id}/stop`, {});
+}
+
 export function listPacketCaptureSessions(params?: { limit?: number; offset?: number }) {
   const q = new URLSearchParams();
   if (params?.limit) q.set('limit', String(params.limit));
@@ -176,6 +207,7 @@ export function listPacketCaptureSessions(params?: { limit?: number; offset?: nu
 }
 export function getPacketCaptureSession(id: string) { return request<{ session: PacketCaptureSession; captures: PacketCapture[] }>('GET', `/packet-capture-sessions/${encodeURIComponent(id)}`); }
 export function refreshPacketCaptureSession(id: string) { return request<{ session: PacketCaptureSession; captures: PacketCapture[] }>('POST', `/packet-capture-sessions/${encodeURIComponent(id)}/refresh`, {}); }
+export function stopPacketCaptureSession(id: string) { return request<PacketCaptureSession>('POST', `/packet-capture-sessions/${encodeURIComponent(id)}/stop`, {}); }
 
 export function packetCaptureArtifactID(capture: Pick<PacketCapture, 'id' | 'artifact_id'>) {
   return capture.artifact_id || `pcap-${capture.id}`;

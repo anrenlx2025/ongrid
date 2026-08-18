@@ -117,6 +117,7 @@ import (
 	managerbizmarketplace "github.com/ongridio/ongrid/internal/manager/biz/marketplace"
 	managerbizmcp "github.com/ongridio/ongrid/internal/manager/biz/mcp"
 	managerbizmonitor "github.com/ongridio/ongrid/internal/manager/biz/monitor"
+	managerbizoperatorrun "github.com/ongridio/ongrid/internal/manager/biz/operatorrun"
 	managerbizpacketcapture "github.com/ongridio/ongrid/internal/manager/biz/packetcapture"
 	managerbizsecret "github.com/ongridio/ongrid/internal/manager/biz/secret"
 	managerbizsetting "github.com/ongridio/ongrid/internal/manager/biz/setting"
@@ -142,6 +143,7 @@ import (
 	managerserverknowledge "github.com/ongridio/ongrid/internal/manager/server/knowledge"
 	managerwebshellserver "github.com/ongridio/ongrid/internal/manager/server/webshell"
 	mcpclient "github.com/ongridio/ongrid/internal/pkg/mcpclient"
+	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 
 	managerbizaudit "github.com/ongridio/ongrid/internal/manager/biz/audit"
 	managerbizflow "github.com/ongridio/ongrid/internal/manager/biz/flow"
@@ -167,6 +169,7 @@ import (
 	managerservermetric "github.com/ongridio/ongrid/internal/manager/server/metric"
 	managermiddleware "github.com/ongridio/ongrid/internal/manager/server/middleware"
 	managerservermonitor "github.com/ongridio/ongrid/internal/manager/server/monitor"
+	managerserveroperatorrun "github.com/ongridio/ongrid/internal/manager/server/operatorrun"
 	managerserverpacketcapture "github.com/ongridio/ongrid/internal/manager/server/packetcapture"
 	managerserverprom "github.com/ongridio/ongrid/internal/manager/server/prometheus"
 	managerserverreport "github.com/ongridio/ongrid/internal/manager/server/report"
@@ -1159,6 +1162,7 @@ func main() {
 	// pushes through the live router.
 	webshellRouter := managerwebshellbiz.NewRouter()
 	webshellAuditRepo := managerwebshelldata.NewRepo(db)
+	operatorRunSvc := managerbizoperatorrun.New(fbClient, log.With(slog.String("comp", "operator-run")))
 
 	if err := managersvcfb.Install(rootCtx, fbClient, managersvcfb.Wiring{
 		EdgeAuthn:      edgeAuthn,
@@ -1177,6 +1181,16 @@ func main() {
 		Log:              log.With(slog.String("comp", "frontierbound")),
 	}); err != nil {
 		log.Error("frontierbound: install handlers", slog.Any("err", err))
+		os.Exit(1)
+	}
+	if err := fbClient.Register(rootCtx, tunnel.MethodOperatorPushEvent, func(rpcCtx context.Context, transportID uint64, body []byte) ([]byte, error) {
+		edgeID := fbClient.CanonicalizeEdgeID(transportID)
+		if edgeID == 0 {
+			return nil, fmt.Errorf("operator push_event: edge binding not ready")
+		}
+		return operatorRunSvc.HandlePushEvent(rpcCtx, edgeID, body)
+	}); err != nil {
+		log.Error("frontierbound: install operator push handler", slog.Any("err", err))
 		os.Exit(1)
 	}
 	// Back-fill the reload notifier now that fbClient is alive — earlier
@@ -1986,6 +2000,7 @@ func main() {
 		return out
 	})
 	skillHandler := managerserverskill.NewHandler(skillSvc)
+	operatorRunHandler := managerserveroperatorrun.NewHandler(operatorRunSvc)
 
 	// marketplace wiring. Install / List / Uninstall on
 	// /v1/marketplace/*. The usecase reloads the chatruntime registries
@@ -2578,6 +2593,7 @@ func main() {
 			systemUpgradeHandler.Register(protected)
 			imbridgeHandler.RegisterProtected(protected)
 			skillHandler.Register(protected)
+			operatorRunHandler.Register(protected)
 			if knowledgeHandler != nil {
 				knowledgeHandler.Register(protected)
 			}

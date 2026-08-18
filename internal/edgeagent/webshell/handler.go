@@ -51,6 +51,10 @@ func Register(client Acceptor, log *slog.Logger) {
 	log.Info("webshell: stream forwarder running")
 }
 
+func HandleStream(stream tunnel.StreamConn, log *slog.Logger) {
+	handleStream(stream, log)
+}
+
 // acceptLoop pumps AcceptStream calls forever (until tunnel close).
 // Each stream is handed to a separate goroutine — concurrent shells
 // don't block one another.

@@ -53,15 +53,16 @@ type Capture struct {
 	FilterJSON          string `gorm:"column:filter_json;type:text;not null" json:"-"`
 	CanonicalFilter     string `gorm:"column:canonical_filter;type:text;not null" json:"canonical_filter"`
 
-	InterfaceName string `gorm:"column:interface_name;type:varchar(64);not null;default:''" json:"interface_name"`
-	Direction     string `gorm:"column:direction;type:varchar(16);not null;default:'inout'" json:"direction"`
-	Format        string `gorm:"column:format;type:varchar(16);not null;default:'pcap'" json:"format"`
-	Promiscuous   bool   `gorm:"column:promiscuous;not null;default:false" json:"promiscuous"`
-	Immediate     bool   `gorm:"column:immediate;not null;default:false" json:"immediate"`
-	DurationSecs  uint32 `gorm:"column:duration_seconds;not null;default:30" json:"duration_seconds"`
-	MaxBytes      uint64 `gorm:"column:max_bytes;not null;default:0" json:"max_bytes"`
-	MaxPackets    uint64 `gorm:"column:max_packets;not null;default:0" json:"max_packets"`
-	Snaplen       uint32 `gorm:"column:snaplen;not null;default:1514" json:"snaplen"`
+	InterfaceName    string `gorm:"column:interface_name;type:varchar(64);not null;default:''" json:"interface_name"`
+	NetworkNamespace string `gorm:"column:network_namespace;type:varchar(128);not null;default:''" json:"network_namespace,omitempty"`
+	Direction        string `gorm:"column:direction;type:varchar(16);not null;default:'inout'" json:"direction"`
+	Format           string `gorm:"column:format;type:varchar(16);not null;default:'pcap'" json:"format"`
+	Promiscuous      bool   `gorm:"column:promiscuous;not null;default:false" json:"promiscuous"`
+	Immediate        bool   `gorm:"column:immediate;not null;default:false" json:"immediate"`
+	DurationSecs     uint32 `gorm:"column:duration_seconds;not null;default:30" json:"duration_seconds"`
+	MaxBytes         uint64 `gorm:"column:max_bytes;not null;default:0" json:"max_bytes"`
+	MaxPackets       uint64 `gorm:"column:max_packets;not null;default:0" json:"max_packets"`
+	Snaplen          uint32 `gorm:"column:snaplen;not null;default:1514" json:"snaplen"`
 
 	Title         string `gorm:"column:title;type:varchar(255);not null;default:''" json:"title"`
 	Description   string `gorm:"column:description;type:text;not null" json:"description"`
@@ -72,6 +73,7 @@ type Capture struct {
 
 	CapturedBytes   uint64 `gorm:"column:captured_bytes;not null;default:0" json:"captured_bytes"`
 	CapturedPackets uint64 `gorm:"column:captured_packets;not null;default:0" json:"captured_packets"`
+	LivePreviewJSON string `gorm:"column:live_preview_json;type:text;not null" json:"-"`
 	RawObjectKey    string `gorm:"column:raw_object_key;type:varchar(512);not null;default:''" json:"-"`
 	RawSHA256       string `gorm:"column:raw_sha256;type:char(64);not null;default:''" json:"-"`
 	ArtifactID      string `gorm:"column:artifact_id;type:varchar(64);not null;default:'';index" json:"artifact_id"`

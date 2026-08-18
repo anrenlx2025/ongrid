@@ -405,6 +405,10 @@ func (a *Agent) registerHandlers() {
 		func(ctx context.Context, _ tunnel.Session, _ string, body []byte) ([]byte, error) {
 			return a.handleCancelPacketCapture(ctx, body)
 		})
+	a.client.RegisterHandler(tunnel.MethodStopPacketCapture,
+		func(ctx context.Context, _ tunnel.Session, _ string, body []byte) ([]byte, error) {
+			return a.handleStopPacketCapture(ctx, body)
+		})
 	// Skill dispatcher: one handler routes every execute_skill RPC by
 	// the skill key in the request body. The skill registry is populated
 	// by init() blocks in internal/skill/builtin/* packages — the agent

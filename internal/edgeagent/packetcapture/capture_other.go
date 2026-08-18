@@ -9,15 +9,16 @@ import (
 )
 
 type Request struct {
-	CaptureID   string        `json:"capture_id"`
-	Interface   string        `json:"interface"`
-	Filter      string        `json:"filter,omitempty"`
-	Duration    time.Duration `json:"-"`
-	MaxBytes    int64         `json:"max_bytes"`
-	MaxPackets  int           `json:"max_packets"`
-	Snaplen     int           `json:"snaplen"`
-	Promiscuous bool          `json:"promiscuous"`
-	StartAt     *time.Time    `json:"start_at,omitempty"`
+	CaptureID        string        `json:"capture_id"`
+	Interface        string        `json:"interface"`
+	NetworkNamespace string        `json:"network_namespace,omitempty"`
+	Filter           string        `json:"filter,omitempty"`
+	Duration         time.Duration `json:"-"`
+	MaxBytes         int64         `json:"max_bytes"`
+	MaxPackets       int           `json:"max_packets"`
+	Snaplen          int           `json:"snaplen"`
+	Promiscuous      bool          `json:"promiscuous"`
+	StartAt          *time.Time    `json:"start_at,omitempty"`
 }
 
 type Result struct {
@@ -29,7 +30,10 @@ type Result struct {
 	FileBytes     int64     `json:"file_bytes"`
 	StopReason    string    `json:"stop_reason"`
 	InterfaceName string    `json:"interface"`
+	LivePreview   []string  `json:"live_preview,omitempty"`
 }
+
+type ProgressReporter func(Result)
 
 type Capturer struct{}
 
@@ -60,6 +64,10 @@ func (*Capturer) Capture(context.Context, Request) (Result, error) {
 	return Result{}, errors.New("packet capture: supported on linux only")
 }
 
+func (*Capturer) CaptureWithProgress(context.Context, Request, ProgressReporter) (Result, error) {
+	return Result{}, errors.New("packet capture: supported on linux only")
+}
+
 func NewService(*Capturer) (*Service, error) {
 	return nil, errors.New("packet capture: supported on linux only")
 }
@@ -71,6 +79,10 @@ func (*Service) Start(Request) (Task, error) {
 func (*Service) Get(string) (Task, bool) { return Task{}, false }
 
 func (*Service) Cancel(string) (Task, error) {
+	return Task{}, errors.New("packet capture: supported on linux only")
+}
+
+func (*Service) Stop(string) (Task, error) {
 	return Task{}, errors.New("packet capture: supported on linux only")
 }
 

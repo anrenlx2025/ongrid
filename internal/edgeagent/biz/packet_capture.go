@@ -78,6 +78,24 @@ func (a *Agent) handleCancelPacketCapture(_ context.Context, body []byte) ([]byt
 	return json.Marshal(toTunnelPacketCaptureTask(task))
 }
 
+func (a *Agent) handleStopPacketCapture(_ context.Context, body []byte) ([]byte, error) {
+	var in tunnel.PacketCaptureStopRequest
+	if err := json.Unmarshal(body, &in); err != nil {
+		return nil, err
+	}
+	if a.packetCaptureErr != nil {
+		return nil, fmt.Errorf("stop_packet_capture unavailable: %w", a.packetCaptureErr)
+	}
+	if a.packetCapture == nil {
+		return nil, fmt.Errorf("stop_packet_capture unavailable")
+	}
+	task, err := a.packetCapture.Stop(strings.TrimSpace(in.CaptureID))
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(toTunnelPacketCaptureTask(task))
+}
+
 func (a *Agent) handleReadPacketCapture(_ context.Context, body []byte) ([]byte, error) {
 	var in tunnel.PacketCaptureReadRequest
 	if err := jsonDecode(body, &in); err != nil {
@@ -98,15 +116,16 @@ func (a *Agent) startPacketCaptureTask(_ context.Context, in tunnel.PacketCaptur
 		return tunnel.PacketCaptureTask{}, fmt.Errorf("capture_pcap unavailable: packet capture service is not configured")
 	}
 	task, err := a.packetCapture.Start(packetcapture.Request{
-		CaptureID:   strings.TrimSpace(in.CaptureID),
-		Interface:   strings.TrimSpace(in.Interface),
-		Filter:      strings.TrimSpace(in.Filter),
-		Duration:    time.Duration(in.DurationSeconds) * time.Second,
-		MaxBytes:    in.MaxBytes,
-		MaxPackets:  in.MaxPackets,
-		Snaplen:     in.Snaplen,
-		Promiscuous: in.Promiscuous,
-		StartAt:     in.StartAt,
+		CaptureID:        strings.TrimSpace(in.CaptureID),
+		Interface:        strings.TrimSpace(in.Interface),
+		NetworkNamespace: strings.TrimSpace(in.NetworkNamespace),
+		Filter:           strings.TrimSpace(in.Filter),
+		Duration:         time.Duration(in.DurationSeconds) * time.Second,
+		MaxBytes:         in.MaxBytes,
+		MaxPackets:       in.MaxPackets,
+		Snaplen:          in.Snaplen,
+		Promiscuous:      in.Promiscuous,
+		StartAt:          in.StartAt,
 	})
 	if err != nil {
 		return tunnel.PacketCaptureTask{}, err
@@ -152,15 +171,16 @@ func toTunnelPacketCaptureTask(task packetcapture.Task) tunnel.PacketCaptureTask
 	return tunnel.PacketCaptureTask{
 		ID: task.ID,
 		Request: tunnel.PacketCaptureWireIn{
-			CaptureID:       task.Request.CaptureID,
-			Interface:       task.Request.Interface,
-			Filter:          task.Request.Filter,
-			DurationSeconds: int(task.Request.Duration.Seconds()),
-			MaxBytes:        task.Request.MaxBytes,
-			MaxPackets:      task.Request.MaxPackets,
-			Snaplen:         task.Request.Snaplen,
-			Promiscuous:     task.Request.Promiscuous,
-			StartAt:         task.Request.StartAt,
+			CaptureID:        task.Request.CaptureID,
+			Interface:        task.Request.Interface,
+			NetworkNamespace: task.Request.NetworkNamespace,
+			Filter:           task.Request.Filter,
+			DurationSeconds:  int(task.Request.Duration.Seconds()),
+			MaxBytes:         task.Request.MaxBytes,
+			MaxPackets:       task.Request.MaxPackets,
+			Snaplen:          task.Request.Snaplen,
+			Promiscuous:      task.Request.Promiscuous,
+			StartAt:          task.Request.StartAt,
 		},
 		State: task.State,
 		Result: tunnel.PacketCaptureResult{
@@ -171,6 +191,7 @@ func toTunnelPacketCaptureTask(task packetcapture.Task) tunnel.PacketCaptureTask
 			FileBytes:     task.Result.FileBytes,
 			StopReason:    task.Result.StopReason,
 			InterfaceName: task.Result.InterfaceName,
+			LivePreview:   task.Result.LivePreview,
 		},
 		Error:      task.Error,
 		CreatedAt:  task.CreatedAt,

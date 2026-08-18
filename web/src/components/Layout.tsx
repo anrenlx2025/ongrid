@@ -44,11 +44,13 @@ export function Layout() {
   }, [setAgentPanelOpen, setPaletteOpen]);
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100">
+    <div className="flex h-screen min-h-0 w-screen min-w-0 overflow-hidden bg-zinc-950 text-zinc-100">
       <Sidebar />
-      <Suspense fallback={<MainLoading />}>
-        <Outlet />
-      </Suspense>
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        <Suspense fallback={<MainLoading />}>
+          <Outlet />
+        </Suspense>
+      </div>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <AgentSidePanel open={agentPanelOpen} onClose={() => setAgentPanelOpen(false)} />
     </div>

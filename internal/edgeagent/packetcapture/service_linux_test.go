@@ -102,6 +102,34 @@ func TestServiceCompletesTask(t *testing.T) {
 	t.Fatalf("task did not complete: %+v", task)
 }
 
+func TestServicePublishesProgressBeforeCaptureCompletes(t *testing.T) {
+	reported := make(chan struct{})
+	release := make(chan struct{})
+	svc := newServiceForTest(t, func(context.Context, Request) (Result, error) {
+		<-release
+		return Result{Packets: 7, PayloadBytes: 512, StopReason: "duration_limit"}, nil
+	})
+	svc.progressRunner = func(_ context.Context, _ Request, report ProgressReporter) (Result, error) {
+		report(Result{Packets: 3, PayloadBytes: 192, InterfaceName: "eth0"})
+		close(reported)
+		<-release
+		return Result{Packets: 7, PayloadBytes: 512, StopReason: "duration_limit"}, nil
+	}
+	if _, err := svc.Start(Request{CaptureID: "capture-progress", Interface: "eth0"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-reported:
+	case <-time.After(time.Second):
+		t.Fatal("progress was not reported")
+	}
+	task, ok := svc.Get("capture-progress")
+	if !ok || task.State != TaskRunning || task.Result.Packets != 3 || task.Result.PayloadBytes != 192 {
+		t.Fatalf("live task = %+v, exists=%v", task, ok)
+	}
+	close(release)
+}
+
 func TestServiceHonorsPlannedStartTime(t *testing.T) {
 	started := make(chan time.Time, 1)
 	svc := newServiceForTest(t, func(_ context.Context, _ Request) (Result, error) {
@@ -142,6 +170,71 @@ func TestServiceCancelsBeforePlannedStart(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	task, _ := svc.Get("capture-cancel-before-start")
+	t.Fatalf("task=%+v, want cancelled", task)
+}
+
+func TestServiceStopRunningCaptureKeepsPartialPCAP(t *testing.T) {
+	dir := t.TempDir()
+	started := make(chan struct{})
+	svc := newServiceForDirTest(t, dir, func(ctx context.Context, in Request) (Result, error) {
+		close(started)
+		<-ctx.Done()
+		path := filepath.Join(dir, in.CaptureID+".pcap")
+		if err := os.WriteFile(path, []byte("partial-pcap"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return Result{Path: path, FileBytes: int64(len("partial-pcap")), Packets: 3, StopReason: "cancelled"}, nil
+	})
+	if _, err := svc.Start(Request{CaptureID: "capture-stop-running", Interface: "eth0"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("runner never started")
+	}
+	if _, err := svc.Stop("capture-stop-running"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		task, ok := svc.Get("capture-stop-running")
+		if ok && task.State == TaskSucceeded {
+			if task.Result.StopReason != "stopped" || task.Result.FileBytes == 0 {
+				t.Fatalf("stopped task = %+v", task)
+			}
+			raw, err := svc.Read("capture-stop-running", 1024)
+			if err != nil || string(raw.Data) != "partial-pcap" {
+				t.Fatalf("Read partial capture = %+v, %v", raw, err)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	task, _ := svc.Get("capture-stop-running")
+	t.Fatalf("task=%+v, want succeeded", task)
+}
+
+func TestServiceStopBeforePlannedStartCancels(t *testing.T) {
+	svc := newServiceForTest(t, func(context.Context, Request) (Result, error) {
+		t.Fatal("runner should not start")
+		return Result{}, nil
+	})
+	planned := time.Now().UTC().Add(time.Second)
+	if _, err := svc.Start(Request{CaptureID: "capture-stop-before-start", Interface: "eth0", StartAt: &planned}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := svc.Stop("capture-stop-before-start"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if task, ok := svc.Get("capture-stop-before-start"); ok && task.State == TaskCancelled {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	task, _ := svc.Get("capture-stop-before-start")
 	t.Fatalf("task=%+v, want cancelled", task)
 }
 
@@ -196,5 +289,6 @@ func newServiceForDirTest(t *testing.T, dir string, runner func(context.Context,
 		t.Fatalf("NewService: %v", err)
 	}
 	svc.runner = runner
+	svc.progressRunner = nil
 	return svc
 }

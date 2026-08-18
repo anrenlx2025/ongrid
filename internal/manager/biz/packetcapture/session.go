@@ -21,6 +21,7 @@ const sessionStartLeadTime = 5 * time.Second
 type SessionTarget struct {
 	DeviceID          uint64 `json:"device_id"`
 	Interface         string `json:"interface"`
+	NetworkNamespace  string `json:"network_namespace,omitempty"`
 	StartAfterSeconds int    `json:"start_after_seconds,omitempty"`
 }
 
@@ -74,7 +75,7 @@ func (u *Usecase) CreateSession(ctx context.Context, in CreateSessionInput) (*Se
 			return nil, fmt.Errorf("%w: resolve target device %d", errs.ErrInvalid, target.DeviceID)
 		}
 	}
-	probe, err := normalizeCreateInput(CreateInput{DeviceID: in.Targets[0].DeviceID, Interface: in.Targets[0].Interface, Filter: in.Filter, DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: in.Title, Description: in.Description, Source: in.Source, CreatedBy: in.CreatedBy})
+	probe, err := normalizeCreateInput(CreateInput{DeviceID: in.Targets[0].DeviceID, Interface: in.Targets[0].Interface, NetworkNamespace: in.Targets[0].NetworkNamespace, Filter: in.Filter, DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: in.Title, Description: in.Description, Source: in.Source, CreatedBy: in.CreatedBy})
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +87,7 @@ func (u *Usecase) CreateSession(ctx context.Context, in CreateSessionInput) (*Se
 	out := &SessionOutput{Session: session, Captures: make([]*model.Capture, 0, len(in.Targets))}
 	for _, target := range in.Targets {
 		memberStart := plannedStart.Add(time.Duration(target.StartAfterSeconds) * time.Second)
-		created, createErr := u.Create(ctx, CreateInput{DeviceID: target.DeviceID, Interface: target.Interface, Filter: probe.Filter, DurationSeconds: probe.DurationSeconds, MaxBytes: probe.MaxBytes, MaxPackets: probe.MaxPackets, Snaplen: probe.Snaplen, Promiscuous: probe.Promiscuous, Title: probe.Title, Description: probe.Description, Source: probe.Source, CreatedBy: probe.CreatedBy, SessionID: session.ID, PlannedStartAt: &memberStart})
+		created, createErr := u.Create(ctx, CreateInput{DeviceID: target.DeviceID, Interface: target.Interface, NetworkNamespace: target.NetworkNamespace, Filter: probe.Filter, DurationSeconds: probe.DurationSeconds, MaxBytes: probe.MaxBytes, MaxPackets: probe.MaxPackets, Snaplen: probe.Snaplen, Promiscuous: probe.Promiscuous, Title: probe.Title, Description: probe.Description, Source: probe.Source, CreatedBy: probe.CreatedBy, SessionID: session.ID, PlannedStartAt: &memberStart})
 		if createErr != nil {
 			out.MemberErrors = append(out.MemberErrors, fmt.Sprintf("device %d: %v", target.DeviceID, createErr))
 			continue
@@ -224,6 +225,25 @@ func (u *Usecase) CancelSession(ctx context.Context, publicID string) (*SessionD
 		}
 		if _, cancelErr := u.Cancel(ctx, capture.ID); cancelErr != nil {
 			u.log.Warn("packet capture: cancel session member", "session", publicID, "capture_id", capture.ID, "err", cancelErr)
+		}
+	}
+	return u.updateSessionAnalysis(ctx, publicID)
+}
+
+// StopSession gracefully finishes each active member and retains completed
+// partial PCAPs. Follow-up RefreshSession calls publish those PCAPs through the
+// regular artifact pipeline once the edge reports success.
+func (u *Usecase) StopSession(ctx context.Context, publicID string) (*SessionDetail, error) {
+	detail, err := u.GetSession(ctx, publicID)
+	if err != nil {
+		return nil, err
+	}
+	for _, capture := range detail.Captures {
+		if capture.State == model.StateReady || capture.State == model.StateFailed || capture.State == model.StateCancelled || capture.State == model.StateExpired || capture.State == model.StateDeleted {
+			continue
+		}
+		if _, stopErr := u.Stop(ctx, capture.ID); stopErr != nil {
+			u.log.Warn("packet capture: stop session member", "session", publicID, "capture_id", capture.ID, "err", stopErr)
 		}
 	}
 	return u.updateSessionAnalysis(ctx, publicID)

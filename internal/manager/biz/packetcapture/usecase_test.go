@@ -276,6 +276,9 @@ func (r *fakeRepo) Transition(_ context.Context, id uint64, from []string, to st
 	if v, ok := fields["captured_packets"].(uint64); ok {
 		capture.CapturedPackets = v
 	}
+	if v, ok := fields["live_preview_json"].(string); ok {
+		capture.LivePreviewJSON = v
+	}
 	if v, ok := fields["started_at"].(time.Time); ok {
 		capture.StartedAt = &v
 	}
@@ -347,11 +350,13 @@ func (r fakeResolver) ResolveEdgeID(_ context.Context, _ uint64) (uint64, error)
 }
 
 type fakeCaller struct {
-	method  string
-	methods []string
-	edgeID  uint64
-	err     error
-	state   string
+	method           string
+	methods          []string
+	edgeID           uint64
+	err              error
+	state            string
+	livePayloadBytes int64
+	livePreview      []string
 }
 
 func (c *fakeCaller) Call(_ context.Context, edgeID uint64, method string, body []byte) ([]byte, error) {
@@ -373,6 +378,18 @@ func (c *fakeCaller) Call(_ context.Context, edgeID uint64, method string, body 
 			FinishedAt: &now,
 		})
 	}
+	if method == tunnel.MethodStopPacketCapture {
+		var req tunnel.PacketCaptureStopRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, err
+		}
+		return json.Marshal(tunnel.PacketCaptureTask{
+			ID:        req.CaptureID,
+			State:     "running",
+			CreatedAt: now,
+			StartedAt: &now,
+		})
+	}
 	if method == tunnel.MethodGetPacketCapture {
 		var req tunnel.PacketCaptureGetRequest
 		if err := json.Unmarshal(body, &req); err != nil {
@@ -382,10 +399,15 @@ func (c *fakeCaller) Call(_ context.Context, edgeID uint64, method string, body 
 		if state == "" {
 			state = "running"
 		}
+		result := tunnel.PacketCaptureResult{Packets: 12, FileBytes: 2048, StopReason: "duration", LivePreview: c.livePreview}
+		if c.livePayloadBytes > 0 {
+			result.FileBytes = 0
+			result.PayloadBytes = c.livePayloadBytes
+		}
 		return json.Marshal(tunnel.PacketCaptureTask{
 			ID:         req.CaptureID,
 			State:      state,
-			Result:     tunnel.PacketCaptureResult{Packets: 12, FileBytes: 2048, StopReason: "duration"},
+			Result:     result,
 			CreatedAt:  now,
 			StartedAt:  &now,
 			FinishedAt: &now,
@@ -416,14 +438,15 @@ func (c *fakeCaller) Call(_ context.Context, edgeID uint64, method string, body 
 	return json.Marshal(tunnel.PacketCaptureTask{
 		ID: req.CaptureID,
 		Request: tunnel.PacketCaptureWireIn{
-			CaptureID:       req.CaptureID,
-			Interface:       req.Interface,
-			Filter:          req.Filter,
-			DurationSeconds: req.DurationSeconds,
-			MaxBytes:        req.MaxBytes,
-			MaxPackets:      req.MaxPackets,
-			Snaplen:         req.Snaplen,
-			Promiscuous:     req.Promiscuous,
+			CaptureID:        req.CaptureID,
+			Interface:        req.Interface,
+			NetworkNamespace: req.NetworkNamespace,
+			Filter:           req.Filter,
+			DurationSeconds:  req.DurationSeconds,
+			MaxBytes:         req.MaxBytes,
+			MaxPackets:       req.MaxPackets,
+			Snaplen:          req.Snaplen,
+			Promiscuous:      req.Promiscuous,
 		},
 		State:     state,
 		Result:    tunnel.PacketCaptureResult{Packets: 12, FileBytes: 2048, StopReason: "duration"},
@@ -432,18 +455,39 @@ func (c *fakeCaller) Call(_ context.Context, edgeID uint64, method string, body 
 	})
 }
 
+func TestUsecaseStopKeepsCaptureActiveUntilEdgeCompletes(t *testing.T) {
+	repo := newFakeRepo()
+	caller := &fakeCaller{}
+	uc := New(repo, caller, fakeResolver{edgeID: 7}, nil)
+	capture, err := uc.Create(context.Background(), CreateInput{DeviceID: 11, Interface: "eth0", Source: SourceAPI})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	stopped, err := uc.Stop(context.Background(), capture.Capture.ID)
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if caller.method != tunnel.MethodStopPacketCapture {
+		t.Fatalf("method=%q want %q", caller.method, tunnel.MethodStopPacketCapture)
+	}
+	if stopped.State != model.StateCapturing {
+		t.Fatalf("state=%q want %q", stopped.State, model.StateCapturing)
+	}
+}
+
 func TestUsecaseCreateDispatchesEdgeAndPersistsState(t *testing.T) {
 	repo := newFakeRepo()
 	caller := &fakeCaller{}
 	uc := New(repo, caller, fakeResolver{edgeID: 9}, nil)
 
 	out, err := uc.Create(context.Background(), CreateInput{
-		DeviceID:        3,
-		Interface:       "eth0",
-		Filter:          "tcp and port 443",
-		DurationSeconds: 10,
-		Source:          SourceChat,
-		CreatedBy:       7,
+		DeviceID:         3,
+		Interface:        "eth0",
+		NetworkNamespace: "ongrid-netdev-a",
+		Filter:           "tcp and port 443",
+		DurationSeconds:  10,
+		Source:           SourceChat,
+		CreatedBy:        7,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -465,6 +509,9 @@ func TestUsecaseCreateDispatchesEdgeAndPersistsState(t *testing.T) {
 	}
 	if out.Edge.Request.DurationSeconds != 10 {
 		t.Fatalf("edge duration = %d", out.Edge.Request.DurationSeconds)
+	}
+	if out.Capture.NetworkNamespace != "ongrid-netdev-a" || out.Edge.Request.NetworkNamespace != "ongrid-netdev-a" {
+		t.Fatalf("network namespace capture=%q edge=%q", out.Capture.NetworkNamespace, out.Edge.Request.NetworkNamespace)
 	}
 }
 
@@ -532,6 +579,42 @@ func TestUsecaseRefreshUpdatesCaptureState(t *testing.T) {
 	}
 	if refreshed.State != model.StateReady || refreshed.CapturedPackets != 12 || refreshed.CapturedBytes != 2048 {
 		t.Fatalf("refreshed=%+v", refreshed)
+	}
+}
+
+func TestUsecaseRefreshUsesLivePayloadBytes(t *testing.T) {
+	repo := newFakeRepo()
+	caller := &fakeCaller{livePayloadBytes: 768}
+	uc := New(repo, caller, fakeResolver{edgeID: 9}, nil)
+
+	created, err := uc.Create(context.Background(), CreateInput{DeviceID: 3, Interface: "eth0"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	refreshed, err := uc.Refresh(context.Background(), created.Capture.ID)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if refreshed.State != model.StateCapturing || refreshed.CapturedPackets != 12 || refreshed.CapturedBytes != 768 {
+		t.Fatalf("refreshed=%+v", refreshed)
+	}
+}
+
+func TestUsecaseRefreshPersistsLivePreview(t *testing.T) {
+	repo := newFakeRepo()
+	caller := &fakeCaller{livePayloadBytes: 768, livePreview: []string{"IP 10.0.0.1.51515 > 10.0.0.2.443: tcp 0"}}
+	uc := New(repo, caller, fakeResolver{edgeID: 9}, nil)
+
+	created, err := uc.Create(context.Background(), CreateInput{DeviceID: 3, Interface: "eth0"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	refreshed, err := uc.Refresh(context.Background(), created.Capture.ID)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if refreshed.LivePreviewJSON != `["IP 10.0.0.1.51515 \u003e 10.0.0.2.443: tcp 0"]` {
+		t.Fatalf("live preview = %q", refreshed.LivePreviewJSON)
 	}
 }
 

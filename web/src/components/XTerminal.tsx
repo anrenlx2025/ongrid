@@ -28,12 +28,16 @@ type Props = {
   // Called for every keystroke / paste. `data` is whatever xterm decoded;
   // we leave the encode-to-bytes step to the caller (TextEncoder) so
   // there's only one place that decides the binary format.
-  onData(data: string): void;
+  onData?(data: string): void;
   // Fires whenever the visible grid changes (initial fit + ResizeObserver).
-  onResize(cols: number, rows: number): void;
+  onResize?(cols: number, rows: number): void;
   // Imperative handle injection. Parent stores the api on a ref to call
   // `write(bytes)` when WS data arrives.
   attachRef(api: XTerminalApi): void;
+  readOnly?: boolean;
+  className?: string;
+  fontSize?: number;
+  scrollback?: number;
 };
 
 // Theme tuned to the rest of the app: zinc-950 background, zinc-100 text,
@@ -63,7 +67,7 @@ const THEME: ITheme = {
   brightWhite: '#fafafa',
 };
 
-export function XTerminal({ onData, onResize, attachRef }: Props) {
+export function XTerminal({ onData, onResize, attachRef, readOnly = false, className = '', fontSize = 13, scrollback = 5000 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -76,14 +80,15 @@ export function XTerminal({ onData, onResize, attachRef }: Props) {
       // closest the host stylesheet ships, fall back to ui-monospace.
       fontFamily:
         '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-      fontSize: 13,
+      fontSize,
       lineHeight: 1.2,
-      cursorBlink: true,
+      cursorBlink: !readOnly,
       cursorStyle: 'block',
-      scrollback: 5000,
+      scrollback,
       allowProposedApi: false,
       convertEol: false, // SSH gives us proper CRLFs already.
       macOptionIsMeta: true,
+      disableStdin: readOnly,
     });
 
     const fitAddon = new FitAddon();
@@ -99,10 +104,18 @@ export function XTerminal({ onData, onResize, attachRef }: Props) {
       /* container not laid out yet — ResizeObserver will catch up */
     }
 
-    const dataDisposable = term.onData((d) => onData(d));
+    const dataDisposable = readOnly ? null : term.onData((d) => onData?.(d));
     const resizeDisposable = term.onResize(({ cols, rows }) => {
-      onResize(cols, rows);
+      onResize?.(cols, rows);
     });
+
+    if (readOnly) {
+      term.attachCustomKeyEventHandler((event) => {
+        const key = event.key.toLowerCase();
+        const copyLike = (event.metaKey || event.ctrlKey) && (key === 'c' || key === 'a');
+        return copyLike;
+      });
+    }
 
     // Re-fit on container size changes (sidebar collapse, window resize).
     // We debounce nothing — fit() is cheap and the resize control frame
@@ -144,12 +157,13 @@ export function XTerminal({ onData, onResize, attachRef }: Props) {
     };
     attachRef(api);
 
-    // Autofocus on mount so the user can start typing immediately.
-    term.focus();
+    // Autofocus only for interactive terminals. Read-only terminals should not
+    // steal focus from forms on diagnostic pages.
+    if (!readOnly) term.focus();
 
     return () => {
       ro.disconnect();
-      dataDisposable.dispose();
+      dataDisposable?.dispose();
       resizeDisposable.dispose();
       term.dispose();
     };
@@ -161,7 +175,7 @@ export function XTerminal({ onData, onResize, attachRef }: Props) {
   return (
     <div
       ref={containerRef}
-      className="h-full w-full bg-zinc-950"
+      className={`h-full w-full bg-zinc-950 ${className}`}
       // xterm injects its own focusable element; this wrapper doesn't
       // need a tabindex.
     />

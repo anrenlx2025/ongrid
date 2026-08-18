@@ -208,6 +208,7 @@ func (s *LocalRawStore) Delete(_ context.Context, key string) error {
 type CreateInput struct {
 	DeviceID              uint64
 	Interface             string
+	NetworkNamespace      string
 	Filter                string
 	DurationSeconds       int
 	MaxBytes              int64
@@ -303,6 +304,7 @@ func (u *Usecase) Create(ctx context.Context, in CreateInput) (*CreateOutput, er
 		FilterJSON:            filterJSON,
 		CanonicalFilter:       normalized.Filter,
 		InterfaceName:         normalized.Interface,
+		NetworkNamespace:      normalized.NetworkNamespace,
 		Direction:             "inout",
 		Format:                "pcap",
 		Promiscuous:           normalized.Promiscuous,
@@ -324,15 +326,16 @@ func (u *Usecase) Create(ctx context.Context, in CreateInput) (*CreateOutput, er
 	// primary keys remain internal implementation details.
 	captureID := capture.ArtifactID
 	req := tunnel.PacketCaptureStartRequest{
-		CaptureID:       captureID,
-		Interface:       normalized.Interface,
-		Filter:          normalized.Filter,
-		DurationSeconds: normalized.DurationSeconds,
-		MaxBytes:        normalized.MaxBytes,
-		MaxPackets:      normalized.MaxPackets,
-		Snaplen:         normalized.Snaplen,
-		Promiscuous:     normalized.Promiscuous,
-		StartAt:         normalized.PlannedStartAt,
+		CaptureID:        captureID,
+		Interface:        normalized.Interface,
+		NetworkNamespace: normalized.NetworkNamespace,
+		Filter:           normalized.Filter,
+		DurationSeconds:  normalized.DurationSeconds,
+		MaxBytes:         normalized.MaxBytes,
+		MaxPackets:       normalized.MaxPackets,
+		Snaplen:          normalized.Snaplen,
+		Promiscuous:      normalized.Promiscuous,
+		StartAt:          normalized.PlannedStartAt,
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -465,10 +468,21 @@ func (u *Usecase) Refresh(ctx context.Context, id uint64) (*model.Capture, error
 	if err := json.Unmarshal(respBody, &edgeTask); err != nil {
 		return nil, fmt.Errorf("packet capture: decode refresh response: %w", err)
 	}
+	capturedBytes := edgeTask.Result.FileBytes
+	if edgeTask.State == "running" || capturedBytes == 0 {
+		// The edge only knows the final pcap file length once it closes the
+		// writer. During capture, payload bytes are the accurate live counter.
+		capturedBytes = edgeTask.Result.PayloadBytes
+	}
 	fields := map[string]any{
-		"captured_bytes":   uint64(edgeTask.Result.FileBytes),
+		"captured_bytes":   uint64(capturedBytes),
 		"captured_packets": uint64(edgeTask.Result.Packets),
 		"error_detail":     edgeTask.Error,
+	}
+	if preview, marshalErr := json.Marshal(edgeTask.Result.LivePreview); marshalErr == nil {
+		fields["live_preview_json"] = string(preview)
+	} else {
+		u.log.Warn("packet capture: marshal live preview", slog.Any("err", marshalErr))
 	}
 	if edgeTask.StartedAt != nil {
 		fields["started_at"] = *edgeTask.StartedAt
@@ -496,22 +510,11 @@ func (u *Usecase) Refresh(ctx context.Context, id uint64) (*model.Capture, error
 			return nil, fmt.Errorf("packet capture: publish artifact: %w", processErr)
 		}
 	}
-	if nextState == model.StateCancelled && edgeTask.Result.FileBytes > 0 {
-		// Cancellation is not a data-integrity failure. The edge may have
-		// already flushed a useful prefix of the trace, which remains available
-		// for the parent session and later analysis.
-		if processed, processErr := u.ingestCancelledCapture(ctx, refreshed); processErr == nil && processed != nil {
-			return processed, nil
-		} else if processErr != nil {
-			u.log.Warn("packet capture: retain cancelled partial artifact", slog.Uint64("capture_id", refreshed.ID), slog.Any("err", processErr))
-		}
-	}
 	return refreshed, nil
 }
 
-// Cancel asks the owning edge to stop a queued or active capture. The capture
-// row is retained so a session can still surface any partial evidence the edge
-// managed to produce before observing cancellation.
+// Cancel asks the owning edge to abandon a queued or active capture. Cancelled
+// captures are deliberately not uploaded or published as artifacts.
 func (u *Usecase) Cancel(ctx context.Context, id uint64) (*model.Capture, error) {
 	if u == nil || u.repo == nil || u.caller == nil {
 		return nil, errs.ErrNotWiredYet
@@ -548,25 +551,43 @@ func (u *Usecase) Cancel(ctx context.Context, id uint64) (*model.Capture, error)
 	return u.repo.Get(ctx, capture.ID)
 }
 
-// ingestCancelledCapture reuses the validated completion parser for a partial
-// file, then restores the fact that the user cancelled the operation.
-func (u *Usecase) ingestCancelledCapture(ctx context.Context, capture *model.Capture) (*model.Capture, error) {
-	if capture == nil || capture.RawObjectKey != "" || u.rawStore == nil {
-		return capture, nil
+// Stop asks the owning edge to gracefully finish a running capture. The edge
+// keeps its flushed PCAP prefix and subsequently reports succeeded, allowing
+// Refresh to use the normal upload and parser pipeline.
+func (u *Usecase) Stop(ctx context.Context, id uint64) (*model.Capture, error) {
+	if u == nil || u.repo == nil || u.caller == nil {
+		return nil, errs.ErrNotWiredYet
 	}
-	if err := u.repo.Transition(ctx, capture.ID, []string{model.StateCancelled}, model.StateReady, nil); err != nil {
-		return nil, err
-	}
-	ready, err := u.repo.Get(ctx, capture.ID)
+	capture, err := u.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	processed, err := u.ingestCompletedCapture(ctx, ready)
-	if err != nil {
-		_ = u.repo.Transition(ctx, capture.ID, []string{model.StateReady, model.StateParsing}, model.StateCancelled, nil)
-		return nil, err
+	edgeCaptureID := edgeCaptureIDFromResolved(capture.ResolvedTargetJSON)
+	if edgeCaptureID == "" {
+		return nil, fmt.Errorf("%w: edge capture id missing", errs.ErrInvalid)
 	}
-	if err := u.repo.Transition(ctx, processed.ID, []string{model.StateReady}, model.StateCancelled, nil); err != nil {
+	body, err := json.Marshal(tunnel.PacketCaptureStopRequest{CaptureID: edgeCaptureID})
+	if err != nil {
+		return nil, fmt.Errorf("packet capture: marshal stop request: %w", err)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	respBody, err := u.caller.Call(callCtx, capture.EdgeID, tunnel.MethodStopPacketCapture, body)
+	if err != nil {
+		return nil, fmt.Errorf("packet capture: stop edge capture: %w", err)
+	}
+	var edgeTask tunnel.PacketCaptureTask
+	if err := json.Unmarshal(respBody, &edgeTask); err != nil {
+		return nil, fmt.Errorf("packet capture: decode stop response: %w", err)
+	}
+	fields := map[string]any{"error_detail": edgeTask.Error}
+	if edgeTask.StartedAt != nil {
+		fields["started_at"] = *edgeTask.StartedAt
+	}
+	if edgeTask.FinishedAt != nil {
+		fields["finished_at"] = *edgeTask.FinishedAt
+	}
+	if err := u.repo.Transition(ctx, capture.ID, refreshableStates(), mapEdgeState(edgeTask.State), fields); err != nil && !errors.Is(err, errs.ErrConflict) {
 		return nil, err
 	}
 	return u.repo.Get(ctx, capture.ID)
@@ -676,6 +697,7 @@ func (u *Usecase) discardFailedCapture(ctx context.Context, capture *model.Captu
 type normalizedCreateInput struct {
 	DeviceID              uint64     `json:"device_id"`
 	Interface             string     `json:"interface"`
+	NetworkNamespace      string     `json:"network_namespace,omitempty"`
 	Filter                string     `json:"filter,omitempty"`
 	DurationSeconds       int        `json:"duration_seconds"`
 	MaxBytes              int64      `json:"max_bytes"`
@@ -695,6 +717,7 @@ func normalizeCreateInput(in CreateInput) (normalizedCreateInput, error) {
 	out := normalizedCreateInput{
 		DeviceID:              in.DeviceID,
 		Interface:             strings.TrimSpace(in.Interface),
+		NetworkNamespace:      strings.TrimSpace(in.NetworkNamespace),
 		Filter:                strings.TrimSpace(in.Filter),
 		DurationSeconds:       in.DurationSeconds,
 		MaxBytes:              in.MaxBytes,
@@ -714,6 +737,9 @@ func normalizeCreateInput(in CreateInput) (normalizedCreateInput, error) {
 	}
 	if out.Interface == "" || strings.ContainsAny(out.Interface, "/\\\x00") || len(out.Interface) > 15 {
 		return normalizedCreateInput{}, fmt.Errorf("%w: valid interface required", errs.ErrInvalid)
+	}
+	if !validNetworkNamespace(out.NetworkNamespace) {
+		return normalizedCreateInput{}, fmt.Errorf("%w: invalid network_namespace", errs.ErrInvalid)
 	}
 	if out.DurationSeconds <= 0 {
 		out.DurationSeconds = defaultDurationSeconds
@@ -746,6 +772,22 @@ func normalizeCreateInput(in CreateInput) (normalizedCreateInput, error) {
 		out.Title = fmt.Sprintf("Packet capture on device %d %s", out.DeviceID, out.Interface)
 	}
 	return out, nil
+}
+
+func validNetworkNamespace(namespace string) bool {
+	if namespace == "" {
+		return true
+	}
+	if len(namespace) > 128 {
+		return false
+	}
+	for _, r := range namespace {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' || r == ':' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func mapEdgeState(state string) string {

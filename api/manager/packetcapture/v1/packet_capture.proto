@@ -15,12 +15,14 @@ service PacketCaptureService {
   rpc GetPacketCaptureArtifact(GetPacketCaptureArtifactRequest) returns (GetPacketCaptureArtifactResponse);
   rpc ListPacketCaptures(ListPacketCapturesRequest) returns (ListPacketCapturesResponse);
   rpc CancelPacketCapture(CancelPacketCaptureRequest) returns (CancelPacketCaptureResponse);
+  rpc StopPacketCapture(StopPacketCaptureRequest) returns (StopPacketCaptureResponse);
   rpc ListPacketCapturePackets(ListPacketCapturePacketsRequest) returns (ListPacketCapturePacketsResponse);
   rpc GetPacketCapturePacket(GetPacketCapturePacketRequest) returns (GetPacketCapturePacketResponse);
   rpc CreatePacketCaptureSession(CreatePacketCaptureSessionRequest) returns (CreatePacketCaptureSessionResponse);
   rpc GetPacketCaptureSession(GetPacketCaptureSessionRequest) returns (GetPacketCaptureSessionResponse);
   rpc ListPacketCaptureSessions(ListPacketCaptureSessionsRequest) returns (ListPacketCaptureSessionsResponse);
   rpc RefreshPacketCaptureSession(RefreshPacketCaptureSessionRequest) returns (RefreshPacketCaptureSessionResponse);
+  rpc StopPacketCaptureSession(StopPacketCaptureSessionRequest) returns (StopPacketCaptureSessionResponse);
 }
 
 enum CaptureTargetKind {
@@ -168,6 +170,7 @@ message CreatePacketCaptureRequest {
   bool require_approval = 27 [json_name = "require_approval"];
   string approval_reason = 28 [json_name = "approval_reason"];
   string requested_timezone = 29 [json_name = "requested_timezone"];
+  string network_namespace = 30 [json_name = "network_namespace"];
 }
 
 message PacketCapture {
@@ -248,6 +251,14 @@ message CancelPacketCaptureResponse {
   PacketCapture capture = 1 [json_name = "capture"];
 }
 
+message StopPacketCaptureRequest {
+  uint64 id = 1 [json_name = "id"];
+}
+
+message StopPacketCaptureResponse {
+  PacketCapture capture = 1 [json_name = "capture"];
+}
+
 message PacketSummary {
   uint64 ordinal = 1 [json_name = "ordinal"];
   int64 timestamp_unix_nano = 2 [json_name = "timestamp_unix_nano"];
@@ -297,6 +308,7 @@ message GetPacketCapturePacketResponse {
 message PacketCaptureSessionTarget {
   uint64 device_id = 1 [json_name = "device_id"];
   string interface_name = 2 [json_name = "interface_name"];
+  string network_namespace = 3 [json_name = "network_namespace"];
 }
 
 message PacketCaptureSession {
@@ -330,3 +342,5 @@ message ListPacketCaptureSessionsRequest { int32 page = 1 [json_name = "page"]; 
 message ListPacketCaptureSessionsResponse { repeated PacketCaptureSession items = 1 [json_name = "items"]; int32 total = 2 [json_name = "total"]; }
 message RefreshPacketCaptureSessionRequest { string public_id = 1 [json_name = "public_id"]; }
 message RefreshPacketCaptureSessionResponse { PacketCaptureSession session = 1 [json_name = "session"]; repeated PacketCapture captures = 2 [json_name = "captures"]; }
+message StopPacketCaptureSessionRequest { string public_id = 1 [json_name = "public_id"]; }
+message StopPacketCaptureSessionResponse { PacketCaptureSession session = 1 [json_name = "session"]; repeated PacketCapture captures = 2 [json_name = "captures"]; }

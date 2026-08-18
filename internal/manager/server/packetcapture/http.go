@@ -38,9 +38,12 @@ func (h *Handler) Register(r chi.Router) {
 	r.Get("/v1/packet-captures/{id}/download", h.download)
 	r.With(h.requireWriter).Post("/v1/packet-captures", h.create)
 	r.With(h.requireWriter).Post("/v1/packet-captures/{id}/refresh", h.refresh)
+	r.With(h.requireWriter).Post("/v1/packet-captures/{id}/cancel", h.cancel)
+	r.With(h.requireWriter).Post("/v1/packet-captures/{id}/stop", h.stop)
 	r.With(h.requireWriter).Post("/v1/packet-capture-sessions", h.createSession)
 	r.With(h.requireWriter).Post("/v1/packet-capture-sessions/{publicID}/refresh", h.refreshSession)
 	r.With(h.requireWriter).Post("/v1/packet-capture-sessions/{publicID}/cancel", h.cancelSession)
+	r.With(h.requireWriter).Post("/v1/packet-capture-sessions/{publicID}/stop", h.stopSession)
 }
 
 // @Summary Get packet capture artifact
@@ -78,40 +81,43 @@ func (h *Handler) requireWriter(next http.Handler) http.Handler {
 }
 
 type captureDTO struct {
-	ID              uint64     `json:"id"`
-	CreatedBy       uint64     `json:"created_by"`
-	Source          string     `json:"source"`
-	State           string     `json:"state"`
-	EdgeID          uint64     `json:"edge_id"`
-	DeviceID        uint64     `json:"device_id"`
-	SessionID       uint64     `json:"session_id,omitempty"`
-	InterfaceName   string     `json:"interface_name"`
-	CanonicalFilter string     `json:"canonical_filter"`
-	Direction       string     `json:"direction"`
-	Format          string     `json:"format"`
-	Promiscuous     bool       `json:"promiscuous"`
-	DurationSeconds uint32     `json:"duration_seconds"`
-	MaxBytes        uint64     `json:"max_bytes"`
-	MaxPackets      uint64     `json:"max_packets"`
-	Snaplen         uint32     `json:"snaplen"`
-	Title           string     `json:"title"`
-	Description     string     `json:"description"`
-	CapturedBytes   uint64     `json:"captured_bytes"`
-	CapturedPackets uint64     `json:"captured_packets"`
-	ArtifactID      string     `json:"artifact_id,omitempty"`
-	RawAvailable    bool       `json:"raw_available"`
-	Analysis        any        `json:"analysis,omitempty"`
-	ErrorCode       string     `json:"error_code,omitempty"`
-	ErrorDetail     string     `json:"error_detail,omitempty"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID               uint64     `json:"id"`
+	CreatedBy        uint64     `json:"created_by"`
+	Source           string     `json:"source"`
+	State            string     `json:"state"`
+	EdgeID           uint64     `json:"edge_id"`
+	DeviceID         uint64     `json:"device_id"`
+	SessionID        uint64     `json:"session_id,omitempty"`
+	InterfaceName    string     `json:"interface_name"`
+	NetworkNamespace string     `json:"network_namespace,omitempty"`
+	CanonicalFilter  string     `json:"canonical_filter"`
+	Direction        string     `json:"direction"`
+	Format           string     `json:"format"`
+	Promiscuous      bool       `json:"promiscuous"`
+	DurationSeconds  uint32     `json:"duration_seconds"`
+	MaxBytes         uint64     `json:"max_bytes"`
+	MaxPackets       uint64     `json:"max_packets"`
+	Snaplen          uint32     `json:"snaplen"`
+	Title            string     `json:"title"`
+	Description      string     `json:"description"`
+	CapturedBytes    uint64     `json:"captured_bytes"`
+	CapturedPackets  uint64     `json:"captured_packets"`
+	LivePreview      []string   `json:"live_preview,omitempty"`
+	ArtifactID       string     `json:"artifact_id,omitempty"`
+	RawAvailable     bool       `json:"raw_available"`
+	Analysis         any        `json:"analysis,omitempty"`
+	ErrorCode        string     `json:"error_code,omitempty"`
+	ErrorDetail      string     `json:"error_detail,omitempty"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 type createReq struct {
 	DeviceID              uint64 `json:"device_id"`
 	Interface             string `json:"interface"`
+	NetworkNamespace      string `json:"network_namespace"`
 	Filter                string `json:"filter"`
 	DurationSeconds       int    `json:"duration_seconds"`
 	MaxBytes              int64  `json:"max_bytes"`
@@ -124,8 +130,9 @@ type createReq struct {
 }
 
 type sessionTargetReq struct {
-	DeviceID  uint64 `json:"device_id"`
-	Interface string `json:"interface"`
+	DeviceID         uint64 `json:"device_id"`
+	Interface        string `json:"interface"`
+	NetworkNamespace string `json:"network_namespace"`
 }
 type createSessionReq struct {
 	Targets         []sessionTargetReq `json:"targets"`
@@ -202,34 +209,36 @@ func toDTOWithAnalysis(c *model.Capture, includeAnalysis bool) captureDTO {
 		return captureDTO{}
 	}
 	dto := captureDTO{
-		ID:              c.ID,
-		CreatedBy:       c.CreatedBy,
-		Source:          c.Source,
-		State:           c.State,
-		EdgeID:          c.EdgeID,
-		DeviceID:        c.DeviceID,
-		SessionID:       c.SessionID,
-		InterfaceName:   c.InterfaceName,
-		CanonicalFilter: c.CanonicalFilter,
-		Direction:       c.Direction,
-		Format:          c.Format,
-		Promiscuous:     c.Promiscuous,
-		DurationSeconds: c.DurationSecs,
-		MaxBytes:        c.MaxBytes,
-		MaxPackets:      c.MaxPackets,
-		Snaplen:         c.Snaplen,
-		Title:           c.Title,
-		Description:     c.Description,
-		CapturedBytes:   c.CapturedBytes,
-		CapturedPackets: c.CapturedPackets,
-		ArtifactID:      c.ArtifactID,
-		RawAvailable:    c.RawObjectKey != "",
-		ErrorCode:       c.ErrorCode,
-		ErrorDetail:     c.ErrorDetail,
-		StartedAt:       c.StartedAt,
-		FinishedAt:      c.FinishedAt,
-		CreatedAt:       c.CreatedAt,
-		UpdatedAt:       c.UpdatedAt,
+		ID:               c.ID,
+		CreatedBy:        c.CreatedBy,
+		Source:           c.Source,
+		State:            c.State,
+		EdgeID:           c.EdgeID,
+		DeviceID:         c.DeviceID,
+		SessionID:        c.SessionID,
+		InterfaceName:    c.InterfaceName,
+		NetworkNamespace: c.NetworkNamespace,
+		CanonicalFilter:  c.CanonicalFilter,
+		Direction:        c.Direction,
+		Format:           c.Format,
+		Promiscuous:      c.Promiscuous,
+		DurationSeconds:  c.DurationSecs,
+		MaxBytes:         c.MaxBytes,
+		MaxPackets:       c.MaxPackets,
+		Snaplen:          c.Snaplen,
+		Title:            c.Title,
+		Description:      c.Description,
+		CapturedBytes:    c.CapturedBytes,
+		CapturedPackets:  c.CapturedPackets,
+		LivePreview:      livePreview(c.LivePreviewJSON),
+		ArtifactID:       c.ArtifactID,
+		RawAvailable:     c.RawObjectKey != "",
+		ErrorCode:        c.ErrorCode,
+		ErrorDetail:      c.ErrorDetail,
+		StartedAt:        c.StartedAt,
+		FinishedAt:       c.FinishedAt,
+		CreatedAt:        c.CreatedAt,
+		UpdatedAt:        c.UpdatedAt,
 	}
 	if includeAnalysis && c.ParsedJSON != "" {
 		var analysis any
@@ -238,6 +247,17 @@ func toDTOWithAnalysis(c *model.Capture, includeAnalysis bool) captureDTO {
 		}
 	}
 	return dto
+}
+
+func livePreview(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var preview []string
+	if err := json.Unmarshal([]byte(raw), &preview); err != nil {
+		return nil
+	}
+	return preview
 }
 
 // @Summary List packet capture sessions
@@ -409,7 +429,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := h.uc.CreateSession(r.Context(), bizpacketcapture.CreateSessionInput{
-		Targets:         []bizpacketcapture.SessionTarget{{DeviceID: in.DeviceID, Interface: in.Interface}},
+		Targets:         []bizpacketcapture.SessionTarget{{DeviceID: in.DeviceID, Interface: in.Interface, NetworkNamespace: in.NetworkNamespace}},
 		Filter:          in.Filter,
 		DurationSeconds: in.DurationSeconds,
 		MaxBytes:        in.MaxBytes,
@@ -426,10 +446,17 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(out.Captures) == 0 {
-		writeErr(w, fmt.Errorf("packet capture session has no created members"))
+		writeErr(w, noCreatedMembersError(out.MemberErrors))
 		return
 	}
 	writeJSON(w, http.StatusCreated, toDTO(out.Captures[0]))
+}
+
+func noCreatedMembersError(memberErrors []string) error {
+	if len(memberErrors) == 0 {
+		return fmt.Errorf("packet capture session has no created members")
+	}
+	return fmt.Errorf("packet capture session has no created members: %s", strings.Join(memberErrors, "; "))
 }
 
 // @Summary Create multi-edge packet capture session
@@ -444,7 +471,7 @@ func (h *Handler) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	targets := make([]bizpacketcapture.SessionTarget, 0, len(in.Targets))
 	for _, target := range in.Targets {
-		targets = append(targets, bizpacketcapture.SessionTarget{DeviceID: target.DeviceID, Interface: target.Interface})
+		targets = append(targets, bizpacketcapture.SessionTarget{DeviceID: target.DeviceID, Interface: target.Interface, NetworkNamespace: target.NetworkNamespace})
 	}
 	out, err := h.uc.CreateSession(r.Context(), bizpacketcapture.CreateSessionInput{Targets: targets, Filter: in.Filter, DurationSeconds: in.DurationSeconds, MaxBytes: in.MaxBytes, MaxPackets: in.MaxPackets, Snaplen: in.Snaplen, Promiscuous: in.Promiscuous, Title: in.Title, Description: in.Description, Source: bizpacketcapture.SourceAPI, CreatedBy: t.UserID})
 	if err != nil {
@@ -468,6 +495,40 @@ func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	capture, err := h.uc.Refresh(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toDTO(capture))
+}
+
+// @Summary Cancel packet capture
+// @Router /api/v1/packet-captures/{id}/cancel [post]
+// @Success 200 {object} captureDTO
+func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	capture, err := h.uc.Cancel(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toDTO(capture))
+}
+
+// @Summary Stop packet capture and retain collected packets
+// @Router /api/v1/packet-captures/{id}/stop [post]
+// @Success 200 {object} captureDTO
+func (h *Handler) stop(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	capture, err := h.uc.Stop(r.Context(), id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -502,6 +563,24 @@ func (h *Handler) cancelSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail, err := h.uc.CancelSession(r.Context(), chi.URLParam(r, "publicID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	dto := toSessionDTO(detail.Session)
+	dto.PCAPCount = len(detail.Captures)
+	dto.Analysis = toSessionAnalysisDTO(detail.Analysis)
+	writeJSON(w, http.StatusOK, dto)
+}
+
+// @Summary Stop packet capture session and retain collected packets
+// @Router /api/v1/packet-capture-sessions/{publicID}/stop [post]
+// @Success 200 {object} sessionDTO
+func (h *Handler) stopSession(w http.ResponseWriter, r *http.Request) {
+	if !h.authed(w, r) {
+		return
+	}
+	detail, err := h.uc.StopSession(r.Context(), chi.URLParam(r, "publicID"))
 	if err != nil {
 		writeErr(w, err)
 		return

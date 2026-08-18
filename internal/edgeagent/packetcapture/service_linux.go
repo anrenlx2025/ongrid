@@ -52,14 +52,16 @@ type RawObject struct {
 type Service struct {
 	capturer *Capturer
 
-	mu     sync.RWMutex
-	tasks  map[string]*taskState
-	runner func(context.Context, Request) (Result, error)
+	mu             sync.RWMutex
+	tasks          map[string]*taskState
+	runner         func(context.Context, Request) (Result, error)
+	progressRunner func(context.Context, Request, ProgressReporter) (Result, error)
 }
 
 type taskState struct {
-	task   Task
-	cancel context.CancelFunc
+	task          Task
+	cancel        context.CancelFunc
+	stopRequested bool
 }
 
 func NewService(capturer *Capturer) (*Service, error) {
@@ -67,9 +69,10 @@ func NewService(capturer *Capturer) (*Service, error) {
 		return nil, errors.New("packet capture: capturer required")
 	}
 	return &Service{
-		capturer: capturer,
-		tasks:    make(map[string]*taskState),
-		runner:   capturer.Capture,
+		capturer:       capturer,
+		tasks:          make(map[string]*taskState),
+		runner:         capturer.Capture,
+		progressRunner: capturer.CaptureWithProgress,
 	}, nil
 }
 
@@ -80,7 +83,7 @@ func (s *Service) Start(in Request) (Task, error) {
 	if s == nil {
 		return Task{}, errors.New("packet capture: nil service")
 	}
-	normalized, _, err := normalizeRequest(in)
+	normalized, err := normalizeRequest(in)
 	if err != nil {
 		return Task{}, err
 	}
@@ -164,9 +167,18 @@ func (s *Service) run(ctx context.Context, captureID string) {
 	state.task.StartedAt = &started
 	req := state.task.Request
 	runner := s.runner
+	progressRunner := s.progressRunner
 	s.mu.Unlock()
 
-	result, err := runner(ctx, req)
+	var result Result
+	var err error
+	if progressRunner != nil {
+		result, err = progressRunner(ctx, req, func(progress Result) {
+			s.updateProgress(captureID, progress)
+		})
+	} else {
+		result, err = runner(ctx, req)
+	}
 	finished := time.Now().UTC()
 
 	s.mu.Lock()
@@ -178,6 +190,12 @@ func (s *Service) run(ctx context.Context, captureID string) {
 	state.task.Result = result
 	state.task.FinishedAt = &finished
 	if ctx.Err() != nil {
+		if state.stopRequested && err == nil && result.Path != "" && result.FileBytes > 0 {
+			result.StopReason = "stopped"
+			state.task.Result = result
+			state.task.State = TaskSucceeded
+			return
+		}
 		state.task.State = TaskCancelled
 		return
 	}
@@ -187,6 +205,16 @@ func (s *Service) run(ctx context.Context, captureID string) {
 		return
 	}
 	state.task.State = TaskSucceeded
+}
+
+func (s *Service) updateProgress(captureID string, progress Result) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.tasks[captureID]
+	if !ok || state.task.State != TaskRunning {
+		return
+	}
+	state.task.Result = progress
 }
 
 func (s *Service) liveTaskCountLocked() int {
@@ -319,6 +347,31 @@ func (s *Service) Cancel(captureID string) (Task, error) {
 	return s.GetAfterCancel(captureID)
 }
 
+// Stop gracefully interrupts a running capture while retaining any valid PCAP
+// prefix. A queued capture has no data to preserve and therefore becomes
+// cancelled when its runner observes the stop signal.
+func (s *Service) Stop(captureID string) (Task, error) {
+	if s == nil {
+		return Task{}, errors.New("packet capture: nil service")
+	}
+	s.mu.Lock()
+	state, ok := s.tasks[captureID]
+	if !ok {
+		s.mu.Unlock()
+		return Task{}, fmt.Errorf("packet capture: %q not found", captureID)
+	}
+	if state.task.State != TaskQueued && state.task.State != TaskRunning {
+		task := cloneTask(state.task)
+		s.mu.Unlock()
+		return task, nil
+	}
+	state.stopRequested = true
+	cancel := state.cancel
+	s.mu.Unlock()
+	cancel()
+	return s.GetAfterCancel(captureID)
+}
+
 // GetAfterCancel returns the state at cancellation dispatch time. The runner
 // changes it to cancelled once the capture loop observes the context.
 func (s *Service) GetAfterCancel(captureID string) (Task, error) {
@@ -339,5 +392,6 @@ func cloneTask(in Task) Task {
 		v := *in.FinishedAt
 		out.FinishedAt = &v
 	}
+	out.Result.LivePreview = append([]string(nil), in.Result.LivePreview...)
 	return out
 }

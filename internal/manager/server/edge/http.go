@@ -382,9 +382,10 @@ type hostInfoDTO struct {
 }
 
 type listItem struct {
-	ID     uint64 `json:"id"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
+	ID         uint64 `json:"id"`
+	Name       string `json:"name"`
+	DeviceName string `json:"device_name,omitempty"`
+	Status     string `json:"status"`
 	// Roles is denormalised from the linked Device for legacy UI compat
 	// — empty array means 未分类 OR no host device linked yet.
 	Roles            []string   `json:"roles"`
@@ -483,6 +484,7 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 		items = append(items, listItem{
 			ID:               e.ID,
 			Name:             e.Name,
+			DeviceName:       deviceName(dev),
 			Status:           e.Status,
 			Roles:            deviceRoles(dev),
 			LastSeenAt:       e.LastSeenAt,
@@ -1089,6 +1091,16 @@ func deviceRoles(d *devicemodel.Device) []string {
 		return []string{}
 	}
 	return devicemodel.DecodeRoles(d.Roles)
+}
+
+func deviceName(d *devicemodel.Device) string {
+	if d == nil {
+		return ""
+	}
+	if strings.TrimSpace(d.Name) != "" {
+		return d.Name
+	}
+	return d.Hostname
 }
 
 // deviceToHostInfo flattens a Device into the legacy host_info DTO so

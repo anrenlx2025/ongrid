@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"reflect"
 	"sync"
 
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 	fbsvc "github.com/singchia/frontier/api/dataplane/v1/service"
 	"github.com/singchia/geminio"
+	"github.com/singchia/geminio/options"
 )
 
 // Config carries the runtime parameters needed to dial the frontier broker.
@@ -249,6 +251,48 @@ func (c *Client) OpenStream(ctx context.Context, edgeID uint64) (geminio.Stream,
 	return s, nil
 }
 
+func (c *Client) OpenStreamWithMeta(ctx context.Context, edgeID uint64, meta []byte) (geminio.Stream, error) {
+	if c.svc == nil {
+		return nil, ErrDisabled
+	}
+	transportID := c.resolveTransportID(edgeID)
+	opt := options.OpenStream()
+	opt.SetPeer(fmt.Sprintf("%d", transportID))
+	opt.SetMeta(meta)
+	if opener, ok := embeddedStreamOpener(c.svc); ok {
+		s, err := opener.OpenStream(opt)
+		if err != nil {
+			return nil, fmt.Errorf("frontierbound: open stream edge=%d transport=%d: %w", edgeID, transportID, err)
+		}
+		return s, nil
+	}
+	s, err := c.svc.OpenStream(ctx, transportID)
+	if err != nil {
+		return nil, fmt.Errorf("frontierbound: open stream edge=%d transport=%d: %w", edgeID, transportID, err)
+	}
+	return s, nil
+}
+
+type rawStreamOpener interface {
+	OpenStream(opts ...*options.OpenStreamOptions) (geminio.Stream, error)
+}
+
+func embeddedStreamOpener(svc service) (rawStreamOpener, bool) {
+	v := reflect.ValueOf(svc)
+	if v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if !v.IsValid() || v.Kind() != reflect.Struct {
+		return nil, false
+	}
+	field := v.FieldByName("End")
+	if !field.IsValid() || !field.CanInterface() {
+		return nil, false
+	}
+	opener, ok := field.Interface().(rawStreamOpener)
+	return opener, ok
+}
+
 // Close releases the underlying service connection.
 func (c *Client) Close() error {
 	if c.svc == nil {
@@ -359,6 +403,10 @@ func (c *Client) canonicalizeEdgeID(edgeID uint64) uint64 {
 	// Grafana variable dropdowns until tsdb retention purges them
 	// (the test env hit this; v0.7.39 fix).
 	return 0
+}
+
+func (c *Client) CanonicalizeEdgeID(edgeID uint64) uint64 {
+	return c.canonicalizeEdgeID(edgeID)
 }
 
 func (c *Client) resolveTransportID(edgeID uint64) uint64 {

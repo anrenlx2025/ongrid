@@ -18,7 +18,7 @@ describe('executeSkill', () => {
     await executeSkill('host_probe_tcp', 52, { target: '127.0.0.1:22' });
 
     expect(requestBody).toEqual({
-      edge_id: '52',
+      edge_id: 52,
       params: { target: '127.0.0.1:22' },
     });
   });

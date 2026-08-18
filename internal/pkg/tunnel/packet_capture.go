@@ -14,22 +14,26 @@ const (
 	// is a manager-only follow-up used before private parser ingestion.
 	MethodReadPacketCapture = "packet_capture.read"
 	// MethodCancelPacketCapture requests cancellation of a queued or running
-	// edge-local capture. Partial data remains readable when available.
+	// edge-local capture and discards its partial output.
 	MethodCancelPacketCapture = "packet_capture.cancel"
+	// MethodStopPacketCapture gracefully stops a running capture while keeping
+	// its valid PCAP prefix available for manager upload and analysis.
+	MethodStopPacketCapture = "packet_capture.stop"
 )
 
 // PacketCaptureStartRequest is the manager-to-edge request for a bounded
 // packet capture. The manager owns CaptureID; the edge never accepts an output
 // path from callers.
 type PacketCaptureStartRequest struct {
-	CaptureID       string `json:"capture_id"`
-	Interface       string `json:"interface"`
-	Filter          string `json:"filter,omitempty"`
-	DurationSeconds int    `json:"duration_seconds,omitempty"`
-	MaxBytes        int64  `json:"max_bytes,omitempty"`
-	MaxPackets      int    `json:"max_packets,omitempty"`
-	Snaplen         int    `json:"snaplen,omitempty"`
-	Promiscuous     bool   `json:"promiscuous,omitempty"`
+	CaptureID        string `json:"capture_id"`
+	Interface        string `json:"interface"`
+	NetworkNamespace string `json:"network_namespace,omitempty"`
+	Filter           string `json:"filter,omitempty"`
+	DurationSeconds  int    `json:"duration_seconds,omitempty"`
+	MaxBytes         int64  `json:"max_bytes,omitempty"`
+	MaxPackets       int    `json:"max_packets,omitempty"`
+	Snaplen          int    `json:"snaplen,omitempty"`
+	Promiscuous      bool   `json:"promiscuous,omitempty"`
 	// StartAt is manager-coordinated UTC time. Edges schedule locally and still
 	// report their actual StartedAt so analysis can surface clock uncertainty.
 	StartAt *time.Time `json:"start_at,omitempty"`
@@ -41,6 +45,13 @@ type PacketCaptureGetRequest struct {
 }
 
 type PacketCaptureCancelRequest struct {
+	CaptureID string `json:"capture_id"`
+}
+
+// PacketCaptureStopRequest identifies a capture that should be stopped and
+// retained. It is deliberately separate from cancellation so callers cannot
+// accidentally discard evidence when they mean to finish early.
+type PacketCaptureStopRequest struct {
 	CaptureID string `json:"capture_id"`
 }
 
@@ -76,15 +87,16 @@ type PacketCaptureTask struct {
 // PacketCaptureWireIn echoes the normalized edge request without any
 // manager-only metadata.
 type PacketCaptureWireIn struct {
-	CaptureID       string     `json:"capture_id"`
-	Interface       string     `json:"interface"`
-	Filter          string     `json:"filter,omitempty"`
-	DurationSeconds int        `json:"duration_seconds"`
-	MaxBytes        int64      `json:"max_bytes"`
-	MaxPackets      int        `json:"max_packets"`
-	Snaplen         int        `json:"snaplen"`
-	Promiscuous     bool       `json:"promiscuous"`
-	StartAt         *time.Time `json:"start_at,omitempty"`
+	CaptureID        string     `json:"capture_id"`
+	Interface        string     `json:"interface"`
+	NetworkNamespace string     `json:"network_namespace,omitempty"`
+	Filter           string     `json:"filter,omitempty"`
+	DurationSeconds  int        `json:"duration_seconds"`
+	MaxBytes         int64      `json:"max_bytes"`
+	MaxPackets       int        `json:"max_packets"`
+	Snaplen          int        `json:"snaplen"`
+	Promiscuous      bool       `json:"promiscuous"`
+	StartAt          *time.Time `json:"start_at,omitempty"`
 }
 
 // PacketCaptureResult describes the completed capture. No file path is
@@ -97,4 +109,5 @@ type PacketCaptureResult struct {
 	FileBytes     int64     `json:"file_bytes"`
 	StopReason    string    `json:"stop_reason"`
 	InterfaceName string    `json:"interface"`
+	LivePreview   []string  `json:"live_preview,omitempty"`
 }

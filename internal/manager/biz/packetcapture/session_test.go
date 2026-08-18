@@ -93,7 +93,7 @@ func TestCreateSessionSchedulesMembersAtCommonTime(t *testing.T) {
 	uc := New(repo, caller, sessionResolver{101: 11, 102: 12}, nil)
 	now := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
 	uc.now = func() time.Time { return now }
-	out, err := uc.CreateSession(context.Background(), CreateSessionInput{Targets: []SessionTarget{{DeviceID: 101, Interface: "eth0"}, {DeviceID: 102, Interface: "eth1"}}, Filter: "tcp and port 443", DurationSeconds: 10, Source: SourceChat, ChatSessionID: "chat-session-1"})
+	out, err := uc.CreateSession(context.Background(), CreateSessionInput{Targets: []SessionTarget{{DeviceID: 101, Interface: "eth0", NetworkNamespace: "ongrid-netdev-a"}, {DeviceID: 102, Interface: "eth1", NetworkNamespace: "ongrid-netdev-a"}}, Filter: "tcp and port 443", DurationSeconds: 10, Source: SourceChat, ChatSessionID: "chat-session-1"})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -114,6 +114,9 @@ func TestCreateSessionSchedulesMembersAtCommonTime(t *testing.T) {
 	}
 	if wire.StartAt == nil || !wire.StartAt.Equal(out.Session.PlannedStartAt) {
 		t.Fatalf("start_at=%v want %s", wire.StartAt, out.Session.PlannedStartAt)
+	}
+	if wire.NetworkNamespace != "ongrid-netdev-a" {
+		t.Fatalf("network namespace = %q", wire.NetworkNamespace)
 	}
 }
 
@@ -215,6 +218,36 @@ func TestCancelSessionStopsAllActiveMembersOnce(t *testing.T) {
 	}
 	if got := countPacketCaptureMethod(caller.methods, tunnel.MethodCancelPacketCapture); got != 2 {
 		t.Fatalf("second stop issued extra edge calls: %d", got)
+	}
+}
+
+func TestStopSessionKeepsMembersCollectingUntilUpload(t *testing.T) {
+	repo := &sessionTestRepo{fakeRepo: newFakeRepo(), sessions: map[string]*model.Session{}}
+	caller := &fakeCaller{}
+	uc := New(repo, caller, sessionResolver{101: 11, 102: 12}, nil)
+
+	created, err := uc.CreateSession(context.Background(), CreateSessionInput{
+		Targets: []SessionTarget{{DeviceID: 101, Interface: "eth0"}, {DeviceID: 102, Interface: "eth1"}},
+		Filter:  "tcp and port 443",
+		Source:  SourceChat,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	detail, err := uc.StopSession(context.Background(), created.Session.PublicID)
+	if err != nil {
+		t.Fatalf("StopSession: %v", err)
+	}
+	if detail.Session.State != model.SessionStateCollecting {
+		t.Fatalf("session state=%q want %q", detail.Session.State, model.SessionStateCollecting)
+	}
+	for _, capture := range detail.Captures {
+		if capture.State != model.StateCapturing {
+			t.Fatalf("capture %d state=%q want capturing", capture.ID, capture.State)
+		}
+	}
+	if got := countPacketCaptureMethod(caller.methods, tunnel.MethodStopPacketCapture); got != 2 {
+		t.Fatalf("stop calls=%d want 2", got)
 	}
 }
 

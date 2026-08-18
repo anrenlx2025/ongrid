@@ -285,8 +285,8 @@ describe('MessageBubble operation card', () => {
     render(<MessageBubble message={message} />);
 
     expect(screen.getByText('HTTPS capture')).toBeInTheDocument();
-    expect(screen.getByText('采集中')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(screen.getByText('运行中')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '停止' }));
 
     expect(executeOperationAction).toHaveBeenCalledWith('op-123', 'cancel');
     await waitFor(() => expect(screen.getByText('已停止')).toBeInTheDocument());
@@ -347,10 +347,10 @@ describe('MessageBubble operation card', () => {
 
     render(<MessageBubble message={message} />);
 
-    expect(screen.getByText('抓包会话')).toBeInTheDocument();
+    expect(screen.getByText('抓包任务')).toBeInTheDocument();
     expect(screen.getByText('Checkout latency investigation')).toBeInTheDocument();
     expect(screen.getByText('已完成')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: '打开调查' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: '打开会话' })).toHaveAttribute(
       'href',
       '/artifacts/packet-sessions/pcap-session-7d5a7c7e',
     );
@@ -390,7 +390,7 @@ describe('MessageBubble operation card', () => {
 
     render(<MessageBubble message={message} />);
 
-    expect(screen.getByText('采集中')).toBeInTheDocument();
+    expect(screen.getByText('运行中')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText('已完成')).toBeInTheDocument());
     expect(screen.getByText('1 个 PCAP · tcp port 443')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Stop|停止/ })).not.toBeInTheDocument();

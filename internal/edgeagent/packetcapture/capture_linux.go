@@ -1,21 +1,23 @@
 //go:build linux
 
 // Package packetcapture provides the edge-local packet capture primitive.
-// It deliberately uses AF_PACKET directly so the edge package does not rely
-// on tcpdump, libpcap, or shell command construction.
 package packetcapture
 
 import (
+	"bufio"
+	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
+	"io"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -27,30 +29,29 @@ const (
 	defaultMaxPackets = 100_000
 	defaultSnaplen    = 1514
 
-	maxDuration   = 5 * time.Minute
-	maxBytes      = 256 << 20
-	maxPackets    = 500_000
-	maxSnaplen    = 65_535
-	ethernetMTU   = 65_535
-	pcapHeaderLen = 24
+	maxDuration = 5 * time.Minute
+	maxBytes    = 256 << 20
+	maxPackets  = 500_000
+	maxSnaplen  = 65_535
+
+	previewLineLimit = 80
 )
 
-// Request describes a bounded edge-local capture. OutputPath is not accepted
-// from callers: Capturer derives it from BaseDir and CaptureID.
 type Request struct {
-	CaptureID   string        `json:"capture_id"`
-	Interface   string        `json:"interface"`
-	Filter      string        `json:"filter,omitempty"`
-	Duration    time.Duration `json:"-"`
-	MaxBytes    int64         `json:"max_bytes"`
-	MaxPackets  int           `json:"max_packets"`
-	Snaplen     int           `json:"snaplen"`
-	Promiscuous bool          `json:"promiscuous"`
-	StartAt     *time.Time    `json:"start_at,omitempty"`
+	CaptureID        string        `json:"capture_id"`
+	Interface        string        `json:"interface"`
+	NetworkNamespace string        `json:"network_namespace,omitempty"`
+	Filter           string        `json:"filter,omitempty"`
+	Duration         time.Duration `json:"-"`
+	MaxBytes         int64         `json:"max_bytes"`
+	MaxPackets       int           `json:"max_packets"`
+	Snaplen          int           `json:"snaplen"`
+	Promiscuous      bool          `json:"promiscuous"`
+	StartAt          *time.Time    `json:"start_at,omitempty"`
 }
 
-// Result contains capture metadata suitable for the manager to persist and
-// later turn into a private artifact.
+// Result is the edge-owned capture snapshot. LivePreview keeps a bounded tail
+// of decoded tcpdump lines and never carries raw packet payloads.
 type Result struct {
 	Path          string    `json:"-"`
 	StartedAt     time.Time `json:"started_at"`
@@ -60,16 +61,13 @@ type Result struct {
 	FileBytes     int64     `json:"file_bytes"`
 	StopReason    string    `json:"stop_reason"`
 	InterfaceName string    `json:"interface"`
+	LivePreview   []string  `json:"live_preview,omitempty"`
 }
 
-// Capturer owns only a local output directory. It has no mutable capture
-// state, therefore concurrent edge RPCs cannot share or overwrite files.
-type Capturer struct {
-	baseDir string
-}
+type ProgressReporter func(Result)
 
-// New validates the edge-owned pcap directory. Callers must not use a
-// user-provided path here; the packet capture service config owns BaseDir.
+type Capturer struct{ baseDir string }
+
 func New(baseDir string) (*Capturer, error) {
 	if strings.TrimSpace(baseDir) == "" {
 		return nil, errors.New("packet capture: base directory required")
@@ -81,160 +79,331 @@ func New(baseDir string) (*Capturer, error) {
 	return &Capturer{baseDir: clean}, nil
 }
 
-// Capture records packets until the validated duration or a resource limit is
-// reached. It requires CAP_NET_RAW; CAP_NET_ADMIN is needed only when
-// Promiscuous is requested.
 func (c *Capturer) Capture(ctx context.Context, in Request) (Result, error) {
+	return c.capture(ctx, in, nil)
+}
+
+func (c *Capturer) CaptureWithProgress(ctx context.Context, in Request, report ProgressReporter) (Result, error) {
+	return c.capture(ctx, in, report)
+}
+
+func (c *Capturer) capture(ctx context.Context, in Request, report ProgressReporter) (Result, error) {
 	if c == nil {
 		return Result{}, errors.New("packet capture: nil capturer")
 	}
-	req, matcher, err := normalizeRequest(in)
+	req, err := normalizeRequest(in)
 	if err != nil {
 		return Result{}, err
 	}
-	iface, err := net.InterfaceByName(req.Interface)
-	if err != nil {
-		return Result{}, fmt.Errorf("packet capture: find interface %q: %w", req.Interface, err)
+	return c.captureInNamespace(ctx, req, report)
+}
+
+func (c *Capturer) captureInNamespace(ctx context.Context, req Request, report ProgressReporter) (result Result, err error) {
+	if req.NetworkNamespace == "" {
+		return c.captureCurrentNamespace(ctx, req, report)
 	}
-	if iface.Index <= 0 {
-		return Result{}, fmt.Errorf("packet capture: invalid interface %q", req.Interface)
+	// A network namespace is attached to an OS thread. Child processes inherit
+	// the selected namespace; restore host networking before the runtime reuses
+	// this thread.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	original, err := os.Open("/proc/self/ns/net")
+	if err != nil {
+		return Result{}, fmt.Errorf("packet capture: open current network namespace: %w", err)
+	}
+	defer original.Close()
+	target, err := os.Open(filepath.Join("/var/run/netns", req.NetworkNamespace))
+	if err != nil {
+		return Result{}, fmt.Errorf("packet capture: open network namespace %q: %w", req.NetworkNamespace, err)
+	}
+	defer target.Close()
+	if err := unix.Setns(int(target.Fd()), unix.CLONE_NEWNET); err != nil {
+		return Result{}, fmt.Errorf("packet capture: enter network namespace %q: %w", req.NetworkNamespace, err)
+	}
+	defer func() {
+		if restoreErr := unix.Setns(int(original.Fd()), unix.CLONE_NEWNET); restoreErr != nil && err == nil {
+			err = fmt.Errorf("packet capture: restore host network namespace: %w", restoreErr)
+		}
+	}()
+	return c.captureCurrentNamespace(ctx, req, report)
+}
+
+// captureCurrentNamespace runs a fixed tcpdump binary with an argv slice. The
+// PCAP stream is persisted and decoded by a second tcpdump process, so the
+// preview and artifact represent exactly the same collection.
+func (c *Capturer) captureCurrentNamespace(ctx context.Context, req Request, report ProgressReporter) (Result, error) {
+	tcpdumpPath, err := exec.LookPath("tcpdump")
+	if err != nil {
+		return Result{}, fmt.Errorf("packet capture: tcpdump is required on edge: %w", err)
 	}
 	if err := os.MkdirAll(c.baseDir, 0o700); err != nil {
 		return Result{}, fmt.Errorf("packet capture: create output directory: %w", err)
 	}
 	path := filepath.Join(c.baseDir, req.CaptureID+".pcap")
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return Result{}, fmt.Errorf("packet capture: create pcap: %w", err)
 	}
+	fileClosed := false
+	cleanup := func(cause error) (Result, error) {
+		if !fileClosed {
+			closeErr := file.Close()
+			fileClosed = true
+			if closeErr != nil {
+				cause = fmt.Errorf("%w; close pcap: %v", cause, closeErr)
+			}
+		}
+		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			cause = fmt.Errorf("%w; remove partial capture: %v", cause, removeErr)
+		}
+		return Result{}, cause
+	}
 
-	if err := writeGlobalHeader(f, req.Snaplen); err != nil {
-		return cleanupFailedCapture(f, path, fmt.Errorf("packet capture: write global header: %w", err))
-	}
-	fd, err := openSocket(iface.Index, req.Promiscuous)
+	producer := exec.Command(tcpdumpPath, tcpdumpWriteArgs(req)...)
+	producerOut, err := producer.StdoutPipe()
 	if err != nil {
-		return cleanupFailedCapture(f, path, err)
+		return cleanup(fmt.Errorf("packet capture: tcpdump stdout: %w", err))
 	}
-	defer closeSocket(fd)
+	var producerErr bytes.Buffer
+	producer.Stderr = &producerErr
+	decoder := exec.Command(tcpdumpPath, "-l", "-n", "-q", "-r", "-")
+	decoderIn, err := decoder.StdinPipe()
+	if err != nil {
+		return cleanup(fmt.Errorf("packet capture: tcpdump preview stdin: %w", err))
+	}
+	decoderOut, err := decoder.StdoutPipe()
+	if err != nil {
+		return cleanup(fmt.Errorf("packet capture: tcpdump preview stdout: %w", err))
+	}
+	var decoderErr bytes.Buffer
+	decoder.Stderr = &decoderErr
+	if err := decoder.Start(); err != nil {
+		return cleanup(fmt.Errorf("packet capture: start preview decoder: %w", err))
+	}
+	if err := producer.Start(); err != nil {
+		_ = decoderIn.Close()
+		_ = decoder.Wait()
+		return cleanup(fmt.Errorf("packet capture: start tcpdump: %w", err))
+	}
 
 	startedAt := time.Now().UTC()
-	deadline := startedAt.Add(req.Duration)
-	result := Result{Path: path, StartedAt: startedAt, InterfaceName: iface.Name}
-	buf := make([]byte, ethernetMTU)
+	result := Result{Path: path, StartedAt: startedAt, InterfaceName: req.Interface}
+	var resultMu sync.Mutex
+	snapshot := func() Result {
+		resultMu.Lock()
+		defer resultMu.Unlock()
+		out := result
+		out.LivePreview = append([]string(nil), result.LivePreview...)
+		return out
+	}
+	var reportMu sync.Mutex
+	lastReportedAt := time.Time{}
+	reportProgress := func(force bool) {
+		if report == nil {
+			return
+		}
+		reportMu.Lock()
+		if !force && time.Since(lastReportedAt) < 300*time.Millisecond {
+			reportMu.Unlock()
+			return
+		}
+		lastReportedAt = time.Now()
+		reportMu.Unlock()
+		report(snapshot())
+	}
+	reportProgress(true)
 
-	for {
-		if err := ctx.Err(); err != nil {
-			result.StopReason = "cancelled"
-			break
+	copyDone := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(io.MultiWriter(file, decoderIn), producerOut)
+		if closeErr := decoderIn.Close(); closeErr != nil && copyErr == nil {
+			copyErr = closeErr
 		}
-		if !time.Now().Before(deadline) {
-			result.StopReason = "duration_limit"
-			break
-		}
-		if result.Packets >= req.MaxPackets {
-			result.StopReason = "packet_limit"
-			break
-		}
-		if result.PayloadBytes >= req.MaxBytes {
-			result.StopReason = "byte_limit"
-			break
-		}
-
-		ready, err := waitReadable(fd, 100*time.Millisecond)
-		if err != nil {
-			return cleanupFailedCapture(f, path, err)
-		}
-		if !ready {
-			continue
-		}
-		n, _, err := unix.Recvfrom(fd, buf, 0)
-		if err != nil {
-			if errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+		copyDone <- copyErr
+	}()
+	previewDone := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(decoderOut)
+		scanner.Buffer(make([]byte, 4096), 64<<10)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
 				continue
 			}
-			return cleanupFailedCapture(f, path, fmt.Errorf("packet capture: receive packet: %w", err))
+			resultMu.Lock()
+			result.Packets++
+			result.LivePreview = append(result.LivePreview, line)
+			if len(result.LivePreview) > previewLineLimit {
+				result.LivePreview = append([]string(nil), result.LivePreview[len(result.LivePreview)-previewLineLimit:]...)
+			}
+			resultMu.Unlock()
+			reportProgress(false)
 		}
-		if n == 0 || !matcher.matches(buf[:n]) {
-			continue
+		previewDone <- scanner.Err()
+	}()
+	producerDone := make(chan error, 1)
+	go func() { producerDone <- producer.Wait() }()
+
+	deadline := time.NewTimer(req.Duration)
+	defer deadline.Stop()
+	statsTicker := time.NewTicker(200 * time.Millisecond)
+	defer statsTicker.Stop()
+	stopReason := ""
+	var producerWaitErr error
+	producerExited := false
+	stopProducer := func(reason string) {
+		if stopReason != "" {
+			return
 		}
-		capturedLen := min(n, req.Snaplen)
-		if result.PayloadBytes+int64(capturedLen) > req.MaxBytes {
-			result.StopReason = "byte_limit"
-			break
+		stopReason = reason
+		if producer.Process != nil {
+			_ = producer.Process.Signal(os.Interrupt)
 		}
-		if err := writePacket(f, time.Now().UTC(), buf[:capturedLen], n); err != nil {
-			return cleanupFailedCapture(f, path, fmt.Errorf("packet capture: write packet: %w", err))
-		}
-		result.Packets++
-		result.PayloadBytes += int64(capturedLen)
 	}
-	if result.StopReason == "" {
-		result.StopReason = "completed"
+	for !producerExited {
+		select {
+		case producerWaitErr = <-producerDone:
+			producerExited = true
+		case <-ctx.Done():
+			stopProducer("cancelled")
+		case <-deadline.C:
+			stopProducer("duration_limit")
+		case <-statsTicker.C:
+			info, statErr := file.Stat()
+			if statErr != nil {
+				stopProducer("failed")
+				producerWaitErr = fmt.Errorf("packet capture: stat pcap: %w", statErr)
+				break
+			}
+			resultMu.Lock()
+			result.PayloadBytes = info.Size()
+			resultMu.Unlock()
+			if info.Size() >= req.MaxBytes {
+				stopProducer("byte_limit")
+			}
+			reportProgress(false)
+		}
+		if stopReason != "" && !producerExited {
+			select {
+			case producerWaitErr = <-producerDone:
+				producerExited = true
+			case <-time.After(3 * time.Second):
+				if producer.Process != nil {
+					_ = producer.Process.Kill()
+				}
+				producerWaitErr = <-producerDone
+				producerExited = true
+			}
+		}
 	}
-	if err := f.Close(); err != nil {
-		return Result{}, fmt.Errorf("packet capture: close pcap: %w", err)
+
+	copyErr := <-copyDone
+	if closeErr := file.Close(); closeErr != nil && copyErr == nil {
+		copyErr = closeErr
+	}
+	fileClosed = true
+	decoderWaitErr := decoder.Wait()
+	previewErr := <-previewDone
+	if stopReason == "" && producerWaitErr != nil {
+		return cleanup(fmt.Errorf("packet capture: tcpdump failed: %w: %s", producerWaitErr, strings.TrimSpace(producerErr.String())))
+	}
+	if copyErr != nil {
+		return cleanup(fmt.Errorf("packet capture: copy tcpdump stream: %w", copyErr))
+	}
+	if decoderWaitErr != nil || previewErr != nil {
+		cause := decoderWaitErr
+		if cause == nil {
+			cause = previewErr
+		}
+		return cleanup(fmt.Errorf("packet capture: decode preview: %w: %s", cause, strings.TrimSpace(decoderErr.String())))
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return Result{}, fmt.Errorf("packet capture: stat pcap: %w", err)
+		return Result{}, fmt.Errorf("packet capture: stat completed pcap: %w", err)
 	}
-	result.FinishedAt = time.Now().UTC()
+	resultMu.Lock()
+	result.PayloadBytes = info.Size()
 	result.FileBytes = info.Size()
-	return result, nil
-}
-
-func cleanupFailedCapture(f *os.File, path string, cause error) (Result, error) {
-	if closeErr := f.Close(); closeErr != nil {
-		cause = fmt.Errorf("%w; close failed: %v", cause, closeErr)
+	result.FinishedAt = time.Now().UTC()
+	if stopReason == "" {
+		stopReason = "completed"
 	}
-	if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-		return Result{}, fmt.Errorf("%w; remove partial capture: %v", cause, removeErr)
+	result.StopReason = stopReason
+	resultMu.Unlock()
+	reportProgress(true)
+	return snapshot(), nil
+}
+
+func tcpdumpWriteArgs(req Request) []string {
+	args := []string{"-U", "-n", "-i", req.Interface, "-s", strconv.Itoa(req.Snaplen), "-c", strconv.Itoa(req.MaxPackets), "-w", "-"}
+	if !req.Promiscuous {
+		args = append(args, "-p")
 	}
-	return Result{}, cause
+	if req.Filter != "" {
+		args = append(args, req.Filter)
+	}
+	return args
 }
 
-func closeSocket(fd int) {
-	_ = unix.Close(fd) // best-effort cleanup; capture already has its terminal result.
-}
-
-func normalizeRequest(in Request) (Request, packetMatcher, error) {
+func normalizeRequest(in Request) (Request, error) {
 	in.CaptureID = strings.TrimSpace(in.CaptureID)
 	if !validCaptureID(in.CaptureID) {
-		return Request{}, packetMatcher{}, errors.New("packet capture: capture_id must be a UUID or lowercase identifier")
+		return Request{}, errors.New("packet capture: capture_id must be a UUID or lowercase identifier")
 	}
 	in.Interface = strings.TrimSpace(in.Interface)
 	if in.Interface == "" || len(in.Interface) > 15 || strings.ContainsAny(in.Interface, "/\\\x00") {
-		return Request{}, packetMatcher{}, errors.New("packet capture: valid interface required")
+		return Request{}, errors.New("packet capture: valid interface required")
+	}
+	in.NetworkNamespace = strings.TrimSpace(in.NetworkNamespace)
+	if !validNetworkNamespace(in.NetworkNamespace) {
+		return Request{}, errors.New("packet capture: invalid network namespace")
 	}
 	if in.Duration <= 0 {
 		in.Duration = defaultDuration
 	}
 	if in.Duration > maxDuration {
-		return Request{}, packetMatcher{}, fmt.Errorf("packet capture: duration exceeds %s", maxDuration)
+		return Request{}, fmt.Errorf("packet capture: duration exceeds %s", maxDuration)
 	}
 	if in.MaxBytes <= 0 {
 		in.MaxBytes = defaultMaxBytes
 	}
 	if in.MaxBytes > maxBytes {
-		return Request{}, packetMatcher{}, fmt.Errorf("packet capture: max_bytes exceeds %d", maxBytes)
+		return Request{}, fmt.Errorf("packet capture: max_bytes exceeds %d", maxBytes)
 	}
 	if in.MaxPackets <= 0 {
 		in.MaxPackets = defaultMaxPackets
 	}
 	if in.MaxPackets > maxPackets {
-		return Request{}, packetMatcher{}, fmt.Errorf("packet capture: max_packets exceeds %d", maxPackets)
+		return Request{}, fmt.Errorf("packet capture: max_packets exceeds %d", maxPackets)
 	}
 	if in.Snaplen <= 0 {
 		in.Snaplen = defaultSnaplen
 	}
 	if in.Snaplen > maxSnaplen {
-		return Request{}, packetMatcher{}, fmt.Errorf("packet capture: snaplen exceeds %d", maxSnaplen)
+		return Request{}, fmt.Errorf("packet capture: snaplen exceeds %d", maxSnaplen)
 	}
-	matcher, err := parseFilter(in.Filter)
+	filter, err := normalizeFilter(in.Filter)
 	if err != nil {
-		return Request{}, packetMatcher{}, err
+		return Request{}, err
 	}
-	return in, matcher, nil
+	in.Filter = filter
+	return in, nil
+}
+
+func validNetworkNamespace(namespace string) bool {
+	if namespace == "" {
+		return true
+	}
+	if len(namespace) > 128 {
+		return false
+	}
+	for _, r := range namespace {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' || r == ':' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validCaptureID(v string) bool {
@@ -250,189 +419,65 @@ func validCaptureID(v string) bool {
 	return true
 }
 
-func openSocket(ifindex int, promiscuous bool) (int, error) {
-	protocol := htons(unix.ETH_P_ALL)
-	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW|unix.SOCK_CLOEXEC, int(protocol))
-	if err != nil {
-		return -1, fmt.Errorf("packet capture: open AF_PACKET socket (CAP_NET_RAW required): %w", err)
+// normalizeFilter preserves the prior, deliberately small BPF request
+// surface. The normalized expression is passed to tcpdump as one argv value.
+func normalizeFilter(raw string) (string, error) {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(raw)))
+	if len(fields) == 0 {
+		return "", nil
 	}
-	fail := func(err error) (int, error) {
-		if closeErr := unix.Close(fd); closeErr != nil {
-			err = fmt.Errorf("%w; close socket: %v", err, closeErr)
+	if len(fields) == 3 && isFilterProtocol(fields[0]) && (fields[1] == "host" || fields[1] == "port") {
+		fields = []string{fields[0], "and", fields[1], fields[2]}
+	} else if len(fields) == 4 && fields[0] == "host" && fields[2] == "port" {
+		fields = []string{"host", fields[1], "and", "port", fields[3]}
+	}
+	protocolSeen, hostSeen, portSeen := false, false, false
+	for i := 0; i < len(fields); {
+		if fields[i] == "and" {
+			return "", errors.New("packet capture: invalid filter")
 		}
-		return -1, err
-	}
-	if err := unix.Bind(fd, &unix.SockaddrLinklayer{Protocol: protocol, Ifindex: ifindex}); err != nil {
-		return fail(fmt.Errorf("packet capture: bind AF_PACKET socket: %w", err))
-	}
-	if promiscuous {
-		mreq := &unix.PacketMreq{Ifindex: int32(ifindex), Type: unix.PACKET_MR_PROMISC}
-		if err := unix.SetsockoptPacketMreq(fd, unix.SOL_PACKET, unix.PACKET_ADD_MEMBERSHIP, mreq); err != nil {
-			return fail(fmt.Errorf("packet capture: enable promiscuous mode (CAP_NET_ADMIN required): %w", err))
-		}
-	}
-	return fd, nil
-}
-
-func waitReadable(fd int, timeout time.Duration) (bool, error) {
-	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-	ready, err := unix.Poll(poll, int(timeout.Milliseconds()))
-	if err != nil {
-		if errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-			return false, nil
-		}
-		return false, fmt.Errorf("packet capture: wait for packet: %w", err)
-	}
-	return ready > 0, nil
-}
-
-func writeGlobalHeader(f *os.File, snaplen int) error {
-	var header [pcapHeaderLen]byte
-	binary.LittleEndian.PutUint32(header[0:4], 0xa1b2c3d4)
-	binary.LittleEndian.PutUint16(header[4:6], 2)
-	binary.LittleEndian.PutUint16(header[6:8], 4)
-	binary.LittleEndian.PutUint32(header[16:20], uint32(snaplen))
-	binary.LittleEndian.PutUint32(header[20:24], 1) // LINKTYPE_ETHERNET
-	_, err := f.Write(header[:])
-	return err
-}
-
-func writePacket(f *os.File, at time.Time, packet []byte, originalLen int) error {
-	var header [16]byte
-	binary.LittleEndian.PutUint32(header[0:4], uint32(at.Unix()))
-	binary.LittleEndian.PutUint32(header[4:8], uint32(at.Nanosecond()/1_000))
-	binary.LittleEndian.PutUint32(header[8:12], uint32(len(packet)))
-	binary.LittleEndian.PutUint32(header[12:16], uint32(originalLen))
-	if _, err := f.Write(header[:]); err != nil {
-		return err
-	}
-	_, err := f.Write(packet)
-	return err
-}
-
-func htons(v uint16) uint16 { return v<<8 | v>>8 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// packetMatcher implements the deliberately small filter subset accepted by
-// v1: protocol, one host, and one port joined with "and". Unsupported BPF is
-// rejected instead of becoming an accidental unfiltered capture.
-type packetMatcher struct {
-	protocol uint8
-	host     netip.Addr
-	port     uint16
-}
-
-func parseFilter(raw string) (packetMatcher, error) {
-	var matcher packetMatcher
-	raw = strings.TrimSpace(strings.ToLower(raw))
-	if raw == "" {
-		return matcher, nil
-	}
-	for _, term := range strings.Split(raw, " and ") {
-		term = strings.TrimSpace(term)
-		switch {
-		case term == "tcp":
-			matcher.protocol = 6
-		case term == "udp":
-			matcher.protocol = 17
-		case term == "icmp":
-			matcher.protocol = 1
-		case term == "icmp6" || term == "icmpv6":
-			matcher.protocol = 58
-		case strings.HasPrefix(term, "host "):
-			if !matcher.host.IsValid() {
-				addr, err := netip.ParseAddr(strings.TrimSpace(strings.TrimPrefix(term, "host ")))
-				if err != nil {
-					return packetMatcher{}, fmt.Errorf("packet capture: invalid host filter: %w", err)
-				}
-				matcher.host = addr.Unmap()
-			} else {
-				return packetMatcher{}, errors.New("packet capture: filter accepts one host")
+		switch fields[i] {
+		case "tcp", "udp", "icmp", "icmp6", "icmpv6":
+			if protocolSeen {
+				return "", errors.New("packet capture: filter accepts one protocol")
 			}
-		case strings.HasPrefix(term, "port "):
-			if matcher.port != 0 {
-				return packetMatcher{}, errors.New("packet capture: filter accepts one port")
+			protocolSeen = true
+			i++
+		case "host":
+			if hostSeen || i+1 >= len(fields) {
+				return "", errors.New("packet capture: filter accepts one host")
 			}
-			port, err := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(term, "port ")), 10, 16)
+			if _, err := netip.ParseAddr(fields[i+1]); err != nil {
+				return "", fmt.Errorf("packet capture: invalid host filter: %w", err)
+			}
+			hostSeen = true
+			i += 2
+		case "port":
+			if portSeen || i+1 >= len(fields) {
+				return "", errors.New("packet capture: filter accepts one port")
+			}
+			port, err := strconv.ParseUint(fields[i+1], 10, 16)
 			if err != nil || port == 0 {
-				return packetMatcher{}, errors.New("packet capture: invalid port filter")
+				return "", errors.New("packet capture: invalid port filter")
 			}
-			matcher.port = uint16(port)
+			portSeen = true
+			i += 2
 		default:
-			return packetMatcher{}, fmt.Errorf("packet capture: unsupported filter %q; use tcp, udp, icmp, host <ip>, port <n>, joined with and", term)
+			return "", fmt.Errorf("packet capture: unsupported filter %q; use tcp, udp, icmp, host <ip>, port <n>, joined with and", fields[i])
+		}
+		if i < len(fields) {
+			if fields[i] != "and" {
+				return "", errors.New("packet capture: invalid filter")
+			}
+			i++
+			if i == len(fields) {
+				return "", errors.New("packet capture: invalid filter")
+			}
 		}
 	}
-	return matcher, nil
+	return strings.Join(fields, " "), nil
 }
 
-func (m packetMatcher) matches(frame []byte) bool {
-	proto, src, dst, srcPort, dstPort, ok := parseFrame(frame)
-	if !ok {
-		return false
-	}
-	if m.protocol != 0 && m.protocol != proto {
-		return false
-	}
-	if m.host.IsValid() && m.host != src && m.host != dst {
-		return false
-	}
-	if m.port != 0 && m.port != srcPort && m.port != dstPort {
-		return false
-	}
-	return true
-}
-
-func parseFrame(frame []byte) (uint8, netip.Addr, netip.Addr, uint16, uint16, bool) {
-	if len(frame) < 14 {
-		return 0, netip.Addr{}, netip.Addr{}, 0, 0, false
-	}
-	offset := 14
-	etherType := binary.BigEndian.Uint16(frame[12:14])
-	for etherType == 0x8100 || etherType == 0x88a8 {
-		if len(frame) < offset+4 {
-			return 0, netip.Addr{}, netip.Addr{}, 0, 0, false
-		}
-		etherType = binary.BigEndian.Uint16(frame[offset+2 : offset+4])
-		offset += 4
-	}
-	switch etherType {
-	case 0x0800:
-		if len(frame) < offset+20 || frame[offset]>>4 != 4 {
-			return 0, netip.Addr{}, netip.Addr{}, 0, 0, false
-		}
-		headerLen := int(frame[offset]&0x0f) * 4
-		if headerLen < 20 || len(frame) < offset+headerLen {
-			return 0, netip.Addr{}, netip.Addr{}, 0, 0, false
-		}
-		proto := frame[offset+9]
-		src := netip.AddrFrom4([4]byte(frame[offset+12 : offset+16]))
-		dst := netip.AddrFrom4([4]byte(frame[offset+16 : offset+20]))
-		return parsePorts(frame, offset+headerLen, proto, src, dst)
-	case 0x86dd:
-		if len(frame) < offset+40 || frame[offset]>>4 != 6 {
-			return 0, netip.Addr{}, netip.Addr{}, 0, 0, false
-		}
-		proto := frame[offset+6]
-		src := netip.AddrFrom16([16]byte(frame[offset+8 : offset+24]))
-		dst := netip.AddrFrom16([16]byte(frame[offset+24 : offset+40]))
-		return parsePorts(frame, offset+40, proto, src, dst)
-	default:
-		return 0, netip.Addr{}, netip.Addr{}, 0, 0, false
-	}
-}
-
-func parsePorts(frame []byte, offset int, proto uint8, src, dst netip.Addr) (uint8, netip.Addr, netip.Addr, uint16, uint16, bool) {
-	if proto != 6 && proto != 17 {
-		return proto, src, dst, 0, 0, true
-	}
-	if len(frame) < offset+4 {
-		return 0, netip.Addr{}, netip.Addr{}, 0, 0, false
-	}
-	return proto, src, dst, binary.BigEndian.Uint16(frame[offset : offset+2]), binary.BigEndian.Uint16(frame[offset+2 : offset+4]), true
+func isFilterProtocol(value string) bool {
+	return value == "tcp" || value == "udp" || value == "icmp" || value == "icmp6" || value == "icmpv6"
 }
