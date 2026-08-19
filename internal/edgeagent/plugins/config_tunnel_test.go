@@ -2,35 +2,79 @@ package plugins
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 )
 
 type fakeTunnelClient struct {
-	resp tunnel.GetPluginConfigsResponse
-	err  error
+	resp       tunnel.GetPluginConfigsResponse
+	secret     *tunnel.GetPluginSecretResponse
+	secrets    map[uint64]tunnel.GetPluginSecretResponse
+	err        error
+	secretReq  *tunnel.GetPluginSecretRequest
+	secretReqs []tunnel.GetPluginSecretRequest
+	reportReq  *tunnel.ReportPluginConfigAppliedRequest
 }
 
 func (f *fakeTunnelClient) Dial(context.Context) error { return nil }
 
 func (f *fakeTunnelClient) RegisterHandler(string, tunnel.Handler) {}
 
-func (f *fakeTunnelClient) Call(_ context.Context, method string, _, resp any) error {
+func (f *fakeTunnelClient) Call(_ context.Context, method string, req, resp any) error {
 	if f.err != nil {
 		return f.err
 	}
-	if method != tunnel.MethodGetPluginConfigs {
+	switch method {
+	case tunnel.MethodGetPluginConfigs:
+		out, ok := resp.(*tunnel.GetPluginConfigsResponse)
+		if !ok {
+			return fmt.Errorf("unexpected response type %T", resp)
+		}
+		*out = f.resp
+		return nil
+	case tunnel.MethodGetPluginSecret:
+		in, ok := req.(tunnel.GetPluginSecretRequest)
+		if !ok {
+			return fmt.Errorf("unexpected secret request type %T", req)
+		}
+		f.secretReq = &in
+		f.secretReqs = append(f.secretReqs, in)
+		out, ok := resp.(*tunnel.GetPluginSecretResponse)
+		if !ok {
+			return fmt.Errorf("unexpected secret response type %T", resp)
+		}
+		if secret, exists := f.secrets[in.Generation]; exists {
+			*out = secret
+			return nil
+		}
+		if f.secret == nil {
+			return fmt.Errorf("missing secret response for generation %d", in.Generation)
+		}
+		*out = *f.secret
+		return nil
+	case tunnel.MethodReportPluginConfigApplied:
+		in, ok := req.(tunnel.ReportPluginConfigAppliedRequest)
+		if !ok {
+			return fmt.Errorf("unexpected report request type %T", req)
+		}
+		f.reportReq = &in
+		out, ok := resp.(*tunnel.ReportPluginConfigAppliedResponse)
+		if !ok {
+			return fmt.Errorf("unexpected report response type %T", resp)
+		}
+		out.OK = true
+		return nil
+	default:
 		return fmt.Errorf("unexpected method %q", method)
 	}
-	out, ok := resp.(*tunnel.GetPluginConfigsResponse)
-	if !ok {
-		return fmt.Errorf("unexpected response type %T", resp)
-	}
-	*out = f.resp
-	return nil
 }
 
 func (f *fakeTunnelClient) AcceptStream() (tunnel.StreamConn, error) {
@@ -64,8 +108,8 @@ func TestTunnelConfigFetcherAppliesKubernetesLogsDefaults(t *testing.T) {
 		t.Fatalf("Fetch: %v", err)
 	}
 	cfg := got["logs"]
-	if cfg.EdgeID != 42 {
-		t.Fatalf("EdgeID = %d, want env override 42", cfg.EdgeID)
+	if cfg.EdgeID != 100 {
+		t.Fatalf("EdgeID label = %d, want manager-resolved device_id 100", cfg.EdgeID)
 	}
 	if cfg.Endpoint != "https://manager.example.com/loki/api/v1/push" {
 		t.Fatalf("Endpoint = %q", cfg.Endpoint)
@@ -78,6 +122,46 @@ func TestTunnelConfigFetcherAppliesKubernetesLogsDefaults(t *testing.T) {
 	assertSpecEqual(t, cfg.Spec, "node_name", "kind-worker")
 	assertSpecEqual(t, cfg.Spec, "pod_log_path", "/var/log/pods/*/*/*.log")
 	assertSpecEqual(t, cfg.Spec, "enable_journald", false)
+}
+
+func TestTunnelConfigFetcherNeverUsesTunnelEdgeIDAsDeviceLabel(t *testing.T) {
+	t.Setenv("ONGRID_EDGE_ID", "42")
+	t.Setenv("ONGRID_EDGE_DEVICE_ID", "")
+
+	client := &fakeTunnelClient{resp: tunnel.GetPluginConfigsResponse{
+		EdgeID: 0,
+		Configs: map[string]tunnel.GetPluginConfigsEntry{
+			"logs": {Enabled: true, Endpoint: "https://manager.example.com/loki/api/v1/push"},
+		},
+	}}
+	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
+	got, err := fetcher.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got["logs"].EdgeID != 0 {
+		t.Fatalf("EdgeID label = %d, want 0 when host device is unresolved", got["logs"].EdgeID)
+	}
+}
+
+func TestTunnelConfigFetcherAllowsExplicitDeviceIDForDevMode(t *testing.T) {
+	t.Setenv("ONGRID_EDGE_ID", "42")
+	t.Setenv("ONGRID_EDGE_DEVICE_ID", "9001")
+
+	client := &fakeTunnelClient{resp: tunnel.GetPluginConfigsResponse{
+		EdgeID: 0,
+		Configs: map[string]tunnel.GetPluginConfigsEntry{
+			"logs": {Enabled: true, Endpoint: "https://manager.example.com/loki/api/v1/push"},
+		},
+	}}
+	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
+	got, err := fetcher.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got["logs"].EdgeID != 9001 {
+		t.Fatalf("EdgeID label = %d, want explicit device_id 9001", got["logs"].EdgeID)
+	}
 }
 
 func TestTunnelConfigFetcherUsesProvidedCredentials(t *testing.T) {
@@ -404,12 +488,216 @@ func TestTunnelConfigFetcherAppliesKubernetesDefaultsToEnvFallback(t *testing.T)
 	if !cfg.Enabled {
 		t.Fatalf("logs fallback config should remain enabled")
 	}
+	if cfg.EdgeID != 0 {
+		t.Fatalf("fallback device label = %d, want unresolved 0", cfg.EdgeID)
+	}
 	if cfg.Endpoint != "https://manager.example.com/loki/api/v1/push" {
 		t.Fatalf("Endpoint = %q", cfg.Endpoint)
 	}
 	assertSpecEqual(t, cfg.Spec, "mode", "kubernetes")
 	assertSpecEqual(t, cfg.Spec, "cluster_id", "9")
 	assertSpecEqual(t, cfg.Spec, "node_name", "kind-worker")
+}
+
+func TestTunnelConfigFetcherMaterializesExternalElasticsearchSecret(t *testing.T) {
+	secret := "ZXMta2V5LWlkOmVzLWtleS1zZWNyZXQ="
+	digest := sha256.Sum256([]byte(secret))
+	client := &fakeTunnelClient{
+		resp: tunnel.GetPluginConfigsResponse{EdgeID: 42, Configs: map[string]tunnel.GetPluginConfigsEntry{
+			"logs": {Enabled: true, Spec: map[string]interface{}{
+				"backend":                   "external_elasticsearch",
+				"backend_generation":        float64(3),
+				"elasticsearch_secret_slot": "elasticsearch_api_key",
+				"elasticsearch_ca_pem":      "test-ca",
+				"log_probe_id":              "ongrid-log-probe-abcdefghijklmnopqrstuvwx",
+			}},
+		}},
+		secret: &tunnel.GetPluginSecretResponse{
+			Generation: 3,
+			Content:    secret,
+			SHA256:     hex.EncodeToString(digest[:]),
+		},
+	}
+	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
+	fetcher.secretBaseDir = t.TempDir()
+
+	got, err := fetcher.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if client.secretReq == nil || client.secretReq.Generation != 3 || client.secretReq.Slot != "elasticsearch_api_key" {
+		t.Fatalf("secret request = %+v", client.secretReq)
+	}
+	cfg := got["logs"]
+	keyPath, _ := cfg.Spec["elasticsearch_api_key_file"].(string)
+	if keyPath == "" || strings.Contains(fmt.Sprint(cfg.Spec), secret) {
+		t.Fatalf("materialized spec leaks or omits secret path: %#v", cfg.Spec)
+	}
+	content, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read key file: %v", err)
+	}
+	if string(content) != secret {
+		t.Fatalf("key content = %q", content)
+	}
+	info, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatalf("stat key file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("key mode = %o", info.Mode().Perm())
+	}
+	caPath, _ := cfg.Spec["elasticsearch_ca_file"].(string)
+	if caPath == "" {
+		t.Fatal("materialized CA path missing")
+	}
+	if _, err := os.Stat(caPath); err != nil {
+		t.Fatalf("CA file missing: %v", err)
+	}
+	if _, ok := cfg.Spec["elasticsearch_ca_pem"]; ok {
+		t.Fatal("CA PEM remained in supervisor snapshot")
+	}
+	probePath, _ := cfg.Spec["log_probe_file"].(string)
+	probe, err := os.ReadFile(probePath)
+	if err != nil {
+		t.Fatalf("read probe file: %v", err)
+	}
+	if string(probe) != "ongrid-log-probe-abcdefghijklmnopqrstuvwx\n" {
+		t.Fatalf("probe content = %q", probe)
+	}
+	if err := fetcher.ReportPluginConfigApplied(context.Background(), "logs", cfg, nil); err != nil {
+		t.Fatalf("ReportPluginConfigApplied: %v", err)
+	}
+	if client.reportReq == nil || !client.reportReq.Applied || client.reportReq.Generation != 3 || client.reportReq.ProbeID == "" {
+		t.Fatalf("report request = %+v", client.reportReq)
+	}
+}
+
+func TestTunnelConfigFetcherMaterializesCandidateAndExternalBaselineSecrets(t *testing.T) {
+	candidate := "candidate-id:candidate-secret"
+	baseline := "baseline-id:baseline-secret"
+	candidateDigest := sha256.Sum256([]byte(candidate))
+	baselineDigest := sha256.Sum256([]byte(baseline))
+	client := &fakeTunnelClient{
+		resp: tunnel.GetPluginConfigsResponse{EdgeID: 42, Configs: map[string]tunnel.GetPluginConfigsEntry{
+			"logs": {Enabled: true, Spec: map[string]interface{}{
+				"backend":                            "external_elasticsearch",
+				"backend_generation":                 float64(4),
+				"elasticsearch_secret_slot":          "elasticsearch_api_key",
+				"rollout_shadow":                     true,
+				"baseline_backend":                   "external_elasticsearch",
+				"baseline_backend_generation":        float64(3),
+				"baseline_elasticsearch_secret_slot": "elasticsearch_api_key",
+				"baseline_elasticsearch_ca_pem":      "baseline-ca",
+				"baseline_elasticsearch_dataset":     "ongrid.host",
+				"baseline_elasticsearch_namespace":   "old",
+				"baseline_elasticsearch_endpoints":   []interface{}{"https://old-es.example.com:9200"},
+				"log_probe_id":                       "ongrid-log-probe-abcdefghijklmnopqrstuvwx",
+			}},
+		}},
+		secrets: map[uint64]tunnel.GetPluginSecretResponse{
+			4: {Generation: 4, Content: candidate, SHA256: hex.EncodeToString(candidateDigest[:])},
+			3: {Generation: 3, Content: baseline, SHA256: hex.EncodeToString(baselineDigest[:])},
+		},
+	}
+	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
+	fetcher.secretBaseDir = t.TempDir()
+
+	got, err := fetcher.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	cfg := got["logs"]
+	candidatePath, _ := cfg.Spec["elasticsearch_api_key_file"].(string)
+	baselinePath, _ := cfg.Spec["baseline_elasticsearch_api_key_file"].(string)
+	if candidatePath == "" || baselinePath == "" || candidatePath == baselinePath {
+		t.Fatalf("candidate/baseline paths = %q / %q", candidatePath, baselinePath)
+	}
+	if raw, readErr := os.ReadFile(candidatePath); readErr != nil || string(raw) != candidate {
+		t.Fatalf("candidate credential = %q, err=%v", raw, readErr)
+	}
+	if raw, readErr := os.ReadFile(baselinePath); readErr != nil || string(raw) != baseline {
+		t.Fatalf("baseline credential = %q, err=%v", raw, readErr)
+	}
+	if len(client.secretReqs) != 2 || client.secretReqs[0].Generation != 4 || client.secretReqs[1].Generation != 3 {
+		t.Fatalf("secret requests = %+v", client.secretReqs)
+	}
+	if _, ok := cfg.Spec["baseline_elasticsearch_ca_pem"]; ok {
+		t.Fatal("baseline CA PEM remained in supervisor snapshot")
+	}
+	if caPath, _ := cfg.Spec["baseline_elasticsearch_ca_file"].(string); caPath == "" {
+		t.Fatal("baseline CA file was not materialized")
+	}
+}
+
+func TestTunnelConfigFetcherMaterializesRollbackLokiCandidate(t *testing.T) {
+	baseline := "baseline-id:baseline-secret"
+	baselineDigest := sha256.Sum256([]byte(baseline))
+	client := &fakeTunnelClient{
+		resp: tunnel.GetPluginConfigsResponse{EdgeID: 42, Configs: map[string]tunnel.GetPluginConfigsEntry{
+			"logs": {Enabled: true, Endpoint: "https://manager.example.com/loki/api/v1/push", Spec: map[string]interface{}{
+				"backend":                            "builtin_loki",
+				"backend_generation":                 float64(3),
+				"log_probe_id":                       "ongrid-log-probe-abcdefghijklmnopqrstuvwx",
+				"rollout_shadow":                     true,
+				"baseline_backend":                   "external_elasticsearch",
+				"baseline_backend_generation":        float64(3),
+				"baseline_elasticsearch_secret_slot": "elasticsearch_api_key",
+				"baseline_elasticsearch_ca_pem":      "baseline-ca",
+			}},
+		}},
+		secret: &tunnel.GetPluginSecretResponse{
+			Generation: 3, Content: baseline, SHA256: hex.EncodeToString(baselineDigest[:]),
+		},
+	}
+	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
+	fetcher.secretBaseDir = t.TempDir()
+
+	got, err := fetcher.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	cfg := got["logs"]
+	if _, exists := cfg.Spec["elasticsearch_api_key_file"]; exists {
+		t.Fatal("Loki rollback candidate unexpectedly materialized a candidate Elasticsearch key")
+	}
+	baselinePath, _ := cfg.Spec["baseline_elasticsearch_api_key_file"].(string)
+	if raw, readErr := os.ReadFile(baselinePath); readErr != nil || string(raw) != baseline {
+		t.Fatalf("rollback baseline credential = %q, err=%v", raw, readErr)
+	}
+	probePath, _ := cfg.Spec["log_probe_file"].(string)
+	if raw, readErr := os.ReadFile(probePath); readErr != nil || string(raw) != "ongrid-log-probe-abcdefghijklmnopqrstuvwx\n" {
+		t.Fatalf("rollback probe = %q, err=%v", raw, readErr)
+	}
+	if client.secretReq == nil || client.secretReq.Generation != 3 {
+		t.Fatalf("rollback secret request = %+v", client.secretReq)
+	}
+	if err := fetcher.ReportPluginConfigApplied(context.Background(), "logs", cfg, nil); err != nil {
+		t.Fatalf("ReportPluginConfigApplied: %v", err)
+	}
+	if client.reportReq == nil || !client.reportReq.Applied || client.reportReq.ProbeID == "" {
+		t.Fatalf("rollback report request = %+v", client.reportReq)
+	}
+}
+
+func TestMaterializeGenerationFileRejectsRollbackAndSymlink(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "logs")
+	path := filepath.Join(dir, "elasticsearch_api_key")
+	if err := materializeGenerationFile(dir, path, 5, []byte("new")); err != nil {
+		t.Fatalf("write generation 5: %v", err)
+	}
+	if err := materializeGenerationFile(dir, path, 4, []byte("old")); err == nil {
+		t.Fatal("older generation was accepted")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove key: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "outside"), path); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := materializeGenerationFile(dir, path, 6, []byte("next")); err == nil {
+		t.Fatal("secret symlink was replaced")
+	}
 }
 
 func assertSpecEqual(t *testing.T, spec map[string]interface{}, key string, want interface{}) {

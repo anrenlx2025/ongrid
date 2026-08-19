@@ -15,10 +15,7 @@ import {
   FileText,
   GitBranch,
   Search,
-  Sparkles,
-  Trash2,
-  Plus,
-  Star,
+  RefreshCw,
 } from 'lucide-react';
 import {
   openMetricDrilldown,
@@ -38,15 +35,23 @@ import {
   testLokiConnection,
   testTempoConnection,
   testWebSearchConnection,
-  invalidateLLMRouter,
   type SystemSetting,
   type GrafanaSyncResult,
-  type WebSearchProbeResult,
 } from '@/api/settings';
-import { ProviderIcon } from '@/components/icons/Provider';
+import {
+  activateLogBackend,
+  getLogBackend,
+  rollbackLogBackend,
+  saveLogBackend,
+  testLogBackend,
+  type LogBackend,
+  type SaveLogBackendInput,
+} from '@/api/logs';
+import { listSecrets, type SecretView } from '@/api/secrets';
+import { listEdges, type Edge } from '@/api/edges';
 import { getPluginCounts } from '@/api/integrations';
 import { ApiError } from '@/api/client';
-import { Button, Card, Chip } from '@/components/ui';
+import { Button, Card } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { useI18n } from '@/i18n/locale';
 
@@ -68,6 +73,7 @@ export default function SettingsIntegrations() {
     <div className="space-y-5">
       <PrometheusCard />
       <GrafanaCard />
+      <ElasticsearchLogsCard />
       <LokiCard />
       <TempoCard />
       <WebSearchCard />
@@ -806,6 +812,288 @@ function usePluginCount(name: string): number | null | 'err' {
     };
   }, [name]);
   return count;
+}
+
+type ElasticsearchLogsForm = {
+  name: string;
+  writeEndpoints: string;
+  queryEndpoint: string;
+  dataset: string;
+  namespace: string;
+  writeCredentialRef: string;
+  queryCredentialRef: string;
+  caPEM: string;
+  kibanaURL: string;
+  tlsInsecure: boolean;
+};
+
+const emptyElasticsearchLogsForm: ElasticsearchLogsForm = {
+  name: 'external-elasticsearch',
+  writeEndpoints: '',
+  queryEndpoint: '',
+  dataset: 'ongrid.system',
+  namespace: 'default',
+  writeCredentialRef: '',
+  queryCredentialRef: '',
+  caPEM: '',
+  kibanaURL: '',
+  tlsInsecure: false,
+};
+
+function integrationError(error: unknown): string {
+  return error instanceof ApiError ? error.message : (error as Error).message;
+}
+
+function backendToForm(backend: LogBackend): ElasticsearchLogsForm {
+  return {
+    name: backend.name,
+    writeEndpoints: backend.write_endpoints.join('\n'),
+    queryEndpoint: backend.query_endpoint,
+    dataset: backend.dataset,
+    namespace: backend.namespace,
+    writeCredentialRef: backend.write_credential_ref,
+    queryCredentialRef: backend.query_credential_ref,
+    caPEM: '',
+    kibanaURL: backend.kibana_url ?? '',
+    tlsInsecure: backend.tls_insecure,
+  };
+}
+
+function logBackendStatus(status: LogBackend['status'], tr: (zh: string, en: string) => string): string {
+  switch (status) {
+    case 'draft': return tr('草稿', 'Draft');
+    case 'distributing': return tr('分发中', 'Distributing');
+    case 'verifying': return tr('真实写入验证中', 'Write-path verification');
+    case 'active': return tr('已激活', 'Active');
+    case 'rolling_back': return tr('回滚预热验证中', 'Rollback verification');
+    case 'degraded': return tr('已降级', 'Degraded');
+    case 'rolled_back': return tr('已回滚', 'Rolled back');
+  }
+}
+
+function ElasticsearchLogsCard() {
+  const { tr } = useI18n();
+  const count = usePluginCount('logs');
+  const [backend, setBackend] = useState<LogBackend | null>(null);
+  const [form, setForm] = useState<ElasticsearchLogsForm>(emptyElasticsearchLogsForm);
+  const [secrets, setSecrets] = useState<SecretView[]>([]);
+  const [edges, setEdges] = useState<Edge[]>([]);
+  const [probeEdgeID, setProbeEdgeID] = useState('');
+  const [canary, setCanary] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const refresh = useCallback(async (showLoading = true) => {
+    if (showLoading) setLoading(true);
+    try {
+      const [credentialResult, edgeResult] = await Promise.all([listSecrets(), listEdges()]);
+      setSecrets((credentialResult.items ?? []).filter((secret) => secret.type === 'elasticsearch' && secret.field_keys.includes('api_key')));
+      setEdges((edgeResult.items ?? []).filter((edge) => edge.status === 'online' && edge.device_id != null));
+      try {
+        const value = await getLogBackend();
+        setBackend(value);
+        setForm(backendToForm(value));
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          setBackend(null);
+          setForm(emptyElasticsearchLogsForm);
+        } else {
+          throw error;
+        }
+      }
+    } catch (error) {
+      setMessage({ ok: false, text: error instanceof ApiError ? error.message : (error as Error).message });
+    } finally {
+      if (showLoading) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    if (!backend || !['distributing', 'verifying', 'rolling_back'].includes(backend.status)) return;
+    const timer = window.setInterval(() => void refresh(false), 3000);
+    return () => window.clearInterval(timer);
+  }, [backend, refresh]);
+
+  const update = <K extends keyof ElasticsearchLogsForm>(key: K, value: ElasticsearchLogsForm[K]) => {
+    setMessage(null);
+    setForm((current) => ({ ...current, [key]: value }));
+  };
+
+  const save = async () => {
+    const endpoints = form.writeEndpoints.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean);
+    if (form.writeCredentialRef === form.queryCredentialRef) {
+      setMessage({ ok: false, text: tr('写入 API Key 和只读查询 API Key 必须是两个不同凭证。', 'Write and read-only query API keys must use different credentials.') });
+      return;
+    }
+    const input: SaveLogBackendInput = {
+      name: form.name.trim(),
+      write_endpoints: endpoints,
+      query_endpoint: form.queryEndpoint.trim(),
+      dataset: form.dataset.trim(),
+      namespace: form.namespace.trim(),
+      write_credential_ref: form.writeCredentialRef,
+      query_credential_ref: form.queryCredentialRef,
+      ca_pem: form.caPEM.trim() || undefined,
+      preserve_ca: Boolean(backend?.has_custom_ca && !form.caPEM.trim()),
+      kibana_url: form.kibanaURL.trim() || undefined,
+      tls_insecure: form.tlsInsecure,
+    };
+    setBusy('save');
+    setMessage(null);
+    try {
+      const value = await saveLogBackend(input);
+      setBackend(value);
+      setForm(backendToForm(value));
+      setMessage({ ok: true, text: tr('已保存为草稿；日志链路尚未切换。', 'Saved as a draft; log traffic has not switched.') });
+    } catch (error) {
+      setMessage({ ok: false, text: integrationError(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const test = async () => {
+    if (!backend) return;
+    setBusy('test');
+    setMessage(null);
+    try {
+      const value = await testLogBackend(backend.id);
+      setBackend(value);
+      setMessage({ ok: true, text: tr(`端点、认证和版本探测通过（Elasticsearch ${value.detected_version ?? ''}）；读写权限将在 Edge 真实探针阶段验证。`, `Endpoint, authentication, and version probe passed (Elasticsearch ${value.detected_version ?? ''}); read/write permissions are verified by the real Edge probe.`) });
+    } catch (error) {
+      setMessage({ ok: false, text: integrationError(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const activate = async (promote = false) => {
+    if (!backend) return;
+    const edgeID = Number(probeEdgeID);
+    if (!promote && canary && (!Number.isInteger(edgeID) || edgeID <= 0)) {
+      setMessage({ ok: false, text: tr('请选择一台在线 Edge 执行真实写入探针。', 'Select an online edge for the real write probe.') });
+      return;
+    }
+    setBusy(promote ? 'promote' : 'activate');
+    setMessage(null);
+    try {
+      const value = await activateLogBackend(backend.id, { edge_ids: promote || !canary ? [] : [edgeID], canary: promote ? false : canary });
+      setBackend(value);
+      setMessage({ ok: true, text: promote
+        ? value.status === 'active'
+          ? tr('已全量切换到外部 Elasticsearch。', 'Fleet cutover to external Elasticsearch is active.')
+          : tr('已开始全量预热；所有启用 logs 的 Edge 均在线且真实探针成功后将自动切换。', 'Fleet pre-warming started; cutover occurs only after every log-enabled edge is online and its real probe succeeds.')
+        : tr('配置已下发；等待 Edge 启动 Collector 并由 Manager 读回唯一探针日志。', 'Configuration distributed; waiting for the edge Collector and Manager read-back probe.') });
+    } catch (error) {
+      setMessage({ ok: false, text: integrationError(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const rollback = async () => {
+    if (!backend) return;
+    const cancelsCandidate = backend.status !== 'active' && !backend.cutover_at;
+    setBusy('rollback');
+    setMessage(null);
+    try {
+      const value = await rollbackLogBackend(backend.id);
+      setBackend(value);
+      setMessage({ ok: true, text: cancelsCandidate
+        ? tr('已取消候选后端；Edge 已恢复当前权威后端。', 'Candidate rollout cancelled; edges are back on the current authoritative backend.')
+        : value.status === 'rolling_back'
+          ? tr('已开始回滚预热；所有启用 logs 的 Edge 均在线且 Loki 实写探针成功后，才会结束 ES 时间线并切换查询。', 'Rollback pre-warming started; the ES timeline closes only after every log-enabled edge is online and has a verified real write in Loki.')
+          : tr('已回滚到内置 Loki；Edge 仍使用同一套 OTel Collector 与 checkpoint。', 'Rolled back to built-in Loki with the same OTel Collector and checkpoints.') });
+    } catch (error) {
+      setMessage({ ok: false, text: integrationError(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const assignments = backend?.assignments ?? [];
+  const canEdit = !backend || ['draft', 'degraded', 'rolled_back'].includes(backend.status);
+  const allAssignmentsVerified = assignments.length > 0 && assignments.every((assignment) => assignment.status === 'verified' && assignment.last_write_success_at);
+  const canPromoteCanary = backend?.status === 'verifying' && !backend.rollout_auto_activate && allAssignmentsVerified;
+  const fleetConverging = backend != null && backend.rollout_auto_activate && (backend.status === 'distributing' || backend.status === 'verifying');
+  const rollbackConverging = backend?.status === 'rolling_back';
+  const rollbackHasFailures = rollbackConverging && assignments.some((assignment) => assignment.status === 'failed');
+
+  return (
+    <Card className="p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <Database size={14} className="text-sky-400" />
+            <h2 className="text-sm font-medium text-zinc-100">{tr('外部 Elasticsearch 日志后端', 'External Elasticsearch log backend')}</h2>
+            {backend && <span className={cn('rounded-full border px-2 py-0.5 text-[10px]', backend.status === 'active' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : backend.status === 'degraded' ? 'border-red-500/40 bg-red-500/10 text-red-300' : 'border-zinc-700 bg-zinc-900 text-zinc-400')}>{logBackendStatus(backend.status, tr)} · gen {backend.generation}</span>}
+          </div>
+          <p className="mt-2 max-w-4xl text-[11px] leading-5 text-zinc-500">
+            {tr('Edge 上的 otelcol-contrib 直接写入这些 endpoint，日志正文不经过 Manager。Manager 只下发非敏感配置、通过专用通道投递写 Key，并使用独立只读 Key 查询与验证。内置 Loki 始终保留为默认和回滚出口。', 'otelcol-contrib on each edge writes directly to these endpoints; log bytes never pass through Manager. Manager distributes non-sensitive configuration, delivers the write key through a dedicated channel, and queries with a separate read-only key. Built-in Loki remains the default and rollback target.')}
+          </p>
+        </div>
+        <PluginCountLine label="logs / otelcol-contrib" count={count} />
+      </div>
+
+      {loading ? <div className="flex h-36 items-center justify-center text-sm text-zinc-500"><Loader2 size={14} className="mr-2 animate-spin" />{tr('加载中…', 'Loading…')}</div> : (
+        <>
+          <fieldset disabled={!canEdit || busy !== null} className="mt-5 grid grid-cols-1 gap-4 disabled:opacity-65 md:grid-cols-2">
+            <PromField label={tr('写入 endpoints（每行一个）', 'Write endpoints (one per line)')} hint={tr('仅允许根路径；生产环境要求 HTTPS。', 'Root URLs only; HTTPS is required in production.')} value={form.writeEndpoints} onChange={(value) => update('writeEndpoints', value)} placeholder="https://es-data-1.example.com:9200" />
+            <PromField label={tr('Manager 查询 endpoint', 'Manager query endpoint')} hint={tr('必须可从 Manager 网络访问。', 'Must be reachable from the Manager network.')} value={form.queryEndpoint} onChange={(value) => update('queryEndpoint', value)} placeholder="https://es-query.example.com:9200" />
+            <PromField label="OTel dataset" value={form.dataset} onChange={(value) => update('dataset', value)} placeholder="ongrid.system" />
+            <PromField label="Data stream namespace" value={form.namespace} onChange={(value) => update('namespace', value)} placeholder="prod" />
+            <CredentialSelect label={tr('Edge 写入凭证', 'Edge write credential')} value={form.writeCredentialRef} onChange={(value) => update('writeCredentialRef', value)} secrets={secrets} />
+            <CredentialSelect label={tr('Manager 只读查询凭证', 'Manager read-only credential')} value={form.queryCredentialRef} onChange={(value) => update('queryCredentialRef', value)} secrets={secrets} />
+            <label className="block md:col-span-2"><span className="mb-1 block text-xs text-zinc-400">{tr('自定义 CA PEM（可选）', 'Custom CA PEM (optional)')}</span><textarea value={form.caPEM} onChange={(event) => update('caPEM', event.target.value)} rows={3} placeholder={backend?.has_custom_ca ? tr('已保存自定义 CA；留空会保持不变', 'A custom CA is stored; leave blank to preserve it') : '-----BEGIN CERTIFICATE-----'} className="w-full rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2 font-mono text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none" /></label>
+            <PromField label="Kibana URL" hint={tr('可选；仅用于外部 Discover 跳转。', 'Optional; used only for an external Discover link.')} value={form.kibanaURL} onChange={(value) => update('kibanaURL', value)} placeholder="https://kibana.example.com" />
+            <label className="flex items-center gap-2 self-end pb-2 text-xs text-zinc-300"><input type="checkbox" checked={form.tlsInsecure} onChange={(event) => update('tlsInsecure', event.target.checked)} className="accent-amber-500" />{tr('兼容测试：允许 HTTP / 跳过 TLS 校验', 'Compatibility testing: allow HTTP / skip TLS verification')}</label>
+          </fieldset>
+
+          <div className="mt-2 text-[11px] text-zinc-500">{tr('凭证值只写并加密保存。请先在', 'Credential values are write-only and encrypted. Create two Elasticsearch credentials in ')} <a href="/settings/secrets" className="text-sky-400 hover:text-sky-300">{tr('设置 → 凭证', 'Settings → Credentials')}</a>{tr('中分别创建最小权限写 Key 和只读 Key。', ' with least-privilege write and read-only keys.')}</div>
+
+          <div className="mt-5 flex flex-wrap items-end gap-3 border-t border-zinc-800/70 pt-4">
+            <Button onClick={() => void save()} disabled={!canEdit || busy !== null} variant="subtle">{busy === 'save' ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}<span>{tr('保存草稿', 'Save draft')}</span></Button>
+            <Button onClick={() => void test()} disabled={!backend || busy !== null || backend.status === 'active' || rollbackConverging} variant="ghost">{busy === 'test' ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />}<span>{tr('测试端点与认证', 'Test endpoints & auth')}</span></Button>
+            {canPromoteCanary ? (
+              <Button onClick={() => void activate(true)} disabled={busy !== null} variant="subtle">{busy === 'promote' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}<span>{tr('灰度通过，切换全量', 'Promote canary to fleet')}</span></Button>
+            ) : rollbackConverging ? (
+              <>
+                <span className="inline-flex h-8 items-center gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 text-xs text-amber-300"><Loader2 size={13} className={rollbackHasFailures ? '' : 'animate-spin'} />{rollbackHasFailures ? tr('部分 Loki 实写探针失败，ES 仍保持权威', 'Some Loki write probes failed; Elasticsearch remains authoritative') : tr('全量 Edge 正在双写 ES 与 Loki，并验证 Loki 实写', 'The fleet is dual-writing ES and Loki while the Loki path is verified')}</span>
+                {rollbackHasFailures && <Button onClick={() => void rollback()} disabled={busy !== null} variant="ghost"><RefreshCw size={14} /><span>{tr('重试失败 Edge', 'Retry failed edges')}</span></Button>}
+              </>
+            ) : fleetConverging ? (
+              <span className="inline-flex h-8 items-center gap-2 rounded-md border border-sky-500/20 bg-sky-500/5 px-3 text-xs text-sky-300"><Loader2 size={13} className="animate-spin" />{tr('所有启用 logs 的 Edge 全量预热与验证中', 'Pre-warming and verifying every log-enabled edge')}</span>
+            ) : backend?.status !== 'active' && (
+              <>
+                <label className="block min-w-52"><span className="mb-1 block text-[10px] text-zinc-500">{tr('真实写探针 Edge', 'Real write-probe edge')}</span><select value={probeEdgeID} disabled={!canary} onChange={(event) => setProbeEdgeID(event.target.value)} className="h-8 w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 text-xs text-zinc-200 disabled:opacity-40"><option value="">{canary ? tr('选择 Edge', 'Select edge') : tr('自动检查全部启用 logs 的 Edge', 'All log-enabled edges checked automatically')}</option>{edges.map((edge) => <option key={edge.id} value={String(edge.id)}>{edge.name} (edge #{edge.id}{edge.device_id ? ` / device #${edge.device_id}` : ''})</option>)}</select></label>
+                <label className="flex h-8 items-center gap-2 text-xs text-zinc-400"><input type="checkbox" checked={canary} onChange={(event) => setCanary(event.target.checked)} className="accent-sky-500" />{tr('仅灰度，不自动全量', 'Canary only')}</label>
+                <Button onClick={() => void activate(false)} disabled={!backend || busy !== null || backend.status === 'distributing'} variant="subtle">{busy === 'activate' ? <Loader2 size={14} className="animate-spin" /> : <GitBranch size={14} />}<span>{canary ? tr('下发灰度并验证', 'Distribute canary') : tr('全量预热并验证', 'Pre-warm fleet')}</span></Button>
+              </>
+            )}
+            {backend && ['active', 'distributing', 'verifying', 'degraded'].includes(backend.status) && <Button onClick={() => void rollback()} disabled={busy !== null} variant="ghost"><RefreshCw size={14} /><span>{backend.status !== 'active' && !backend.cutover_at ? tr('取消候选切换', 'Cancel candidate rollout') : tr('预热并回滚到内置 Loki', 'Pre-warm and roll back to built-in Loki')}</span></Button>}
+          </div>
+
+          {message && <p className={cn('mt-3 break-all text-xs', message.ok ? 'text-emerald-400' : 'text-red-400')}>{message.ok ? '✓ ' : '✗ '}{message.text}</p>}
+          {backend?.last_error && <p className="mt-2 rounded border border-red-500/20 bg-red-500/5 px-2 py-1 text-[11px] text-red-300">{backend.last_error}</p>}
+
+          {assignments.length > 0 && (
+            <div className="mt-4 overflow-hidden rounded-lg border border-zinc-800">
+              <div className="grid grid-cols-[100px_110px_110px_1fr] bg-zinc-900/70 px-3 py-2 text-[10px] uppercase tracking-wide text-zinc-500"><span>Edge</span><span>{tr('期望 / 应用', 'Desired / applied')}</span><span>{tr('状态', 'Status')}</span><span>{tr('最后写入验证', 'Last write verification')}</span></div>
+              {assignments.map((assignment) => <div key={assignment.id} className="grid grid-cols-[100px_110px_110px_1fr] border-t border-zinc-800 px-3 py-2 text-[11px] text-zinc-400"><span>#{assignment.edge_id}</span><span>{assignment.desired_generation} / {assignment.applied_generation}</span><span className={assignment.status === 'verified' ? 'text-emerald-400' : assignment.status === 'failed' ? 'text-red-400' : 'text-amber-300'}>{assignment.status}</span><span>{assignment.last_write_success_at ? new Date(assignment.last_write_success_at).toLocaleString() : assignment.last_error || '—'}</span></div>)}
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
+function CredentialSelect({ label, value, onChange, secrets }: { label: string; value: string; onChange: (value: string) => void; secrets: SecretView[] }) {
+  const { tr } = useI18n();
+  return <label className="block"><span className="mb-1 block text-xs text-zinc-400">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="w-full rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"><option value="">{tr('选择 Elasticsearch API Key', 'Select Elasticsearch API key')}</option>{secrets.map((secret) => <option key={secret.id} value={secret.name}>{secret.name}</option>)}</select></label>;
 }
 
 // LokiCard mirrors PrometheusCard. Admin fills in URL + optional basic

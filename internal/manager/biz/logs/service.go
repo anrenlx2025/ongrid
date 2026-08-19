@@ -1,0 +1,1319 @@
+// Package logs owns the external log backend control plane and the dynamic
+// query planner. It never receives log payloads from Edge collectors.
+package logs
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	model "github.com/ongridio/ongrid/internal/manager/model/logs"
+	"github.com/ongridio/ongrid/internal/pkg/errs"
+	"github.com/ongridio/ongrid/internal/pkg/logquery"
+)
+
+const (
+	DefaultBackendName  = "external-elasticsearch"
+	SecretSlotESAPIKey  = "elasticsearch_api_key"
+	maxCAPEMBytes       = 256 << 10
+	maxBackendEndpoints = 8
+)
+
+var (
+	datasetRE   = regexp.MustCompile(`^ongrid\.[a-z0-9][a-z0-9._-]{0,91}$`)
+	namespaceRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,99}$`)
+)
+
+type Repo interface {
+	SaveBackend(ctx context.Context, backend *model.Backend) error
+	GetBackend(ctx context.Context, id uint64) (*model.Backend, error)
+	LatestBackend(ctx context.Context) (*model.Backend, error)
+	ActiveBackend(ctx context.Context) (*model.Backend, error)
+	ListQueryBackends(ctx context.Context) ([]*model.Backend, error)
+	BeginRollout(ctx context.Context, backend *model.Backend, assignments []*model.BackendAssignment) error
+	BeginRollback(ctx context.Context, backend *model.Backend, assignments []*model.BackendAssignment) error
+	ActivateBackend(ctx context.Context, id uint64, version string, cutover time.Time) error
+	CompleteRollback(ctx context.Context, id uint64, endedAt time.Time) error
+	CancelBackend(ctx context.Context, id uint64) error
+	SetBackendState(ctx context.Context, id uint64, status model.BackendStatus, version, lastError string, testedAt time.Time) error
+	SetRolloutBackendState(ctx context.Context, id uint64, status model.BackendStatus, version, lastError string, testedAt time.Time) error
+	GetAssignment(ctx context.Context, backendID, edgeID uint64) (*model.BackendAssignment, error)
+	UpsertAssignment(ctx context.Context, assignment *model.BackendAssignment) error
+	ListAssignments(ctx context.Context, backendID uint64) ([]*model.BackendAssignment, error)
+}
+
+// SecretResolver is deliberately read-only. Credential values are decrypted
+// only while constructing an Elasticsearch client or answering the dedicated
+// authenticated plugin-secret RPC.
+type SecretResolver interface {
+	ResolveFields(ctx context.Context, name string) (map[string]string, error)
+}
+
+type RolloutNotifier interface {
+	NotifyLogsBackendChanged(ctx context.Context) error
+}
+
+type HostDeviceResolver interface {
+	LookupHostDevice(ctx context.Context, edgeID uint64) (uint64, error)
+}
+
+type RolloutEdge struct {
+	EdgeID uint64
+	Online bool
+}
+
+// RolloutEdgeInventory returns every Edge on which logs are enabled, including
+// disconnected identities. A global timeline cannot safely move while one of
+// those Edges may still be writing the previous backend.
+type RolloutEdgeInventory interface {
+	ListRolloutEdges(ctx context.Context) ([]RolloutEdge, error)
+}
+
+type SaveInput struct {
+	Name               string   `json:"name"`
+	WriteEndpoints     []string `json:"write_endpoints"`
+	QueryEndpoint      string   `json:"query_endpoint"`
+	Dataset            string   `json:"dataset"`
+	Namespace          string   `json:"namespace"`
+	WriteCredentialRef string   `json:"write_credential_ref"`
+	QueryCredentialRef string   `json:"query_credential_ref"`
+	CAPEM              string   `json:"ca_pem,omitempty"`
+	PreserveCA         bool     `json:"preserve_ca,omitempty"`
+	KibanaURL          string   `json:"kibana_url,omitempty"`
+	TLSInsecure        bool     `json:"tls_insecure"`
+}
+
+// ActivationInput selects the real Edge hosts used for the write-path probe.
+// Canary keeps the verified generation limited to those hosts; a subsequent
+// non-canary activation ignores the caller subset, inventories every
+// log-enabled Edge, and promotes only after all are online and verified.
+type ActivationInput struct {
+	EdgeIDs []uint64 `json:"edge_ids"`
+	Canary  bool     `json:"canary"`
+}
+
+type BackendView struct {
+	ID                  uint64                     `json:"id"`
+	Name                string                     `json:"name"`
+	Type                model.BackendType          `json:"type"`
+	Status              model.BackendStatus        `json:"status"`
+	Generation          uint64                     `json:"generation"`
+	WriteEndpoints      []string                   `json:"write_endpoints"`
+	QueryEndpoint       string                     `json:"query_endpoint"`
+	Dataset             string                     `json:"dataset"`
+	Namespace           string                     `json:"namespace"`
+	IndexPattern        string                     `json:"index_pattern"`
+	WriteCredentialRef  string                     `json:"write_credential_ref"`
+	QueryCredentialRef  string                     `json:"query_credential_ref"`
+	HasCustomCA         bool                       `json:"has_custom_ca"`
+	KibanaURL           string                     `json:"kibana_url,omitempty"`
+	TLSInsecure         bool                       `json:"tls_insecure"`
+	RolloutAutoActivate bool                       `json:"rollout_auto_activate"`
+	DetectedVersion     string                     `json:"detected_version,omitempty"`
+	CutoverAt           *time.Time                 `json:"cutover_at,omitempty"`
+	EndedAt             *time.Time                 `json:"ended_at,omitempty"`
+	LastTestAt          *time.Time                 `json:"last_test_at,omitempty"`
+	LastError           string                     `json:"last_error,omitempty"`
+	Assignments         []*model.BackendAssignment `json:"assignments,omitempty"`
+	CreatedAt           time.Time                  `json:"created_at"`
+	UpdatedAt           time.Time                  `json:"updated_at"`
+}
+
+// RuntimeConfig is the non-sensitive overlay merged into the Edge logs plugin
+// snapshot. APIKeyFile is added locally by Edge after secret materialization.
+type RuntimeConfig struct {
+	BackendID      uint64
+	Backend        string
+	Generation     uint64
+	WriteEndpoints []string
+	Dataset        string
+	Namespace      string
+	CAPEM          string
+	TLSInsecure    bool
+}
+
+type PluginSecret struct {
+	Generation uint64 `json:"generation"`
+	Content    string `json:"content"`
+	SHA256     string `json:"sha256"`
+}
+
+type Service struct {
+	repo    Repo
+	secrets SecretResolver
+	loki    logquery.Searcher
+
+	mu              sync.RWMutex
+	notifier        RolloutNotifier
+	devices         HostDeviceResolver
+	inventory       RolloutEdgeInventory
+	activationGuard func(context.Context) error
+	cacheKey        string
+	cachedES        *logquery.ElasticsearchClient
+}
+
+func NewService(repo Repo, secrets SecretResolver, loki logquery.Searcher) *Service {
+	return &Service{repo: repo, secrets: secrets, loki: loki}
+}
+
+func (s *Service) SetRolloutNotifier(notifier RolloutNotifier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notifier = notifier
+}
+
+func (s *Service) SetHostDeviceResolver(resolver HostDeviceResolver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.devices = resolver
+}
+
+func (s *Service) SetRolloutEdgeInventory(inventory RolloutEdgeInventory) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inventory = inventory
+}
+
+// SetActivationGuard installs a product-level compatibility check for a
+// fleet cutover. Canary distribution remains available so operators can
+// migrate blockers safely; the guard runs immediately before any full
+// activation or automatic promotion.
+func (s *Service) SetActivationGuard(guard func(context.Context) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activationGuard = guard
+}
+
+func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (*BackendView, error) {
+	normalized, err := normalizeSaveInput(input)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireAPIKey(ctx, normalized.WriteCredentialRef); err != nil {
+		return nil, fmt.Errorf("%w: invalid write credential", errs.ErrInvalid)
+	}
+	if err := s.requireAPIKey(ctx, normalized.QueryCredentialRef); err != nil {
+		return nil, fmt.Errorf("%w: invalid query credential", errs.ErrInvalid)
+	}
+
+	endpointsJSON, err := json.Marshal(normalized.WriteEndpoints)
+	if err != nil {
+		return nil, fmt.Errorf("encode Elasticsearch endpoints: %w", err)
+	}
+	backend := &model.Backend{
+		Name:               normalized.Name,
+		Type:               model.BackendTypeElasticsearch,
+		Status:             model.BackendStatusDraft,
+		Generation:         1,
+		WriteEndpointsJSON: string(endpointsJSON),
+		QueryEndpoint:      normalized.QueryEndpoint,
+		Dataset:            normalized.Dataset,
+		Namespace:          normalized.Namespace,
+		IndexPattern:       indexPattern(normalized.Namespace),
+		WriteCredentialRef: normalized.WriteCredentialRef,
+		QueryCredentialRef: normalized.QueryCredentialRef,
+		CAPEM:              normalized.CAPEM,
+		KibanaURL:          normalized.KibanaURL,
+		TLSInsecure:        normalized.TLSInsecure,
+	}
+	previous, loadErr := s.repo.LatestBackend(ctx)
+	if normalized.PreserveCA && normalized.CAPEM == "" {
+		if loadErr != nil {
+			if errors.Is(loadErr, errs.ErrNotFound) {
+				return nil, fmt.Errorf("%w: cannot preserve CA without an existing backend", errs.ErrInvalid)
+			}
+			return nil, loadErr
+		}
+		backend.CAPEM = previous.CAPEM
+	}
+	if loadErr == nil {
+		backend.Generation = previous.Generation
+		switch previous.Status {
+		case model.BackendStatusDraft, model.BackendStatusDistributing,
+			model.BackendStatusVerifying, model.BackendStatusDegraded:
+			// A not-yet-active revision remains editable in place. The active
+			// revision (if any) keeps serving queries and Edge configs.
+			backend.ID = previous.ID
+			backend.CreatedAt = previous.CreatedAt
+		default:
+			backend.Generation++
+		}
+	} else if !errors.Is(loadErr, errs.ErrNotFound) {
+		return nil, loadErr
+	}
+	if err := s.repo.SaveBackend(ctx, backend); err != nil {
+		return nil, err
+	}
+	s.invalidateCache()
+	return s.view(ctx, backend)
+}
+
+func (s *Service) Get(ctx context.Context) (*BackendView, error) {
+	backend, err := s.repo.LatestBackend(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// A cancelled draft must not hide the still-authoritative generation in
+	// the single-backend settings API. Prefer any live rollout/draft; otherwise
+	// surface the active (or rolling-back) backend before historical rows.
+	if backend.Status == model.BackendStatusRolledBack {
+		active, activeErr := s.repo.ActiveBackend(ctx)
+		if activeErr == nil {
+			backend = active
+		} else if !errors.Is(activeErr, errs.ErrNotFound) {
+			return nil, activeErr
+		}
+	}
+	return s.view(ctx, backend)
+}
+
+func (s *Service) Test(ctx context.Context, id uint64) (*BackendView, error) {
+	backend, err := s.repo.GetBackend(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if backend.Status != model.BackendStatusDraft && backend.Status != model.BackendStatusDegraded {
+		return nil, fmt.Errorf("%w: only a draft or degraded backend can be tested", errs.ErrConflict)
+	}
+	version, err := s.probeBackend(ctx, backend)
+	now := time.Now().UTC()
+	if err != nil {
+		stateErr := s.repo.SetBackendState(ctx, backend.ID, model.BackendStatusDegraded, "", safeProbeError(err), now)
+		if stateErr != nil {
+			return nil, errors.Join(err, stateErr)
+		}
+		return nil, err
+	}
+	if err := s.repo.SetBackendState(ctx, backend.ID, model.BackendStatusDraft, version, "", now); err != nil {
+		return nil, err
+	}
+	backend, err = s.repo.GetBackend(ctx, backend.ID)
+	if err != nil {
+		return nil, err
+	}
+	return s.view(ctx, backend)
+}
+
+func (s *Service) Activate(ctx context.Context, id uint64, input ActivationInput) (*BackendView, error) {
+	backend, err := s.repo.GetBackend(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if backend.Status == model.BackendStatusActive {
+		return s.view(ctx, backend)
+	}
+	if backend.Status == model.BackendStatusRolledBack {
+		return nil, fmt.Errorf("%w: rolled-back generation is immutable; save a new draft", errs.ErrConflict)
+	}
+	if !input.Canary {
+		if err := s.checkActivationGuard(ctx); err != nil {
+			return nil, err
+		}
+	}
+	var edgeIDs []uint64
+	if input.Canary {
+		edgeIDs, err = normalizeEdgeIDs(input.EdgeIDs)
+	} else {
+		edgeIDs, err = s.fleetRolloutEdgeIDs(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validateProbeEdges(ctx, edgeIDs); err != nil {
+		return nil, err
+	}
+	version, err := s.probeBackend(ctx, backend)
+	if err != nil {
+		now := time.Now().UTC()
+		stateErr := s.repo.SetBackendState(ctx, id, model.BackendStatusDegraded, "", safeProbeError(err), now)
+		if stateErr != nil {
+			return nil, errors.Join(err, stateErr)
+		}
+		return nil, err
+	}
+	now := time.Now().UTC()
+	existing := map[uint64]*model.BackendAssignment{}
+	if !input.Canary && (backend.Status == model.BackendStatusDistributing || backend.Status == model.BackendStatusVerifying) {
+		rows, listErr := s.repo.ListAssignments(ctx, backend.ID)
+		if listErr != nil {
+			return nil, listErr
+		}
+		for _, row := range rows {
+			if row != nil {
+				existing[row.EdgeID] = row
+			}
+		}
+	}
+	assignments := make([]*model.BackendAssignment, 0, len(edgeIDs))
+	for _, edgeID := range edgeIDs {
+		if prior := existing[edgeID]; prior != nil && prior.DesiredGeneration == backend.Generation &&
+			prior.Status == model.AssignmentStatusVerified && prior.LastWriteSuccessAt != nil {
+			assignments = append(assignments, cloneAssignmentForRollout(prior))
+			continue
+		}
+		probeID, err := newProbeID()
+		if err != nil {
+			return nil, err
+		}
+		assignments = append(assignments, &model.BackendAssignment{
+			BackendID: backend.ID, EdgeID: edgeID, DesiredGeneration: backend.Generation,
+			Status: model.AssignmentStatusPending, ProbeID: probeID,
+		})
+	}
+	backend.DetectedVersion = version
+	backend.LastTestAt = &now
+	backend.RolloutAutoActivate = !input.Canary
+	allVerified := !input.Canary && assignmentsVerified(assignments, backend.Generation)
+	if err := s.repo.BeginRollout(ctx, backend, assignments); err != nil {
+		return nil, err
+	}
+	s.invalidateCache()
+	if allVerified {
+		if err := s.promoteVerifiedRollout(ctx, backend); err != nil {
+			return nil, err
+		}
+		backend, err = s.repo.GetBackend(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return s.view(ctx, backend)
+	}
+	if err := s.notify(ctx); err != nil {
+		return nil, fmt.Errorf("distribute backend notification: %w", err)
+	}
+	backend, err = s.repo.GetBackend(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.view(ctx, backend)
+}
+
+func (s *Service) Rollback(ctx context.Context, id uint64) (*BackendView, error) {
+	backend, err := s.repo.GetBackend(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if backend.Status == model.BackendStatusRolledBack {
+		return s.view(ctx, backend)
+	}
+	if backend.CutoverAt == nil || (backend.Status != model.BackendStatusActive && backend.Status != model.BackendStatusRollingBack) {
+		if err := s.repo.CancelBackend(ctx, id); err != nil {
+			return nil, err
+		}
+		s.invalidateCache()
+		if err := s.notify(ctx); err != nil {
+			return nil, fmt.Errorf("cancel backend rollout notification: %w", err)
+		}
+		backend, err = s.repo.GetBackend(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return s.view(ctx, backend)
+	}
+	if s.loki == nil {
+		return nil, fmt.Errorf("%w: built-in Loki query path is required before rollback", errs.ErrConflict)
+	}
+	edgeIDs, err := s.fleetRolloutEdgeIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validateProbeEdges(ctx, edgeIDs); err != nil {
+		return nil, err
+	}
+	existing := map[uint64]*model.BackendAssignment{}
+	if backend.Status == model.BackendStatusRollingBack {
+		rows, listErr := s.repo.ListAssignments(ctx, backend.ID)
+		if listErr != nil {
+			return nil, listErr
+		}
+		for _, row := range rows {
+			if row != nil {
+				existing[row.EdgeID] = row
+			}
+		}
+	}
+	assignments := make([]*model.BackendAssignment, 0, len(edgeIDs))
+	for _, edgeID := range edgeIDs {
+		if prior := existing[edgeID]; prior != nil && prior.DesiredGeneration == backend.Generation &&
+			prior.Status == model.AssignmentStatusVerified && prior.LastWriteSuccessAt != nil {
+			assignments = append(assignments, cloneAssignmentForRollout(prior))
+			continue
+		}
+		probeID, probeErr := newProbeID()
+		if probeErr != nil {
+			return nil, probeErr
+		}
+		assignments = append(assignments, &model.BackendAssignment{
+			BackendID: backend.ID, EdgeID: edgeID, DesiredGeneration: backend.Generation,
+			Status: model.AssignmentStatusPending, ProbeID: probeID,
+		})
+	}
+	backend.RolloutAutoActivate = true
+	if err := s.repo.BeginRollback(ctx, backend, assignments); err != nil {
+		return nil, err
+	}
+	s.invalidateCache()
+	if err := s.notify(ctx); err != nil {
+		return nil, fmt.Errorf("distribute rollback notification: %w", err)
+	}
+	backend, err = s.repo.GetBackend(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.view(ctx, backend)
+}
+
+func (s *Service) ActiveRuntime(ctx context.Context) (*RuntimeConfig, error) {
+	backend, err := s.repo.ActiveBackend(ctx)
+	if err != nil {
+		if errors.Is(err, errs.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return runtimeConfig(backend)
+}
+
+// PluginRuntimeOverlay implements edge.PluginRuntimeOverlayProvider without
+// importing the edge bounded context. Values are non-sensitive; the API key is
+// fetched separately by the authenticated Edge and materialized as a file.
+func (s *Service) PluginRuntimeOverlay(ctx context.Context, edgeID uint64, plugin string) (map[string]interface{}, error) {
+	if plugin != "logs" {
+		return nil, nil
+	}
+	backend, assignment, err := s.runtimeBackendForEdge(ctx, edgeID)
+	if err != nil {
+		return nil, err
+	}
+	if backend == nil {
+		return map[string]interface{}{
+			"backend":            "builtin_loki",
+			"backend_generation": uint64(0),
+		}, nil
+	}
+	if backend.Status == model.BackendStatusRollingBack && assignment != nil {
+		return rollbackRuntimeOverlay(backend, assignment)
+	}
+	runtime, err := runtimeConfig(backend)
+	if err != nil {
+		return nil, err
+	}
+	overlay := map[string]interface{}{
+		"backend":                                "external_elasticsearch",
+		"backend_id":                             runtime.BackendID,
+		"backend_generation":                     runtime.Generation,
+		"elasticsearch_endpoints":                append([]string(nil), runtime.WriteEndpoints...),
+		"elasticsearch_dataset":                  runtime.Dataset,
+		"elasticsearch_namespace":                runtime.Namespace,
+		"elasticsearch_ca_pem":                   runtime.CAPEM,
+		"elasticsearch_tls_insecure_skip_verify": runtime.TLSInsecure,
+		"elasticsearch_secret_slot":              SecretSlotESAPIKey,
+	}
+	if assignment != nil && assignment.ProbeID != "" {
+		overlay["log_probe_id"] = assignment.ProbeID
+	}
+	if assignment != nil {
+		// Canary/rollout traffic is a bounded shadow write. The currently
+		// authoritative backend keeps receiving every log until fleet cutover,
+		// while the candidate receives the same records for a real Edge-path
+		// probe. This avoids an observability blind spot without putting log
+		// bytes through Manager or requiring overlapping-backend pagination.
+		overlay["rollout_shadow"] = true
+		active, activeErr := s.repo.ActiveBackend(ctx)
+		if errors.Is(activeErr, errs.ErrNotFound) {
+			overlay["baseline_backend"] = "builtin_loki"
+		} else if activeErr != nil {
+			return nil, activeErr
+		} else {
+			baseline, runtimeErr := runtimeConfig(active)
+			if runtimeErr != nil {
+				return nil, runtimeErr
+			}
+			overlay["baseline_backend"] = "external_elasticsearch"
+			overlay["baseline_backend_id"] = baseline.BackendID
+			overlay["baseline_backend_generation"] = baseline.Generation
+			overlay["baseline_elasticsearch_endpoints"] = append([]string(nil), baseline.WriteEndpoints...)
+			overlay["baseline_elasticsearch_dataset"] = baseline.Dataset
+			overlay["baseline_elasticsearch_namespace"] = baseline.Namespace
+			overlay["baseline_elasticsearch_ca_pem"] = baseline.CAPEM
+			overlay["baseline_elasticsearch_tls_insecure_skip_verify"] = baseline.TLSInsecure
+			overlay["baseline_elasticsearch_secret_slot"] = SecretSlotESAPIKey
+		}
+	}
+	return overlay, nil
+}
+
+// PluginSecretForEdge is called only from the authenticated tunnel handler.
+// During rollout, only explicitly assigned Edges may obtain the draft
+// generation. Once active, every authenticated Edge may obtain that active
+// generation. The request can never select an arbitrary vault entry.
+func (s *Service) PluginSecretForEdge(ctx context.Context, edgeID uint64, plugin, slot string, generation uint64) (*PluginSecret, error) {
+	if edgeID == 0 || plugin != "logs" || slot != SecretSlotESAPIKey {
+		return nil, errs.ErrForbidden
+	}
+	backend, assignment, err := s.backendForEdgeGeneration(ctx, edgeID, generation)
+	if err != nil {
+		return nil, err
+	}
+	if generation == 0 || generation != backend.Generation {
+		return nil, fmt.Errorf("%w: stale log backend generation", errs.ErrConflict)
+	}
+	fields, err := s.secrets.ResolveFields(ctx, backend.WriteCredentialRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Elasticsearch write credential: %w", err)
+	}
+	apiKey := strings.TrimSpace(fields["api_key"])
+	if apiKey == "" {
+		return nil, fmt.Errorf("%w: Elasticsearch credential has no api_key", errs.ErrInvalid)
+	}
+	if assignment != nil {
+		assignment.DesiredGeneration = backend.Generation
+		// Pulling the same secret again is normal after an Edge restart. Do
+		// not erase a previously acknowledged generation or downgrade its
+		// rollout status back to pending.
+		if assignment.AppliedGeneration != backend.Generation && assignment.Status != model.AssignmentStatusFailed {
+			assignment.Status = model.AssignmentStatusPending
+		}
+		if err := s.repo.UpsertAssignment(ctx, assignment); err != nil {
+			return nil, err
+		}
+	}
+	sum := sha256.Sum256([]byte(apiKey))
+	return &PluginSecret{Generation: backend.Generation, Content: apiKey, SHA256: hex.EncodeToString(sum[:])}, nil
+}
+
+// MarkApplied closes the real-path gate: a successful local Collector start
+// is not enough. Manager searches the external backend for the unique probe
+// emitted by that Edge before marking it verified or promoting fleet-wide.
+func (s *Service) MarkApplied(ctx context.Context, edgeID, generation uint64, probeID, applyErr string) error {
+	backend, assignment, err := s.backendForEdgeGeneration(ctx, edgeID, generation)
+	if err != nil {
+		return err
+	}
+	isRollback := backend.Status == model.BackendStatusRollingBack
+	if backend.Status != model.BackendStatusDistributing && backend.Status != model.BackendStatusVerifying && !isRollback {
+		return fmt.Errorf("%w: log backend is not rolling out", errs.ErrConflict)
+	}
+	if assignment == nil || generation != backend.Generation || probeID == "" || probeID != assignment.ProbeID {
+		return fmt.Errorf("%w: stale log backend generation", errs.ErrConflict)
+	}
+	now := time.Now().UTC()
+	assignment.DesiredGeneration = generation
+	assignment.AppliedGeneration = generation
+	assignment.Status = model.AssignmentStatusApplied
+	assignment.CutoverAt = &now
+	assignment.LastProbeAt = &now
+	assignment.LastError = ""
+	if strings.TrimSpace(applyErr) != "" {
+		assignment.AppliedGeneration = 0
+		assignment.Status = model.AssignmentStatusFailed
+		assignment.LastError = truncate(strings.TrimSpace(applyErr), 1024)
+		if err := s.repo.UpsertAssignment(ctx, assignment); err != nil {
+			return err
+		}
+		nextStatus := model.BackendStatusDegraded
+		if isRollback {
+			nextStatus = model.BackendStatusRollingBack
+		}
+		if err := s.repo.SetRolloutBackendState(ctx, backend.ID, nextStatus, backend.DetectedVersion, assignment.LastError, now); err != nil {
+			return err
+		}
+		return s.notify(ctx)
+	}
+	if err := s.repo.UpsertAssignment(ctx, assignment); err != nil {
+		return err
+	}
+	nextStatus := model.BackendStatusVerifying
+	if isRollback {
+		nextStatus = model.BackendStatusRollingBack
+	}
+	if err := s.repo.SetRolloutBackendState(ctx, backend.ID, nextStatus, backend.DetectedVersion, "", now); err != nil {
+		return err
+	}
+	verify := s.verifyEdgeProbe
+	if isRollback {
+		verify = s.verifyLokiEdgeProbe
+	}
+	if err := verify(ctx, backend, assignment); err != nil {
+		assignment.Status = model.AssignmentStatusFailed
+		assignment.LastError = safeProbeError(err)
+		if saveErr := s.repo.UpsertAssignment(ctx, assignment); saveErr != nil {
+			return errors.Join(err, saveErr)
+		}
+		failureStatus := model.BackendStatusDegraded
+		if isRollback {
+			failureStatus = model.BackendStatusRollingBack
+		}
+		if stateErr := s.repo.SetRolloutBackendState(ctx, backend.ID, failureStatus, backend.DetectedVersion, assignment.LastError, time.Now().UTC()); stateErr != nil {
+			return errors.Join(err, stateErr)
+		}
+		if notifyErr := s.notify(ctx); notifyErr != nil {
+			return errors.Join(err, notifyErr)
+		}
+		return err
+	}
+	verifiedAt := time.Now().UTC()
+	assignment.Status = model.AssignmentStatusVerified
+	assignment.LastWriteSuccessAt = &verifiedAt
+	assignment.LastError = ""
+	if err := s.repo.UpsertAssignment(ctx, assignment); err != nil {
+		return err
+	}
+	if backend.RolloutAutoActivate && isRollback {
+		if err := s.completeVerifiedRollback(ctx, backend); err != nil && !errors.Is(err, errs.ErrConflict) {
+			return err
+		}
+	} else if backend.RolloutAutoActivate {
+		if err := s.promoteVerifiedRollout(ctx, backend); err != nil {
+			// Other selected Edges may still be pending; that is a normal
+			// partial convergence, not a failed RPC.
+			if !errors.Is(err, errs.ErrConflict) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) runtimeBackendForEdge(ctx context.Context, edgeID uint64) (*model.Backend, *model.BackendAssignment, error) {
+	if edgeID != 0 {
+		latest, err := s.repo.LatestBackend(ctx)
+		if err == nil && (latest.Status == model.BackendStatusDistributing || latest.Status == model.BackendStatusVerifying) {
+			assignment, assignmentErr := s.repo.GetAssignment(ctx, latest.ID, edgeID)
+			if assignmentErr == nil && assignment.DesiredGeneration == latest.Generation && assignment.Status != model.AssignmentStatusFailed {
+				return latest, assignment, nil
+			}
+			if assignmentErr != nil && !errors.Is(assignmentErr, errs.ErrNotFound) {
+				return nil, nil, assignmentErr
+			}
+		} else if err != nil && !errors.Is(err, errs.ErrNotFound) {
+			return nil, nil, err
+		}
+	}
+	active, err := s.repo.ActiveBackend(ctx)
+	if errors.Is(err, errs.ErrNotFound) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if edgeID != 0 && active.Status == model.BackendStatusRollingBack {
+		assignment, assignmentErr := s.repo.GetAssignment(ctx, active.ID, edgeID)
+		if assignmentErr == nil && assignment.DesiredGeneration == active.Generation && assignment.Status != model.AssignmentStatusFailed {
+			return active, assignment, nil
+		}
+		if assignmentErr != nil && !errors.Is(assignmentErr, errs.ErrNotFound) {
+			return nil, nil, assignmentErr
+		}
+	}
+	return active, nil, nil
+}
+
+func (s *Service) backendForEdgeGeneration(ctx context.Context, edgeID, generation uint64) (*model.Backend, *model.BackendAssignment, error) {
+	if edgeID == 0 || generation == 0 {
+		return nil, nil, errs.ErrForbidden
+	}
+	latest, err := s.repo.LatestBackend(ctx)
+	if err == nil && latest.Generation == generation &&
+		(latest.Status == model.BackendStatusDistributing || latest.Status == model.BackendStatusVerifying) {
+		assignment, assignmentErr := s.repo.GetAssignment(ctx, latest.ID, edgeID)
+		if assignmentErr != nil {
+			if errors.Is(assignmentErr, errs.ErrNotFound) {
+				return nil, nil, errs.ErrForbidden
+			}
+			return nil, nil, assignmentErr
+		}
+		if assignment.DesiredGeneration != generation || assignment.Status == model.AssignmentStatusFailed {
+			return nil, nil, errs.ErrForbidden
+		}
+		return latest, assignment, nil
+	}
+	if err != nil && !errors.Is(err, errs.ErrNotFound) {
+		return nil, nil, err
+	}
+	active, err := s.repo.ActiveBackend(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if active.Generation != generation {
+		return nil, nil, fmt.Errorf("%w: stale log backend generation", errs.ErrConflict)
+	}
+	if active.Status == model.BackendStatusRollingBack {
+		assignment, assignmentErr := s.repo.GetAssignment(ctx, active.ID, edgeID)
+		if assignmentErr != nil {
+			if errors.Is(assignmentErr, errs.ErrNotFound) {
+				return nil, nil, errs.ErrForbidden
+			}
+			return nil, nil, assignmentErr
+		}
+		if assignment.DesiredGeneration != generation || assignment.Status == model.AssignmentStatusFailed {
+			return nil, nil, errs.ErrForbidden
+		}
+		return active, assignment, nil
+	}
+	return active, nil, nil
+}
+
+func rollbackRuntimeOverlay(backend *model.Backend, assignment *model.BackendAssignment) (map[string]interface{}, error) {
+	baseline, err := runtimeConfig(backend)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"backend":                                         "builtin_loki",
+		"backend_id":                                      backend.ID,
+		"backend_generation":                              backend.Generation,
+		"log_probe_id":                                    assignment.ProbeID,
+		"rollout_shadow":                                  true,
+		"baseline_backend":                                "external_elasticsearch",
+		"baseline_backend_id":                             baseline.BackendID,
+		"baseline_backend_generation":                     baseline.Generation,
+		"baseline_elasticsearch_endpoints":                append([]string(nil), baseline.WriteEndpoints...),
+		"baseline_elasticsearch_dataset":                  baseline.Dataset,
+		"baseline_elasticsearch_namespace":                baseline.Namespace,
+		"baseline_elasticsearch_ca_pem":                   baseline.CAPEM,
+		"baseline_elasticsearch_tls_insecure_skip_verify": baseline.TLSInsecure,
+		"baseline_elasticsearch_secret_slot":              SecretSlotESAPIKey,
+	}, nil
+}
+
+func runtimeConfig(backend *model.Backend) (*RuntimeConfig, error) {
+	if backend == nil {
+		return nil, nil
+	}
+	endpoints, err := decodeEndpoints(backend.WriteEndpointsJSON)
+	if err != nil {
+		return nil, err
+	}
+	return &RuntimeConfig{
+		BackendID: backend.ID, Backend: string(backend.Type), Generation: backend.Generation,
+		WriteEndpoints: endpoints, Dataset: backend.Dataset, Namespace: backend.Namespace,
+		CAPEM: backend.CAPEM, TLSInsecure: backend.TLSInsecure,
+	}, nil
+}
+
+func (s *Service) verifyEdgeProbe(ctx context.Context, backend *model.Backend, assignment *model.BackendAssignment) error {
+	s.mu.RLock()
+	deviceResolver := s.devices
+	s.mu.RUnlock()
+	if deviceResolver == nil {
+		return errors.New("host device resolver is not configured")
+	}
+	deviceID, err := deviceResolver.LookupHostDevice(ctx, assignment.EdgeID)
+	if err != nil {
+		return fmt.Errorf("resolve host device for Edge %d: %w", assignment.EdgeID, err)
+	}
+	if deviceID == 0 {
+		return fmt.Errorf("resolve host device for Edge %d: empty device id", assignment.EdgeID)
+	}
+	queryKey, err := s.apiKey(ctx, backend.QueryCredentialRef)
+	if err != nil {
+		return err
+	}
+	client, err := s.newESClient(backend.QueryEndpoint, backend.IndexPattern, queryKey, backend)
+	if err != nil {
+		return err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	started := time.Now().UTC()
+	if assignment.LastProbeAt != nil {
+		started = assignment.LastProbeAt.Add(-time.Minute)
+	}
+	var lastErr error
+	for {
+		result, searchErr := client.Search(probeCtx, logquery.SearchRequest{
+			Start: started, End: time.Now().UTC().Add(10 * time.Second), Limit: 10,
+			Direction: logquery.SortBackward,
+			Scope:     logquery.Scope{DeviceIDs: []uint64{deviceID}},
+			Keywords:  logquery.Keywords{Include: []string{assignment.ProbeID}, Mode: logquery.MatchPhrase},
+		})
+		if searchErr == nil {
+			for _, record := range result.Records {
+				if strings.Contains(record.Message, assignment.ProbeID) {
+					return nil
+				}
+			}
+			lastErr = errors.New("probe log is not visible yet")
+		} else {
+			lastErr = searchErr
+		}
+		select {
+		case <-probeCtx.Done():
+			return fmt.Errorf("Elasticsearch Edge write probe %q not found: %w", assignment.ProbeID, lastErr)
+		case <-time.After(750 * time.Millisecond):
+		}
+	}
+}
+
+func (s *Service) verifyLokiEdgeProbe(ctx context.Context, _ *model.Backend, assignment *model.BackendAssignment) error {
+	s.mu.RLock()
+	deviceResolver := s.devices
+	loki := s.loki
+	s.mu.RUnlock()
+	if deviceResolver == nil {
+		return errors.New("host device resolver is not configured")
+	}
+	if loki == nil {
+		return errors.New("built-in Loki query path is not configured")
+	}
+	deviceID, err := deviceResolver.LookupHostDevice(ctx, assignment.EdgeID)
+	if err != nil {
+		return fmt.Errorf("resolve host device for Edge %d: %w", assignment.EdgeID, err)
+	}
+	if deviceID == 0 {
+		return fmt.Errorf("resolve host device for Edge %d: empty device id", assignment.EdgeID)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	started := time.Now().UTC()
+	if assignment.LastProbeAt != nil {
+		started = assignment.LastProbeAt.Add(-time.Minute)
+	}
+	var lastErr error
+	for {
+		result, searchErr := loki.Search(probeCtx, logquery.SearchRequest{
+			Start: started, End: time.Now().UTC().Add(10 * time.Second), Limit: 10,
+			Direction: logquery.SortBackward,
+			Scope:     logquery.Scope{DeviceIDs: []uint64{deviceID}},
+			Keywords:  logquery.Keywords{Include: []string{assignment.ProbeID}, Mode: logquery.MatchPhrase},
+		})
+		if searchErr == nil {
+			for _, record := range result.Records {
+				if strings.Contains(record.Message, assignment.ProbeID) {
+					return nil
+				}
+			}
+			lastErr = errors.New("probe log is not visible yet")
+		} else {
+			lastErr = searchErr
+		}
+		select {
+		case <-probeCtx.Done():
+			return fmt.Errorf("built-in Loki Edge write probe %q not found: %w", assignment.ProbeID, lastErr)
+		case <-time.After(750 * time.Millisecond):
+		}
+	}
+}
+
+func (s *Service) promoteVerifiedRollout(ctx context.Context, backend *model.Backend) error {
+	assignments, err := s.repo.ListAssignments(ctx, backend.ID)
+	if err != nil {
+		return err
+	}
+	if len(assignments) == 0 {
+		return fmt.Errorf("%w: no Edge write probes selected", errs.ErrConflict)
+	}
+	for _, assignment := range assignments {
+		if assignment.DesiredGeneration != backend.Generation || assignment.Status != model.AssignmentStatusVerified || assignment.LastWriteSuccessAt == nil {
+			return fmt.Errorf("%w: Edge write probes are not fully verified", errs.ErrConflict)
+		}
+	}
+	cutover := time.Now().UTC()
+	if err := s.repo.ActivateBackend(ctx, backend.ID, backend.DetectedVersion, cutover); err != nil {
+		return err
+	}
+	s.invalidateCache()
+	if err := s.notify(ctx); err != nil {
+		return fmt.Errorf("activate backend notification: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) completeVerifiedRollback(ctx context.Context, backend *model.Backend) error {
+	assignments, err := s.repo.ListAssignments(ctx, backend.ID)
+	if err != nil {
+		return err
+	}
+	if !assignmentsVerified(assignments, backend.Generation) {
+		return fmt.Errorf("%w: built-in Loki write probes are not fully verified", errs.ErrConflict)
+	}
+	endedAt := time.Now().UTC()
+	if err := s.repo.CompleteRollback(ctx, backend.ID, endedAt); err != nil {
+		return err
+	}
+	s.invalidateCache()
+	if err := s.notify(ctx); err != nil {
+		return fmt.Errorf("complete backend rollback notification: %w", err)
+	}
+	return nil
+}
+
+func normalizeEdgeIDs(input []uint64) ([]uint64, error) {
+	const maxRolloutEdges = 10_000
+	if len(input) == 0 || len(input) > maxRolloutEdges {
+		return nil, fmt.Errorf("%w: edge_ids must contain 1..%d entries", errs.ErrInvalid, maxRolloutEdges)
+	}
+	seen := make(map[uint64]struct{}, len(input))
+	out := make([]uint64, 0, len(input))
+	for _, edgeID := range input {
+		if edgeID == 0 {
+			return nil, fmt.Errorf("%w: edge_id must be greater than zero", errs.ErrInvalid)
+		}
+		if _, exists := seen[edgeID]; exists {
+			continue
+		}
+		seen[edgeID] = struct{}{}
+		out = append(out, edgeID)
+	}
+	return out, nil
+}
+
+func (s *Service) fleetRolloutEdgeIDs(ctx context.Context) ([]uint64, error) {
+	s.mu.RLock()
+	inventory := s.inventory
+	s.mu.RUnlock()
+	if inventory == nil {
+		return nil, errors.New("log backend rollout Edge inventory is not configured")
+	}
+	edges, err := inventory.ListRolloutEdges(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list Edges for logs rollout: %w", err)
+	}
+	edgeIDs := make([]uint64, 0, len(edges))
+	offline := make([]uint64, 0)
+	for _, edge := range edges {
+		if edge.EdgeID == 0 {
+			return nil, fmt.Errorf("%w: logs rollout inventory contains an empty Edge id", errs.ErrInvalid)
+		}
+		edgeIDs = append(edgeIDs, edge.EdgeID)
+		if !edge.Online {
+			offline = append(offline, edge.EdgeID)
+		}
+	}
+	if len(offline) > 0 {
+		return nil, fmt.Errorf("%w: all log-enabled Edges must be online before a fleet log cutover; offline edge_ids=%v", errs.ErrConflict, offline)
+	}
+	edgeIDs, err = normalizeEdgeIDs(edgeIDs)
+	if err != nil {
+		return nil, fmt.Errorf("fleet rollout requires at least one log-enabled Edge: %w", err)
+	}
+	return edgeIDs, nil
+}
+
+func (s *Service) validateProbeEdges(ctx context.Context, edgeIDs []uint64) error {
+	s.mu.RLock()
+	resolver := s.devices
+	s.mu.RUnlock()
+	if resolver == nil {
+		return errors.New("host device resolver is not configured")
+	}
+	for _, edgeID := range edgeIDs {
+		deviceID, err := resolver.LookupHostDevice(ctx, edgeID)
+		if err != nil {
+			return fmt.Errorf("resolve host device for Edge %d: %w", edgeID, err)
+		}
+		if deviceID == 0 {
+			return fmt.Errorf("resolve host device for Edge %d: empty device id", edgeID)
+		}
+	}
+	return nil
+}
+
+func cloneAssignmentForRollout(in *model.BackendAssignment) *model.BackendAssignment {
+	if in == nil {
+		return nil
+	}
+	return &model.BackendAssignment{
+		BackendID: in.BackendID, EdgeID: in.EdgeID,
+		DesiredGeneration: in.DesiredGeneration, AppliedGeneration: in.AppliedGeneration,
+		Status: in.Status, ProbeID: in.ProbeID, CutoverAt: in.CutoverAt,
+		LastProbeAt: in.LastProbeAt, LastWriteSuccessAt: in.LastWriteSuccessAt,
+		LastError: in.LastError,
+	}
+}
+
+func assignmentsVerified(assignments []*model.BackendAssignment, generation uint64) bool {
+	if len(assignments) == 0 || generation == 0 {
+		return false
+	}
+	for _, assignment := range assignments {
+		if assignment == nil || assignment.DesiredGeneration != generation ||
+			assignment.AppliedGeneration != generation || assignment.Status != model.AssignmentStatusVerified ||
+			assignment.LastWriteSuccessAt == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func newProbeID() (string, error) {
+	raw := make([]byte, 18)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate Edge log probe id: %w", err)
+	}
+	return "ongrid-log-probe-" + base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func (s *Service) probeBackend(ctx context.Context, backend *model.Backend) (string, error) {
+	queryKey, err := s.apiKey(ctx, backend.QueryCredentialRef)
+	if err != nil {
+		return "", err
+	}
+	queryClient, err := s.newESClient(backend.QueryEndpoint, backend.IndexPattern, queryKey, backend)
+	if err != nil {
+		return "", err
+	}
+	version, err := queryClient.Probe(ctx)
+	if err != nil {
+		return "", fmt.Errorf("Elasticsearch query probe: %w", err)
+	}
+	writeKey, err := s.apiKey(ctx, backend.WriteCredentialRef)
+	if err != nil {
+		return "", err
+	}
+	endpoints, err := decodeEndpoints(backend.WriteEndpointsJSON)
+	if err != nil {
+		return "", err
+	}
+	writeClient, err := s.newESClient(endpoints[0], backend.IndexPattern, writeKey, backend)
+	if err != nil {
+		return "", err
+	}
+	writeVersion, err := writeClient.Probe(ctx)
+	if err != nil {
+		return "", fmt.Errorf("Elasticsearch write endpoint probe: %w", err)
+	}
+	if writeVersion != version {
+		return "", errors.New("Elasticsearch query and write endpoints report different versions")
+	}
+	return version, nil
+}
+
+func (s *Service) apiKey(ctx context.Context, ref string) (string, error) {
+	if s.secrets == nil {
+		return "", errors.New("log backend secret resolver is disabled")
+	}
+	fields, err := s.secrets.ResolveFields(ctx, ref)
+	if err != nil {
+		return "", fmt.Errorf("resolve Elasticsearch credential: %w", err)
+	}
+	key := strings.TrimSpace(fields["api_key"])
+	if key == "" {
+		return "", errors.New("Elasticsearch credential has no api_key")
+	}
+	return key, nil
+}
+
+func (s *Service) requireAPIKey(ctx context.Context, ref string) error {
+	_, err := s.apiKey(ctx, ref)
+	return err
+}
+
+func (s *Service) newESClient(endpoint, pattern, apiKey string, backend *model.Backend) (*logquery.ElasticsearchClient, error) {
+	httpClient, err := backendHTTPClient(backend)
+	if err != nil {
+		return nil, err
+	}
+	return logquery.NewElasticsearchClient(logquery.ElasticsearchConfig{
+		Endpoint:          endpoint,
+		IndexPattern:      pattern,
+		APIKey:            apiKey,
+		AllowInsecureHTTP: backend.TLSInsecure,
+	}, httpClient, nil)
+}
+
+func (s *Service) view(ctx context.Context, backend *model.Backend) (*BackendView, error) {
+	endpoints, err := decodeEndpoints(backend.WriteEndpointsJSON)
+	if err != nil {
+		return nil, err
+	}
+	assignments, err := s.repo.ListAssignments(ctx, backend.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &BackendView{
+		ID: backend.ID, Name: backend.Name, Type: backend.Type, Status: backend.Status,
+		Generation: backend.Generation, WriteEndpoints: endpoints, QueryEndpoint: backend.QueryEndpoint,
+		Dataset: backend.Dataset, Namespace: backend.Namespace, IndexPattern: backend.IndexPattern,
+		WriteCredentialRef: backend.WriteCredentialRef, QueryCredentialRef: backend.QueryCredentialRef,
+		HasCustomCA: strings.TrimSpace(backend.CAPEM) != "", KibanaURL: backend.KibanaURL,
+		TLSInsecure: backend.TLSInsecure, RolloutAutoActivate: backend.RolloutAutoActivate,
+		DetectedVersion: backend.DetectedVersion,
+		CutoverAt:       backend.CutoverAt, EndedAt: backend.EndedAt,
+		LastTestAt: backend.LastTestAt, LastError: backend.LastError,
+		Assignments: assignments, CreatedAt: backend.CreatedAt, UpdatedAt: backend.UpdatedAt,
+	}, nil
+}
+
+func (s *Service) notify(ctx context.Context) error {
+	s.mu.RLock()
+	notifier := s.notifier
+	s.mu.RUnlock()
+	if notifier == nil {
+		return nil
+	}
+	return notifier.NotifyLogsBackendChanged(ctx)
+}
+
+func (s *Service) checkActivationGuard(ctx context.Context) error {
+	s.mu.RLock()
+	guard := s.activationGuard
+	s.mu.RUnlock()
+	if guard == nil {
+		return nil
+	}
+	if err := guard(ctx); err != nil {
+		return fmt.Errorf("%w: %v", errs.ErrConflict, err)
+	}
+	return nil
+}
+
+func (s *Service) invalidateCache() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cacheKey = ""
+	s.cachedES = nil
+}
+
+func normalizeSaveInput(input SaveInput) (SaveInput, error) {
+	input.Name = strings.TrimSpace(input.Name)
+	if input.Name == "" {
+		input.Name = DefaultBackendName
+	}
+	if len(input.Name) > 128 {
+		return SaveInput{}, fmt.Errorf("%w: backend name too long", errs.ErrInvalid)
+	}
+	if len(input.WriteEndpoints) == 0 || len(input.WriteEndpoints) > maxBackendEndpoints {
+		return SaveInput{}, fmt.Errorf("%w: write_endpoints must contain 1..%d entries", errs.ErrInvalid, maxBackendEndpoints)
+	}
+	seen := make(map[string]struct{}, len(input.WriteEndpoints))
+	endpoints := make([]string, 0, len(input.WriteEndpoints))
+	for _, raw := range input.WriteEndpoints {
+		endpoint, err := normalizeHTTPSURL(raw, input.TLSInsecure, false)
+		if err != nil {
+			return SaveInput{}, fmt.Errorf("%w: invalid write endpoint", errs.ErrInvalid)
+		}
+		if _, ok := seen[endpoint]; ok {
+			continue
+		}
+		seen[endpoint] = struct{}{}
+		endpoints = append(endpoints, endpoint)
+	}
+	input.WriteEndpoints = endpoints
+	if strings.TrimSpace(input.QueryEndpoint) == "" {
+		input.QueryEndpoint = endpoints[0]
+	}
+	queryEndpoint, err := normalizeHTTPSURL(input.QueryEndpoint, input.TLSInsecure, false)
+	if err != nil {
+		return SaveInput{}, fmt.Errorf("%w: invalid query endpoint", errs.ErrInvalid)
+	}
+	input.QueryEndpoint = queryEndpoint
+	input.Dataset = strings.ToLower(strings.TrimSpace(input.Dataset))
+	if input.Dataset == "" {
+		input.Dataset = "ongrid.generic"
+	}
+	if !datasetRE.MatchString(input.Dataset) {
+		return SaveInput{}, fmt.Errorf("%w: dataset must match ongrid.<safe-slug>", errs.ErrInvalid)
+	}
+	input.Namespace = strings.ToLower(strings.TrimSpace(input.Namespace))
+	if input.Namespace == "" {
+		input.Namespace = "default"
+	}
+	if !namespaceRE.MatchString(input.Namespace) {
+		return SaveInput{}, fmt.Errorf("%w: invalid data stream namespace", errs.ErrInvalid)
+	}
+	input.WriteCredentialRef = strings.TrimSpace(input.WriteCredentialRef)
+	input.QueryCredentialRef = strings.TrimSpace(input.QueryCredentialRef)
+	if input.WriteCredentialRef == "" || input.QueryCredentialRef == "" {
+		return SaveInput{}, fmt.Errorf("%w: separate write and query credential refs are required", errs.ErrInvalid)
+	}
+	if input.WriteCredentialRef == input.QueryCredentialRef {
+		return SaveInput{}, fmt.Errorf("%w: write and query credentials must be different", errs.ErrInvalid)
+	}
+	input.CAPEM = strings.TrimSpace(input.CAPEM)
+	if len(input.CAPEM) > maxCAPEMBytes {
+		return SaveInput{}, fmt.Errorf("%w: CA bundle too large", errs.ErrInvalid)
+	}
+	if input.CAPEM != "" {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM([]byte(input.CAPEM)) {
+			return SaveInput{}, fmt.Errorf("%w: invalid CA PEM", errs.ErrInvalid)
+		}
+	}
+	input.KibanaURL = strings.TrimSpace(input.KibanaURL)
+	if input.KibanaURL != "" {
+		input.KibanaURL, err = normalizeHTTPSURL(input.KibanaURL, false, true)
+		if err != nil {
+			return SaveInput{}, fmt.Errorf("%w: invalid Kibana URL", errs.ErrInvalid)
+		}
+	}
+	return input, nil
+}
+
+func normalizeHTTPSURL(raw string, allowHTTP, allowPath bool) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("invalid URL")
+	}
+	if parsed.Scheme != "https" && !(allowHTTP && parsed.Scheme == "http") {
+		return "", errors.New("HTTPS required")
+	}
+	if !allowPath && parsed.Path != "" && parsed.Path != "/" {
+		return "", errors.New("path not allowed")
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func backendHTTPClient(backend *model.Backend) (*http.Client, error) {
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if strings.TrimSpace(backend.CAPEM) != "" && !pool.AppendCertsFromPEM([]byte(backend.CAPEM)) {
+		return nil, errors.New("invalid Elasticsearch CA PEM")
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		RootCAs:            pool,
+		InsecureSkipVerify: backend.TLSInsecure, //nolint:gosec // explicit admin-only compatibility switch
+	}
+	return &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return errors.New("Elasticsearch redirects are disabled")
+		},
+	}, nil
+}
+
+func decodeEndpoints(raw string) ([]string, error) {
+	var endpoints []string
+	if err := json.Unmarshal([]byte(raw), &endpoints); err != nil {
+		return nil, fmt.Errorf("decode Elasticsearch endpoints: %w", err)
+	}
+	if len(endpoints) == 0 {
+		return nil, errors.New("Elasticsearch endpoints are empty")
+	}
+	return endpoints, nil
+}
+
+func indexPattern(namespace string) string { return "logs-ongrid.*.otel-" + namespace }
+
+func safeProbeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return truncate(err.Error(), 1024)
+}
+
+func truncate(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit]
+}

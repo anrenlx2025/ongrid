@@ -1,5 +1,193 @@
 import { request } from './client';
 
+type APIEnvelope<T> = {
+  code: number;
+  message: string;
+  data: T;
+};
+
+export type LogMatchMode = 'any' | 'all' | 'phrase';
+export type LogSortDirection = 'forward' | 'backward';
+
+export type LogScope = {
+  device_ids?: number[];
+  cluster_ids?: string[];
+  namespaces?: string[];
+  workloads?: string[];
+  pods?: string[];
+  containers?: string[];
+  nodes?: string[];
+  service_names?: string[];
+  source_ids?: string[];
+  severities?: string[];
+  files?: string[];
+  units?: string[];
+};
+
+export type LogFieldFilter = {
+  field: string;
+  operator: 'eq' | 'neq' | 'in' | 'exists';
+  values?: string[];
+};
+
+export type LogSearchRequest = {
+  start: string;
+  end: string;
+  scope?: LogScope;
+  keywords?: {
+    include?: string[];
+    exclude?: string[];
+    mode?: LogMatchMode;
+  };
+  filters?: LogFieldFilter[];
+  limit?: number;
+  cursor?: string;
+  direction?: LogSortDirection;
+};
+
+export type LogRecord = {
+  id: string;
+  timestamp: string;
+  observed_timestamp?: string;
+  message: string;
+  severity_text?: string;
+  severity_number?: number;
+  backend: string;
+  attributes?: Record<string, string>;
+  resource_attributes?: Record<string, string>;
+  trace_id?: string;
+  span_id?: string;
+};
+
+export type LogSearchResult = {
+  records: LogRecord[];
+  next_cursor?: string;
+  has_more: boolean;
+  took_ms: number;
+  backends: string[];
+};
+
+export type LogField = {
+  name: string;
+  type: string;
+  searchable: boolean;
+  aggregatable: boolean;
+};
+
+export type LogHistogramBucket = {
+  start: string;
+  count: number;
+};
+
+export function searchLogs(input: LogSearchRequest, signal?: AbortSignal) {
+  return request<APIEnvelope<LogSearchResult>>('POST', '/logs/search', input, { signal }).then((r) => r.data);
+}
+
+export function listLogFields(params?: { start?: string; end?: string }) {
+  const qs = new URLSearchParams();
+  if (params?.start) qs.set('start', params.start);
+  if (params?.end) qs.set('end', params.end);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<APIEnvelope<LogField[]>>('GET', `/logs/fields${suffix}`).then((r) => r.data);
+}
+
+export function listLogFieldValues(input: {
+  field: string;
+  start: string;
+  end: string;
+  scope?: LogScope;
+  limit?: number;
+}) {
+  return request<APIEnvelope<string[]>>('POST', '/logs/field-values', input).then((r) => r.data);
+}
+
+export function getLogHistogram(search: LogSearchRequest, interval: string, signal?: AbortSignal) {
+  return request<APIEnvelope<LogHistogramBucket[]>>('POST', '/logs/histogram', { search, interval }, { signal }).then((r) => r.data);
+}
+
+export function getLogContext(input: {
+  timestamp: string;
+  scope?: LogScope;
+  before?: number;
+  after?: number;
+}) {
+  return request<APIEnvelope<LogRecord[]>>('POST', '/logs/context', input).then((r) => r.data);
+}
+
+export type LogBackendAssignment = {
+  id: number;
+  backend_id: number;
+  edge_id: number;
+  desired_generation: number;
+  applied_generation: number;
+  status: 'pending' | 'applied' | 'verifying' | 'verified' | 'failed';
+  cutover_at?: string;
+  last_probe_at?: string;
+  last_write_success_at?: string;
+  last_error?: string;
+};
+
+export type LogBackend = {
+  id: number;
+  name: string;
+  type: 'elasticsearch';
+  status: 'draft' | 'distributing' | 'verifying' | 'active' | 'rolling_back' | 'degraded' | 'rolled_back';
+  generation: number;
+  write_endpoints: string[];
+  query_endpoint: string;
+  dataset: string;
+  namespace: string;
+  index_pattern: string;
+  write_credential_ref: string;
+  query_credential_ref: string;
+  has_custom_ca: boolean;
+  kibana_url?: string;
+  tls_insecure: boolean;
+  rollout_auto_activate: boolean;
+  detected_version?: string;
+  cutover_at?: string;
+  ended_at?: string;
+  last_test_at?: string;
+  last_error?: string;
+  assignments?: LogBackendAssignment[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type SaveLogBackendInput = {
+  name?: string;
+  write_endpoints: string[];
+  query_endpoint: string;
+  dataset: string;
+  namespace: string;
+  write_credential_ref: string;
+  query_credential_ref: string;
+  ca_pem?: string;
+  preserve_ca?: boolean;
+  kibana_url?: string;
+  tls_insecure: boolean;
+};
+
+export function getLogBackend() {
+  return request<APIEnvelope<LogBackend>>('GET', '/logs/backend').then((r) => r.data);
+}
+
+export function saveLogBackend(input: SaveLogBackendInput) {
+  return request<APIEnvelope<LogBackend>>('PUT', '/logs/backend', input).then((r) => r.data);
+}
+
+export function testLogBackend(id: number) {
+  return request<APIEnvelope<LogBackend>>('POST', `/logs/backend/${id}/test`).then((r) => r.data);
+}
+
+export function activateLogBackend(id: number, input: { edge_ids: number[]; canary: boolean }) {
+  return request<APIEnvelope<LogBackend>>('POST', `/logs/backend/${id}/activate`, input).then((r) => r.data);
+}
+
+export function rollbackLogBackend(id: number) {
+  return request<APIEnvelope<LogBackend>>('POST', `/logs/backend/${id}/rollback`).then((r) => r.data);
+}
+
 // Loki streams response: each stream has `stream` (label key/value map)
 // and `values` ([[<unix_ns_string>, <line_string>], ...]).
 export type LokiStream = {
