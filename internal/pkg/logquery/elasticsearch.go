@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -307,6 +308,58 @@ func (c *ElasticsearchClient) Probe(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("logquery: Elasticsearch 8.16+ required, got %s", info.Version.Number)
 	}
 	return info.Version.Number, nil
+}
+
+// RequirePrivileges verifies the API key against the fixed product index
+// pattern owned by this client. Elasticsearch permits an API key to inspect
+// its own effective privileges, so this check does not require granting the
+// Edge write credential any cluster-wide monitoring permission.
+func (c *ElasticsearchClient) RequirePrivileges(ctx context.Context, clusterPrivileges, indexPrivileges []string) error {
+	if len(clusterPrivileges) == 0 && len(indexPrivileges) == 0 {
+		return errors.New("logquery: at least one Elasticsearch privilege is required")
+	}
+	type indexPrivilegesRequest struct {
+		Names      []string `json:"names"`
+		Privileges []string `json:"privileges"`
+	}
+	request := struct {
+		Cluster []string                 `json:"cluster,omitempty"`
+		Index   []indexPrivilegesRequest `json:"index,omitempty"`
+	}{Cluster: clusterPrivileges}
+	if len(indexPrivileges) != 0 {
+		request.Index = []indexPrivilegesRequest{{
+			Names:      []string{c.indexPattern},
+			Privileges: indexPrivileges,
+		}}
+	}
+	var response struct {
+		HasAllRequested bool                       `json:"has_all_requested"`
+		Cluster         map[string]bool            `json:"cluster"`
+		Index           map[string]map[string]bool `json:"index"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/_security/user/_has_privileges", nil, request, &response); err != nil {
+		return err
+	}
+	if response.HasAllRequested {
+		return nil
+	}
+	missing := make([]string, 0, len(clusterPrivileges)+len(indexPrivileges))
+	for _, privilege := range clusterPrivileges {
+		if !response.Cluster[privilege] {
+			missing = append(missing, "cluster:"+privilege)
+		}
+	}
+	grantedIndex := response.Index[c.indexPattern]
+	for _, privilege := range indexPrivileges {
+		if !grantedIndex[privilege] {
+			missing = append(missing, "index:"+privilege)
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) == 0 {
+		return errors.New("logquery: Elasticsearch API key lacks required privileges")
+	}
+	return fmt.Errorf("logquery: Elasticsearch API key lacks required privileges: %s", strings.Join(missing, ", "))
 }
 
 func (c *ElasticsearchClient) openPIT(ctx context.Context) (string, error) {

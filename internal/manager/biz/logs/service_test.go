@@ -151,6 +151,8 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/":
 			_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges":
+			_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/_pit"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "probe-pit"})
 		case r.Method == http.MethodPost && r.URL.Path == "/_search":
@@ -435,6 +437,10 @@ func TestServiceReplacementRolloutShadowsPreviousElasticsearch(t *testing.T) {
 	repo := logsstore.NewRepo(db)
 	es := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
+			return
+		}
 		if r.Method == http.MethodGet && r.URL.Path == "/" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
 			return
@@ -493,6 +499,69 @@ func TestServiceReplacementRolloutShadowsPreviousElasticsearch(t *testing.T) {
 	}
 	if _, err := svc.PluginSecretForEdge(context.Background(), 42, "logs", bizlogs.SecretSlotESAPIKey, 1); err != nil {
 		t.Fatalf("authoritative baseline secret: %v", err)
+	}
+}
+
+func TestServiceTestChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testing.T) {
+	var requestMu sync.Mutex
+	newEndpoint := func(requests *[]string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestMu.Lock()
+			*requests = append(*requests, r.Header.Get("Authorization")+" "+r.Method+" "+r.URL.Path)
+			requestMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges":
+				_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
+			case r.Method == http.MethodGet && r.URL.Path == "/":
+				_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+	}
+	var firstRequests, secondRequests []string
+	firstEndpoint := newEndpoint(&firstRequests)
+	defer firstEndpoint.Close()
+	secondEndpoint := newEndpoint(&secondRequests)
+	defer secondEndpoint.Close()
+
+	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), mapSecrets{
+		"write": {"api_key": "write-key"},
+		"query": {"api_key": "query-key"},
+	}, nil)
+	backend, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+		WriteEndpoints: []string{firstEndpoint.URL, secondEndpoint.URL}, QueryEndpoint: firstEndpoint.URL,
+		Dataset: "ongrid.host", Namespace: "prod",
+		WriteCredentialRef: "write", QueryCredentialRef: "query", TLSInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	tested, err := svc.Test(context.Background(), backend.ID)
+	if err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if tested.Status != logsmodel.BackendStatusDraft || tested.DetectedVersion != "8.16.3" {
+		t.Fatalf("tested backend = %+v", tested)
+	}
+
+	requestMu.Lock()
+	defer requestMu.Unlock()
+	wantQueryProbe := false
+	wantWritePrivileges := false
+	for _, request := range secondRequests {
+		switch request {
+		case "ApiKey query-key GET /":
+			wantQueryProbe = true
+		case "ApiKey write-key POST /_security/user/_has_privileges":
+			wantWritePrivileges = true
+		case "ApiKey write-key GET /":
+			t.Fatalf("runtime write key was used for cluster version probe: %#v", secondRequests)
+		}
+	}
+	if !wantQueryProbe || !wantWritePrivileges {
+		t.Fatalf("second write endpoint was not fully checked: %#v", secondRequests)
 	}
 }
 

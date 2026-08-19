@@ -37,9 +37,9 @@
 ### 3. Elasticsearch 文档与权限
 
 - 仅支持 ES 8.16+、OTel mapping 和动态 data stream。
-- runtime write Key 仅能 create_doc/auto_configure 产品 data stream。
-- query Key 仅能 read/view_index_metadata 产品 data stream。
-- 激活前检查版本、template、read/query 权限，并通过 Edge 写 probe。
+- runtime write Key 仅能 create_doc/auto_configure 产品 data stream，不授予 cluster monitor；Manager 通过 `_has_privileges` 校验其有效权限。
+- query Key 授予 cluster monitor（用于所有 query/write endpoint 的 8.16+ 版本探测）以及产品 data stream 的 read/view_index_metadata；该 Key 只保留在 Manager。
+- 激活前逐个检查 endpoint 版本、write/read 权限，并通过 Edge 写 probe。
 
 ### 4. 控制面
 

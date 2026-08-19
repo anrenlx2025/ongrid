@@ -54,7 +54,7 @@ internal/edgeagent/plugins/logs/ OTel renderer、密钥、健康状态
 ## 配置和密钥时序
 
 1. 管理员保存 DRAFT 后端；非敏感配置写 `log_backends`，API Key 写现有 secret vault。
-2. Manager 使用只读 Key 校验版本、data stream、查询权限。
+2. Manager 使用仅保存在控制面的 query Key（cluster monitor + 产品 data stream 的 read/view_index_metadata）逐个校验 query/write endpoint 版本和查询权限；再通过 `_has_privileges` 校验 Edge write Key 仅具有产品 data stream 的 auto_configure/create_doc。
 3. 管理员选择 canary Edge；Manager 下发候选 generation 和固定 secret slot，Edge 通过认证 tunnel 按 generation 拉取写 Key并校验 SHA-256 后原子落盘。
 4. Edge 渲染临时 OTel 配置，执行配置校验，成功后原子替换并重启。
 5. 灰度配置创建两个 Edge 本地 pipeline：当前权威后端继续接收全量日志，候选 ES 接收影子副本；两条链路都不经过 Manager Go。

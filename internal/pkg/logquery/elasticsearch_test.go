@@ -98,6 +98,43 @@ func TestElasticsearchClient_ProbeRequiresSupportedVersion(t *testing.T) {
 	}
 }
 
+func TestElasticsearchClient_RequirePrivilegesUsesFixedIndexPattern(t *testing.T) {
+	const pattern = "logs-ongrid.*.otel-prod"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/_security/user/_has_privileges" {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		for _, want := range []string{`"cluster":["monitor"]`, `"names":["` + pattern + `"]`, `"privileges":["read","view_index_metadata"]`} {
+			if !strings.Contains(string(body), want) {
+				t.Fatalf("privilege body = %s, missing %s", body, want)
+			}
+		}
+		writeTestJSON(t, w, map[string]any{
+			"has_all_requested": false,
+			"cluster":           map[string]bool{"monitor": false},
+			"index": map[string]any{
+				pattern: map[string]bool{"read": true, "view_index_metadata": false},
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewElasticsearchClient(ElasticsearchConfig{
+		Endpoint: server.URL, IndexPattern: pattern, APIKey: "test-key", AllowInsecureHTTP: true,
+	}, server.Client(), nil)
+	if err != nil {
+		t.Fatalf("NewElasticsearchClient() error = %v", err)
+	}
+	err = client.RequirePrivileges(t.Context(), []string{"monitor"}, []string{"read", "view_index_metadata"})
+	if err == nil || !strings.Contains(err.Error(), "cluster:monitor") || !strings.Contains(err.Error(), "index:view_index_metadata") {
+		t.Fatalf("RequirePrivileges() error = %v", err)
+	}
+}
+
 func TestElasticsearchClient_CountUsesFixedIndexAndStructuredQuery(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/_count") {

@@ -1067,6 +1067,9 @@ func (s *Service) probeBackend(ctx context.Context, backend *model.Backend) (str
 	if err != nil {
 		return "", err
 	}
+	if err := queryClient.RequirePrivileges(ctx, []string{"monitor"}, []string{"read", "view_index_metadata"}); err != nil {
+		return "", fmt.Errorf("Elasticsearch query privileges: %w", err)
+	}
 	version, err := queryClient.Probe(ctx)
 	if err != nil {
 		return "", fmt.Errorf("Elasticsearch query probe: %w", err)
@@ -1079,16 +1082,29 @@ func (s *Service) probeBackend(ctx context.Context, backend *model.Backend) (str
 	if err != nil {
 		return "", err
 	}
-	writeClient, err := s.newESClient(endpoints[0], backend.IndexPattern, writeKey, backend)
-	if err != nil {
-		return "", err
-	}
-	writeVersion, err := writeClient.Probe(ctx)
-	if err != nil {
-		return "", fmt.Errorf("Elasticsearch write endpoint probe: %w", err)
-	}
-	if writeVersion != version {
-		return "", errors.New("Elasticsearch query and write endpoints report different versions")
+	for i, endpoint := range endpoints {
+		writeClient, clientErr := s.newESClient(endpoint, backend.IndexPattern, writeKey, backend)
+		if clientErr != nil {
+			return "", clientErr
+		}
+		if privilegeErr := writeClient.RequirePrivileges(ctx, nil, []string{"auto_configure", "create_doc"}); privilegeErr != nil {
+			return "", fmt.Errorf("Elasticsearch write endpoint %d privileges: %w", i+1, privilegeErr)
+		}
+
+		// Use the Manager-only query credential for the version check. The
+		// runtime write credential sent to Edge deliberately has no cluster
+		// monitor permission.
+		writeEndpointProbe, clientErr := s.newESClient(endpoint, backend.IndexPattern, queryKey, backend)
+		if clientErr != nil {
+			return "", clientErr
+		}
+		writeVersion, probeErr := writeEndpointProbe.Probe(ctx)
+		if probeErr != nil {
+			return "", fmt.Errorf("Elasticsearch write endpoint %d probe: %w", i+1, probeErr)
+		}
+		if writeVersion != version {
+			return "", fmt.Errorf("Elasticsearch write endpoint %d reports version %s, query endpoint reports %s", i+1, writeVersion, version)
+		}
 	}
 	return version, nil
 }

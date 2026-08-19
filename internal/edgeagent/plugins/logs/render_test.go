@@ -114,6 +114,24 @@ func TestRenderedConfigsAcceptedByCollector(t *testing.T) {
 	}
 }
 
+func TestDeployNginxRoutesLokiOTLPToNativeEndpoint(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", "..", ".."))
+	for _, relativePath := range []string{"deploy/nginx/nginx.conf", "deploy/install/nginx.conf"} {
+		body, err := os.ReadFile(filepath.Join(repoRoot, relativePath))
+		if err != nil {
+			t.Fatalf("read %s: %v", relativePath, err)
+		}
+		config := string(body)
+		if !strings.Contains(config, "location = /loki/otlp/v1/logs") ||
+			!strings.Contains(config, "proxy_pass http://loki_backend/otlp/v1/logs;") {
+			t.Fatalf("%s does not route authenticated OTLP logs to Loki's native endpoint", relativePath)
+		}
+		if strings.Contains(config, "proxy_pass http://loki_backend/loki/otlp/v1/logs;") {
+			t.Fatalf("%s still contains the unsupported Loki OTLP path", relativePath)
+		}
+	}
+}
+
 func TestRenderBuiltInLokiPipeline(t *testing.T) {
 	cfg := plugins.PluginConfig{
 		Enabled:  true,
