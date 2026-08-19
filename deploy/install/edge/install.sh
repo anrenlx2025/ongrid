@@ -464,8 +464,8 @@ printf '\n'
 
 # --- self-check --------------------------------------------------------------
 #
-# Turn the three silent failure modes (missing plugin binary, unreadable
-# journal, unreachable data plane) into loud, actionable output. All checks
+# Turn the two silent failure modes (missing plugin binary, unreadable
+# journal) into loud, actionable output. All checks
 # are guarded inside `if` so they never trip the ERR trap.
 echo
 echo "${C_BOLD}${C_CYAN}--- self-check ---${C_RESET}"
@@ -510,20 +510,6 @@ else
     log_error "${SERVICE_USER} cannot read the journal — journald log shipping will be empty"
     log_error "  fix: usermod -aG systemd-journal ${SERVICE_USER}; ensure persistent journal (/var/log/journal)"
     SELFCHECK_FAIL=1
-fi
-DP_HOST="$SERVER_HTTP_ADDR"
-DP_PORT="443"
-if [[ "$SERVER_HTTP_ADDR" =~ ^\[([^]]+)\](:([0-9]+))?$ ]]; then
-    DP_HOST="${BASH_REMATCH[1]}"
-    [[ -n "${BASH_REMATCH[3]:-}" ]] && DP_PORT="${BASH_REMATCH[3]}"
-elif [[ "$SERVER_HTTP_ADDR" =~ ^([^:]+):([0-9]+)$ ]]; then
-    DP_HOST="${BASH_REMATCH[1]}"
-    DP_PORT="${BASH_REMATCH[2]}"
-fi
-if [[ -n "$DP_HOST" ]] && timeout 5 bash -c "exec 3<>/dev/tcp/${DP_HOST}/${DP_PORT}" 2>/dev/null; then
-    log_ok "data-plane host ${DP_HOST}:${DP_PORT} reachable (TCP)"
-else
-    log_warn "data-plane host ${DP_HOST}:${DP_PORT} not reachable from here — logs/traces push may fail"
 fi
 if [[ $SELFCHECK_FAIL -eq 0 ]]; then
     log_ok "self-check passed"

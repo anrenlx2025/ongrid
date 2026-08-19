@@ -305,8 +305,8 @@ journalctl -u ongrid-edge -n 20 --no-pager || true
 
 # ---------- post-install self-check ----------
 # The #1 silent failure is "agent runs but ships nothing": a plugin binary
-# wasn't bundled, the service user can't read the journal, or the data
-# plane host is unreachable. Surface all three loudly here instead of
+# wasn't bundled or the service user can't read the journal. Surface both
+# loudly here instead of
 # letting the operator discover empty Loki / Prometheus days later. All
 # checks are guarded (inside `if`) so they never trip the ERR trap.
 echo ""
@@ -356,20 +356,6 @@ else
     log_error "$SERVICE_USER cannot read the journal — journald log shipping will be empty"
     log_error "  fix: usermod -aG systemd-journal $SERVICE_USER ; ensure persistent journal (/var/log/journal)"
     SELFCHECK_FAIL=1
-fi
-
-# 3) data-plane host reachability. The exact URL comes from the manager's
-# ONGRID_PUBLIC_URL at runtime, but the host is almost always the tunnel
-# host — probe TCP 443 there as a smoke test. WARN (not fail) since the
-# real port/host may differ.
-DP_HOST="${ONGRID_CLOUD_ADDR%%:*}"
-if [[ -n "$DP_HOST" ]]; then
-    if timeout 5 bash -c "exec 3<>/dev/tcp/${DP_HOST}/443" 2>/dev/null; then
-        log_info "data-plane host ${DP_HOST}:443 reachable (TCP)"
-    else
-        log_warn "data-plane host ${DP_HOST}:443 not reachable from here — logs/traces push may fail"
-        log_warn "  ensure the manager's ONGRID_PUBLIC_URL points to an address THIS edge can reach"
-    fi
 fi
 
 if [[ $SELFCHECK_FAIL -eq 0 ]]; then
