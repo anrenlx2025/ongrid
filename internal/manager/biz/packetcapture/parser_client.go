@@ -37,8 +37,6 @@ type ParserClientConfig struct {
 	MaxPackets      uint64
 	MaxBytes        uint64
 	IncludeHex      bool
-	ClientCertFile  string
-	ClientKeyFile   string
 	CAFile          string
 }
 
@@ -111,18 +109,6 @@ func NewParserClient(cfg ParserClientConfig) (*ParserClient, error) {
 
 func newParserHTTPClient(cfg ParserClientConfig, timeout time.Duration) (*http.Client, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
-	certFile := strings.TrimSpace(cfg.ClientCertFile)
-	keyFile := strings.TrimSpace(cfg.ClientKeyFile)
-	if certFile != "" || keyFile != "" {
-		if certFile == "" || keyFile == "" {
-			return nil, fmt.Errorf("%w: packet parser client cert and key must be configured together", errs.ErrInvalid)
-		}
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			return nil, fmt.Errorf("packet parser: load client certificate: %w", err)
-		}
-		tlsConfig.Certificates = []tls.Certificate{cert}
-	}
 	if caFile := strings.TrimSpace(cfg.CAFile); caFile != "" {
 		caPEM, err := os.ReadFile(caFile)
 		if err != nil {

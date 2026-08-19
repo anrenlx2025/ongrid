@@ -108,6 +108,7 @@ for arch in amd64 arm64; do
     "$package_root/upgrade.sh" \
     "$package_root/public-url.sh" \
     "$package_root/data-permissions.sh" \
+    "$package_root/pcap-parser-auth.sh" \
     "$package_root/docker-compose.yml" \
     "$package_root/prometheus.yml" \
     "$package_root/edge/fetch-edge-assets.sh" \
@@ -134,6 +135,25 @@ for arch in amd64 arm64; do
     "$extract_dir/$package_root/install.sh"
   grep -Fq -- '--no-deps --force-recreate ongrid nginx' \
     "$extract_dir/$package_root/install.sh"
+  grep -Fq 'pcap-parser:' "$extract_dir/$package_root/docker-compose.yml"
+  grep -Fq 'ONGRID_PACKET_PARSER_URL: http://pcap-parser:8080' \
+    "$extract_dir/$package_root/docker-compose.yml"
+  grep -Fq 'PCAP_PARSER_ARTIFACT_HOSTS: nginx' \
+    "$extract_dir/$package_root/docker-compose.yml"
+  grep -Fq 'PCAP_PARSER_ALLOW_HTTP_ARTIFACTS: "true"' \
+    "$extract_dir/$package_root/docker-compose.yml"
+  grep -Fq 'image: ${ONGRID_PCAP_PARSER_IMAGE:-docker.cnb.cool/ongridio/pcap-parser:v0.12.0@sha256:5b117be302e61cfa1a964ac8649580185cb41868369471001c10d372ac4e9b5a}' \
+    "$extract_dir/$package_root/docker-compose.yml"
+  grep -Fq 'listen 8081;' "$extract_dir/$package_root/nginx.conf"
+  parser_service=$(awk '
+    /^  pcap-parser:$/ { active=1; next }
+    active && /^  [[:alnum:]_-]+:$/ { exit }
+    active { print }
+  ' "$extract_dir/$package_root/docker-compose.yml")
+  if grep -Eq '^[[:space:]]*(ports|build):' <<<"$parser_service"; then
+    echo "pcap-parser must use the published image on the private Compose network" >&2
+    exit 1
+  fi
 
   if find "$extract_dir/$package_root/edge" -maxdepth 1 -type f \
       -name '*-linux-*' -print -quit | grep -q .; then
@@ -141,6 +161,14 @@ for arch in amd64 arm64; do
     exit 1
   fi
 done
+
+upgrade_script="$repo_root/deploy/install/upgrade.sh"
+parser_env_line=$(grep -n 'ensure_pcap_parser_upgrade_env' "$upgrade_script" | tail -n 1 | cut -d: -f1)
+preflight_line=$(grep -n 'preflight_runtime_images$' "$upgrade_script" | tail -n 1 | cut -d: -f1)
+if [[ -z "$parser_env_line" || -z "$preflight_line" || "$parser_env_line" -ge "$preflight_line" ]]; then
+  echo "upgrade.sh must backfill pcap-parser inputs before the new Compose preflight" >&2
+  exit 1
+fi
 
 # Opting into an offline package is a completeness promise. Missing binaries
 # must fail the package build instead of producing an archive that cannot be

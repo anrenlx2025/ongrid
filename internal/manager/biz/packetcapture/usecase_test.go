@@ -81,31 +81,15 @@ func TestParserClientDownloadTokenAuthorizesExactCapture(t *testing.T) {
 	}
 }
 
-func TestParserClientRequiresCompleteMTLSConfig(t *testing.T) {
-	keyPath := writeTestEd25519PrivateKey(t)
-	_, err := NewParserClient(ParserClientConfig{
-		URL:             "https://parser:8080",
-		ArtifactBaseURL: "https://manager.internal",
-		TokenSecret:     "test-secret",
-		PrivateKeyFile:  keyPath,
-		ClientCertFile:  "/tmp/client.crt",
-	})
-	if !errors.Is(err, errs.ErrInvalid) {
-		t.Fatalf("NewParserClient partial mTLS = %v, want invalid", err)
-	}
-}
-
-func TestParserClientAcceptsMTLSFiles(t *testing.T) {
+func TestParserClientAcceptsServerCA(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeTestEd25519PrivateKey(t)
-	certFile, certKeyFile, caFile := writeTestTLSFiles(t, dir)
+	_, _, caFile := writeTestTLSFiles(t, dir)
 	client, err := NewParserClient(ParserClientConfig{
 		URL:             "https://parser:8080",
 		ArtifactBaseURL: "https://manager.internal",
 		TokenSecret:     "test-secret",
 		PrivateKeyFile:  keyPath,
-		ClientCertFile:  certFile,
-		ClientKeyFile:   certKeyFile,
 		CAFile:          caFile,
 	})
 	if err != nil {

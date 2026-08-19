@@ -46,6 +46,14 @@ fi
 # shellcheck source=data-permissions.sh
 source "$DATA_PERMISSIONS_LIB"
 
+PCAP_PARSER_AUTH_LIB="$SCRIPT_DIR/pcap-parser-auth.sh"
+if [[ ! -r "$PCAP_PARSER_AUTH_LIB" ]]; then
+    log_error "upgrade package is missing pcap-parser-auth.sh"
+    exit 1
+fi
+# shellcheck source=pcap-parser-auth.sh
+source "$PCAP_PARSER_AUTH_LIB"
+
 generate_self_signed_tls_cert() {
     local cert_dir="$1"
     local cert_file="$cert_dir/tls.crt"
@@ -119,6 +127,30 @@ set_env_value() {
         rm -f "${ENV_FILE}.bak"
     else
         printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+    fi
+}
+
+ensure_pcap_parser_upgrade_env() {
+    local parser_image token
+
+    parser_image=$(grep -E '^ONGRID_PCAP_PARSER_IMAGE=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)
+    if [[ -z "$parser_image" ]]; then
+        set_env_value ONGRID_PCAP_PARSER_IMAGE 'docker.cnb.cool/ongridio/pcap-parser:v0.12.0@sha256:5b117be302e61cfa1a964ac8649580185cb41868369471001c10d372ac4e9b5a'
+        log_info "backfilled ONGRID_PCAP_PARSER_IMAGE"
+    fi
+
+    token=$(grep -E '^ONGRID_PACKET_PARSER_TOKEN_SECRET=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)
+    if [[ -z "$token" ]]; then
+        token=$(openssl rand -base64 48 | tr -d '=+/\n' | cut -c1-64) || {
+            log_error "could not generate ONGRID_PACKET_PARSER_TOKEN_SECRET"
+            return 1
+        }
+        [[ -n "$token" ]] || {
+            log_error "generated an empty ONGRID_PACKET_PARSER_TOKEN_SECRET"
+            return 1
+        }
+        set_env_value ONGRID_PACKET_PARSER_TOKEN_SECRET "$token"
+        log_info "backfilled ONGRID_PACKET_PARSER_TOKEN_SECRET"
     fi
 }
 
@@ -372,6 +404,11 @@ if [[ -n "$CONFIGURED_PUBLIC_URL" ]] && ! ongrid_is_valid_public_url "$CONFIGURE
     exit 1
 fi
 
+# Older installations predate the private pcap-parser service. Add its required
+# Compose inputs before rendering or pulling the new stack so a missing value
+# cannot take the running version down during an upgrade.
+ensure_pcap_parser_upgrade_env
+
 # Download, extract, and checksum the Edge payload while the current service is
 # still online. A network, architecture, or checksum failure therefore leaves
 # both the running stack and the currently served /edge directory untouched.
@@ -392,6 +429,10 @@ log_info "data dir: $ONGRID_DATA_DIR  (override via ONGRID_DATA_DIR)"
 log_info "log dir:  $ONGRID_LOG_DIR  (override via ONGRID_LOG_DIR)"
 if ! ongrid_prepare_data_directories "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"; then
     log_error "data directory permissions are not usable; the existing stack was not stopped"
+    exit 1
+fi
+if ! ongrid_prepare_pcap_parser_auth "$ONGRID_DATA_DIR"; then
+    log_error "pcap-parser request signing material is not usable; the existing stack was not stopped"
     exit 1
 fi
 

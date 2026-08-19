@@ -1288,8 +1288,6 @@ func main() {
 			ArtifactBaseURL: packetParserArtifactBaseURL,
 			TokenSecret:     cfg.PacketCapture.ParserTokenSecret,
 			PrivateKeyFile:  cfg.PacketCapture.ParserManagerPrivateKeyFile,
-			ClientCertFile:  cfg.PacketCapture.ParserClientCertFile,
-			ClientKeyFile:   cfg.PacketCapture.ParserClientKeyFile,
 			CAFile:          cfg.PacketCapture.ParserCAFile,
 			Timeout:         cfg.PacketCapture.ParserTimeout,
 			MaxPackets:      cfg.PacketCapture.ParserMaxPackets,
