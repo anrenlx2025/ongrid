@@ -318,7 +318,7 @@ services:
   # Native Wireshark packet dissector. This service has no `ports` mapping:
   # only Compose peers can reach its signed HTTP/gRPC listeners.
   pcap-parser:
-    image: ${ONGRID_PCAP_PARSER_IMAGE:-docker.cnb.cool/ongridio/pcap-parser:latest}
+    image: ${ONGRID_PCAP_PARSER_IMAGE:-docker.cnb.cool/ongridio/pcap-parser@sha256:5b117be302e61cfa1a964ac8649580185cb41868369471001c10d372ac4e9b5a}
     container_name: ongrid-pcap-parser
     restart: unless-stopped
     environment:

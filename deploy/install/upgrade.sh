@@ -135,7 +135,7 @@ ensure_pcap_parser_upgrade_env() {
 
     parser_image=$(grep -E '^ONGRID_PCAP_PARSER_IMAGE=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)
     if [[ -z "$parser_image" ]]; then
-        set_env_value ONGRID_PCAP_PARSER_IMAGE 'docker.cnb.cool/ongridio/pcap-parser:latest'
+        set_env_value ONGRID_PCAP_PARSER_IMAGE 'docker.cnb.cool/ongridio/pcap-parser@sha256:5b117be302e61cfa1a964ac8649580185cb41868369471001c10d372ac4e9b5a'
         log_info "backfilled ONGRID_PCAP_PARSER_IMAGE"
     fi
 
