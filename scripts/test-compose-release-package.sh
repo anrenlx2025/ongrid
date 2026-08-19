@@ -142,7 +142,7 @@ for arch in amd64 arm64; do
     "$extract_dir/$package_root/docker-compose.yml"
   grep -Fq 'PCAP_PARSER_ALLOW_HTTP_ARTIFACTS: "true"' \
     "$extract_dir/$package_root/docker-compose.yml"
-  grep -Fq 'image: ${ONGRID_PCAP_PARSER_IMAGE:-docker.cnb.cool/ongridio/pcap-parser@sha256:5b117be302e61cfa1a964ac8649580185cb41868369471001c10d372ac4e9b5a}' \
+  grep -Fq 'image: ${ONGRID_PCAP_PARSER_IMAGE:-docker.cnb.cool/ongridio/pcap-parser:v0.12.0@sha256:5b117be302e61cfa1a964ac8649580185cb41868369471001c10d372ac4e9b5a}' \
     "$extract_dir/$package_root/docker-compose.yml"
   grep -Fq 'listen 8081;' "$extract_dir/$package_root/nginx.conf"
   parser_service=$(awk '

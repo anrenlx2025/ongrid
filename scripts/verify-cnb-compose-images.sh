@@ -30,7 +30,7 @@ docker.cnb.cool/ongridio/ongrid/prometheus:v2.54.0
 docker.cnb.cool/ongridio/ongrid/qdrant:v1.11.3
 docker.cnb.cool/ongridio/ongrid/searxng:latest
 docker.cnb.cool/ongridio/ongrid/tempo:2.10.0
-docker.cnb.cool/ongridio/pcap-parser@sha256:5b117be302e61cfa1a964ac8649580185cb41868369471001c10d372ac4e9b5a
+docker.cnb.cool/ongridio/pcap-parser:v0.12.0@sha256:5b117be302e61cfa1a964ac8649580185cb41868369471001c10d372ac4e9b5a
 EOF
 sort -o "$tmp_dir/install.expected" "$tmp_dir/install.expected"
 diff -u "$tmp_dir/install.expected" "$tmp_dir/install.actual"
