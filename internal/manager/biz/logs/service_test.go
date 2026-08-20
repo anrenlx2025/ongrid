@@ -37,9 +37,11 @@ func (m mapSecrets) ResolveFields(_ context.Context, name string) (map[string]st
 }
 
 type managedSecrets struct {
-	mu      sync.Mutex
-	values  map[string]map[string]string
-	creates []string
+	mu           sync.Mutex
+	values       map[string]map[string]string
+	creates      []string
+	deletes      []string
+	failCreateAt int
 }
 
 func newManagedSecrets() *managedSecrets {
@@ -63,6 +65,9 @@ func (m *managedSecrets) CreateManaged(_ context.Context, name, credType, _ stri
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failCreateAt > 0 && len(m.creates)+1 == m.failCreateAt {
+		return errors.New("injected managed credential create failure")
+	}
 	if _, exists := m.values[name]; exists {
 		return errors.New("managed credential already exists")
 	}
@@ -72,6 +77,17 @@ func (m *managedSecrets) CreateManaged(_ context.Context, name, credType, _ stri
 	}
 	m.values[name] = stored
 	m.creates = append(m.creates, name)
+	return nil
+}
+
+func (m *managedSecrets) DeleteManaged(_ context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.values[name]; !exists {
+		return errs.ErrNotFound
+	}
+	delete(m.values, name)
+	m.deletes = append(m.deletes, name)
 	return nil
 }
 
@@ -85,6 +101,18 @@ func (m *managedSecrets) createCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.creates)
+}
+
+func (m *managedSecrets) storedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.values)
+}
+
+func (m *managedSecrets) deleteCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.deletes)
 }
 
 type mapHostDevices map[uint64]uint64
@@ -104,8 +132,18 @@ func (i fixedEdgeInventory) ListRolloutEdges(context.Context) ([]bizlogs.Rollout
 }
 
 type histogramCountingSearcher struct {
-	mu       sync.Mutex
-	requests []logquery.SearchRequest
+	mu                sync.Mutex
+	countRequests     []logquery.SearchRequest
+	histogramRequests []logquery.SearchRequest
+	intervals         []time.Duration
+}
+
+type failingSaveRepo struct {
+	bizlogs.Repo
+}
+
+func (failingSaveRepo) SaveBackend(context.Context, *logsmodel.Backend) error {
+	return errors.New("injected backend save failure")
 }
 
 type echoProbeSearcher struct {
@@ -146,9 +184,9 @@ func (s *histogramCountingSearcher) Search(context.Context, logquery.SearchReque
 
 func (s *histogramCountingSearcher) Count(_ context.Context, req logquery.SearchRequest) (uint64, error) {
 	s.mu.Lock()
-	s.requests = append(s.requests, req)
+	s.countRequests = append(s.countRequests, req)
 	s.mu.Unlock()
-	return uint64(req.End.Sub(req.Start) / time.Second), nil
+	return 0, errors.New("backend Count must not be used for a histogram")
 }
 
 func (s *histogramCountingSearcher) Fields(context.Context, time.Time, time.Time, logquery.Scope) ([]logquery.Field, error) {
@@ -159,14 +197,24 @@ func (s *histogramCountingSearcher) FieldValues(context.Context, logquery.FieldV
 	return nil, nil
 }
 
-func (s *histogramCountingSearcher) Histogram(context.Context, logquery.SearchRequest, time.Duration) ([]logquery.HistogramBucket, error) {
-	return nil, errors.New("backend-native histogram must not be called")
+func (s *histogramCountingSearcher) Histogram(_ context.Context, req logquery.SearchRequest, interval time.Duration) ([]logquery.HistogramBucket, error) {
+	s.mu.Lock()
+	s.histogramRequests = append(s.histogramRequests, req)
+	s.intervals = append(s.intervals, interval)
+	s.mu.Unlock()
+	return []logquery.HistogramBucket{
+		{Start: req.Start, Count: 120},
+		{Start: req.Start.Add(interval), Count: 120},
+		{Start: req.Start.Add(2 * interval), Count: 90},
+	}, nil
 }
 
-func (s *histogramCountingSearcher) snapshot() []logquery.SearchRequest {
+func (s *histogramCountingSearcher) snapshot() ([]logquery.SearchRequest, []logquery.SearchRequest, []time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]logquery.SearchRequest(nil), s.requests...)
+	return append([]logquery.SearchRequest(nil), s.countRequests...),
+		append([]logquery.SearchRequest(nil), s.histogramRequests...),
+		append([]time.Duration(nil), s.intervals...)
 }
 
 type countingNotifier struct {
@@ -481,14 +529,15 @@ func TestServiceHistogramUsesOneGlobalExactBucketGrid(t *testing.T) {
 			t.Fatalf("bucket[%d] = %+v, want start=%s count=%d", i, bucket, wantStart, wantCounts[i])
 		}
 	}
-	requests := searcher.snapshot()
-	if len(requests) != 3 {
-		t.Fatalf("exact count requests = %d, want 3", len(requests))
+	countRequests, histogramRequests, intervals := searcher.snapshot()
+	if len(countRequests) != 0 {
+		t.Fatalf("exact count requests = %d, want 0", len(countRequests))
 	}
-	for _, req := range requests {
-		if req.Cursor != "" || req.End.Sub(req.Start) > 2*time.Minute {
-			t.Fatalf("count request is not bucket-bounded: %+v", req)
-		}
+	if len(histogramRequests) != 1 || len(intervals) != 1 || intervals[0] != 2*time.Minute {
+		t.Fatalf("native histogram calls = %d intervals=%v, want one 2m call", len(histogramRequests), intervals)
+	}
+	if histogramRequests[0].Cursor != "" || !histogramRequests[0].Start.Equal(start) || !histogramRequests[0].End.Equal(end) {
+		t.Fatalf("native histogram request = %+v", histogramRequests[0])
 	}
 	if _, err := svc.Histogram(context.Background(), logquery.SearchRequest{
 		Start: start, End: start.Add(501 * time.Second), Limit: 1,
@@ -736,6 +785,40 @@ func TestServiceDirectAPIKeyRequiresEncryptedManagedStore(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "credential storage is unavailable") {
 		t.Fatalf("SaveDraft error = %v, want managed storage failure", err)
+	}
+}
+
+func TestServiceSaveDraftCleansManagedCredentialsWhenCreateFails(t *testing.T) {
+	secrets := newManagedSecrets()
+	secrets.failCreateAt = 2
+	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
+
+	_, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", WriteAPIKey: "encoded-write", QueryAPIKey: "encoded-query",
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected managed credential create failure") {
+		t.Fatalf("SaveDraft error = %v, want injected create failure", err)
+	}
+	if secrets.storedCount() != 0 || secrets.deleteCount() != 1 {
+		t.Fatalf("managed credentials after failed create: stored=%d deleted=%d", secrets.storedCount(), secrets.deleteCount())
+	}
+}
+
+func TestServiceSaveDraftCleansManagedCredentialsWhenBackendSaveFails(t *testing.T) {
+	secrets := newManagedSecrets()
+	repo := failingSaveRepo{Repo: logsstore.NewRepo(openTestDB(t))}
+	svc := bizlogs.NewService(repo, secrets, nil)
+
+	_, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", WriteAPIKey: "encoded-write", QueryAPIKey: "encoded-query",
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected backend save failure") {
+		t.Fatalf("SaveDraft error = %v, want injected save failure", err)
+	}
+	if secrets.storedCount() != 0 || secrets.deleteCount() != 2 {
+		t.Fatalf("managed credentials after failed save: stored=%d deleted=%d", secrets.storedCount(), secrets.deleteCount())
 	}
 }
 

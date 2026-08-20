@@ -21,6 +21,12 @@ const (
 	defaultESIndexPattern    = "logs-ongrid.*.otel-*"
 	defaultESKeepAlive       = 5 * time.Minute
 	maxESResponseBytes       = 16 * 1024 * 1024
+	// Edge collectors accept a 256 KiB log body. Search responses therefore
+	// scale with page size and reserve another 64 KiB per hit for the OTel
+	// source envelope and sort metadata, while control responses keep the
+	// smaller fixed cap above.
+	maxESSearchEnvelopeBytes = 1 * 1024 * 1024
+	maxESSearchHitBytes      = 320 * 1024
 )
 
 type ElasticsearchConfig struct {
@@ -123,7 +129,7 @@ func (c *ElasticsearchClient) Search(ctx context.Context, req SearchRequest) (_ 
 			} `json:"hits"`
 		} `json:"hits"`
 	}
-	if err := c.doJSON(ctx, http.MethodPost, "/_search", nil, body, &response); err != nil {
+	if err := c.doJSONWithLimit(ctx, http.MethodPost, "/_search", nil, body, &response, maxESSearchResponseBytes(req.Limit)); err != nil {
 		return nil, err
 	}
 	if response.PIT != "" {
@@ -242,24 +248,34 @@ func (c *ElasticsearchClient) Histogram(ctx context.Context, req SearchRequest, 
 	if interval <= 0 || interval > MaxSearchWindow {
 		return nil, errors.New("logquery: histogram interval is invalid")
 	}
-	query, err := buildElasticsearchQuery(req)
+	query, err := buildElasticsearchQueryWithStart(req, "gt")
 	if err != nil {
 		return nil, err
+	}
+	maxBound := req.End.Add(-time.Nanosecond).UTC().Format(time.RFC3339Nano)
+	minBound := req.Start.UTC().Format(time.RFC3339Nano)
+	dateHistogram := map[string]any{
+		"field":          "@timestamp",
+		"fixed_interval": elasticsearchDuration(interval),
+		"min_doc_count":  0,
+		"extended_bounds": map[string]any{
+			"min": minBound,
+			"max": maxBound,
+		},
+		"hard_bounds": map[string]any{
+			"min": minBound,
+			"max": maxBound,
+		},
+	}
+	if offset := elasticsearchHistogramOffset(req.Start, interval); offset > 0 {
+		dateHistogram["offset"] = elasticsearchDuration(offset)
 	}
 	body := map[string]any{
 		"size":  0,
 		"query": query,
 		"aggs": map[string]any{
 			"timeline": map[string]any{
-				"date_histogram": map[string]any{
-					"field":          "@timestamp",
-					"fixed_interval": elasticsearchDuration(interval),
-					"min_doc_count":  0,
-					"extended_bounds": map[string]any{
-						"min": req.Start.UTC().Format(time.RFC3339Nano),
-						"max": req.End.UTC().Format(time.RFC3339Nano),
-					},
-				},
+				"date_histogram": dateHistogram,
 			},
 		},
 	}
@@ -581,6 +597,10 @@ func decodeElasticsearchRecord(id string, raw json.RawMessage) (Record, error) {
 }
 
 func (c *ElasticsearchClient) doJSON(ctx context.Context, method, path string, query url.Values, input, output any) error {
+	return c.doJSONWithLimit(ctx, method, path, query, input, output, maxESResponseBytes)
+}
+
+func (c *ElasticsearchClient) doJSONWithLimit(ctx context.Context, method, path string, query url.Values, input, output any, maxResponseBytes int64) error {
 	var body io.Reader
 	if input != nil {
 		encoded, err := json.Marshal(input)
@@ -612,9 +632,12 @@ func (c *ElasticsearchClient) doJSON(ctx context.Context, method, path string, q
 			c.log.Warn("close Elasticsearch response", slog.Any("err", closeErr))
 		}
 	}()
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxESResponseBytes))
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return fmt.Errorf("logquery: read Elasticsearch response: %w", err)
+	}
+	if int64(len(responseBody)) > maxResponseBytes {
+		return fmt.Errorf("logquery: Elasticsearch response exceeds %d bytes", maxResponseBytes)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return elasticsearchHTTPError(resp.StatusCode, responseBody)
@@ -787,4 +810,22 @@ func elasticsearchDuration(d time.Duration) string {
 		return strconv.FormatInt(int64(d/time.Second), 10) + "s"
 	}
 	return strconv.FormatInt(d.Milliseconds(), 10) + "ms"
+}
+
+func elasticsearchHistogramOffset(start time.Time, interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return 0
+	}
+	remainder := start.UnixNano() % int64(interval)
+	if remainder < 0 {
+		remainder += int64(interval)
+	}
+	return time.Duration(remainder)
+}
+
+func maxESSearchResponseBytes(limit int) int64 {
+	if limit < 1 {
+		limit = DefaultSearchLimit
+	}
+	return maxESSearchEnvelopeBytes + int64(limit+1)*maxESSearchHitBytes
 }

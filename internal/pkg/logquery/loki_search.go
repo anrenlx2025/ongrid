@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"regexp"
 	"sort"
@@ -212,22 +213,54 @@ func (c *Client) Histogram(ctx context.Context, req SearchRequest, interval time
 	if interval <= 0 || interval > MaxSearchWindow {
 		return nil, errors.New("logquery: histogram interval is invalid")
 	}
-	query, err := compileLogQL(req)
-	if err != nil {
-		return nil, err
+	span := req.End.Sub(req.Start)
+	fullBucketCount := int(span / interval)
+	buckets := make([]HistogramBucket, 0, fullBucketCount+1)
+	if fullBucketCount == 1 {
+		countReq := req
+		countReq.End = req.Start.Add(interval)
+		count, err := c.Count(ctx, countReq)
+		if err != nil {
+			return nil, err
+		}
+		buckets = append(buckets, HistogramBucket{Start: req.Start.UTC(), Count: count})
+	} else if fullBucketCount > 1 {
+		query, err := compileLogQL(req)
+		if err != nil {
+			return nil, err
+		}
+		metricQuery := fmt.Sprintf("sum(count_over_time(%s[%s]))", query, logQLDuration(interval))
+		out, err := c.QueryRange(ctx, QueryRangeOptions{
+			Query: metricQuery,
+			Start: req.Start.Add(interval),
+			End:   req.Start.Add(time.Duration(fullBucketCount) * interval),
+			Step:  interval,
+			Limit: MaxSearchLimit,
+		})
+		if err != nil {
+			return nil, err
+		}
+		fullBuckets, err := decodeLokiHistogram(out)
+		if err != nil {
+			return nil, err
+		}
+		for i := range fullBuckets {
+			fullBuckets[i].Start = fullBuckets[i].Start.Add(-interval).UTC()
+		}
+		buckets = append(buckets, fullBuckets...)
 	}
-	metricQuery := fmt.Sprintf("sum(count_over_time(%s[%s]))", query, logQLDuration(interval))
-	out, err := c.QueryRange(ctx, QueryRangeOptions{
-		Query: metricQuery,
-		Start: req.Start,
-		End:   req.End,
-		Step:  interval,
-		Limit: MaxSearchLimit,
-	})
-	if err != nil {
-		return nil, err
+
+	partialStart := req.Start.Add(time.Duration(fullBucketCount) * interval)
+	if req.End.After(partialStart) {
+		partialReq := req
+		partialReq.Start = partialStart
+		count, err := c.Count(ctx, partialReq)
+		if err != nil {
+			return nil, err
+		}
+		buckets = append(buckets, HistogramBucket{Start: partialStart.UTC(), Count: count})
 	}
-	return decodeLokiHistogram(out)
+	return buckets, nil
 }
 
 func compileLogQL(req SearchRequest) (string, error) {
@@ -483,7 +516,7 @@ func decodeLokiHistogram(result *QueryRangeResult) ([]HistogramBucket, error) {
 			if err != nil {
 				return nil, fmt.Errorf("logquery: parse histogram value: %w", err)
 			}
-			counts[int64(seconds)] += uint64(count)
+			counts[int64(math.Round(seconds*1000))] += uint64(count)
 		}
 	}
 	keys := make([]int64, 0, len(counts))
@@ -493,7 +526,7 @@ func decodeLokiHistogram(result *QueryRangeResult) ([]HistogramBucket, error) {
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	buckets := make([]HistogramBucket, 0, len(keys))
 	for _, ts := range keys {
-		buckets = append(buckets, HistogramBucket{Start: time.Unix(ts, 0).UTC(), Count: counts[ts]})
+		buckets = append(buckets, HistogramBucket{Start: time.UnixMilli(ts).UTC(), Count: counts[ts]})
 	}
 	return buckets, nil
 }

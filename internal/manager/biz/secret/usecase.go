@@ -102,6 +102,21 @@ func (u *Usecase) CreateManaged(ctx context.Context, name, credType, description
 	return err
 }
 
+// DeleteManaged removes a fresh in-process credential by its immutable name.
+// It is used only as compensation when the owning configuration fails before
+// its credential references are persisted.
+func (u *Usecase) DeleteManaged(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("%w: managed credential name is required", errs.ErrInvalid)
+	}
+	stored, err := u.repo.GetByName(ctx, name)
+	if err != nil {
+		return err
+	}
+	return u.repo.Delete(ctx, stored.ID)
+}
+
 // Delete removes a credential.
 func (u *Usecase) Delete(ctx context.Context, id uint64) error { return u.repo.Delete(ctx, id) }
 

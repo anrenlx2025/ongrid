@@ -34,6 +34,7 @@ const (
 	maxAPIKeyBytes          = 16 << 10
 	maxCAPEMBytes           = 256 << 10
 	maxBackendEndpoints     = 8
+	managedSecretCleanupTTL = 5 * time.Second
 )
 
 var (
@@ -72,6 +73,7 @@ type SecretResolver interface {
 type ManagedSecretStore interface {
 	SecretResolver
 	CreateManaged(ctx context.Context, name, credType, description string, fields map[string]string) error
+	DeleteManaged(ctx context.Context, name string) error
 }
 
 type RolloutNotifier interface {
@@ -214,7 +216,20 @@ func (s *Service) SetActivationGuard(guard func(context.Context) error) {
 	s.activationGuard = guard
 }
 
-func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (*BackendView, error) {
+func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (view *BackendView, retErr error) {
+	createdManagedRefs := make([]string, 0, 2)
+	backendPersisted := false
+	defer func() {
+		if retErr == nil || backendPersisted || len(createdManagedRefs) == 0 {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), managedSecretCleanupTTL)
+		defer cancel()
+		if cleanupErr := s.deleteManagedAPIKeys(cleanupCtx, createdManagedRefs); cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("cleanup managed Elasticsearch credentials: %w", cleanupErr))
+		}
+	}()
+
 	normalized, err := normalizeSaveInput(input)
 	if err != nil {
 		return nil, err
@@ -286,12 +301,14 @@ func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (*BackendView,
 		if err != nil {
 			return nil, err
 		}
+		createdManagedRefs = append(createdManagedRefs, writeRef)
 	}
 	if normalized.ReuseWriteAPIKey || normalized.QueryAPIKey != "" {
 		queryRef, err = s.storeManagedAPIKey(ctx, "query", queryKey, generation)
 		if err != nil {
 			return nil, err
 		}
+		createdManagedRefs = append(createdManagedRefs, queryRef)
 	}
 	if writeRef == queryRef {
 		return nil, fmt.Errorf("%w: write and query credentials must be different", errs.ErrInvalid)
@@ -333,6 +350,7 @@ func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (*BackendView,
 	if err := s.repo.SaveBackend(ctx, backend); err != nil {
 		return nil, err
 	}
+	backendPersisted = true
 	s.invalidateCache()
 	return s.view(ctx, backend)
 }
@@ -1219,6 +1237,20 @@ func (s *Service) storeManagedAPIKey(ctx context.Context, role, apiKey string, g
 		return "", fmt.Errorf("store managed Elasticsearch %s credential: %w", role, err)
 	}
 	return name, nil
+}
+
+func (s *Service) deleteManagedAPIKeys(ctx context.Context, refs []string) error {
+	store, ok := s.secrets.(ManagedSecretStore)
+	if !ok {
+		return errors.New("encrypted log backend credential storage is unavailable")
+	}
+	var cleanupErr error
+	for i := len(refs) - 1; i >= 0; i-- {
+		if err := store.DeleteManaged(ctx, refs[i]); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete managed credential: %w", err))
+		}
+	}
+	return cleanupErr
 }
 
 func newManagedLogsSecretName(role string, generation uint64) (string, error) {

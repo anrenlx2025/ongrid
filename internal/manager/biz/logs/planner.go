@@ -10,8 +10,6 @@ import (
 	"sort"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	model "github.com/ongridio/ongrid/internal/manager/model/logs"
 	apperrs "github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/logquery"
@@ -197,74 +195,39 @@ func (s *Service) Histogram(ctx context.Context, req logquery.SearchRequest, int
 	if err != nil {
 		return nil, err
 	}
-	type plannedPhase struct {
-		phase    queryPhase
-		searcher logquery.Searcher
+	if len(phases) != 1 {
+		return nil, errors.New("logquery: histogram requires exactly one active backend")
 	}
-	planned := make([]plannedPhase, 0, len(phases))
-	for _, phase := range phases {
-		searcher, searcherErr := s.searcherForPhase(ctx, phase)
-		if searcherErr != nil {
-			return nil, searcherErr
-		}
-		planned = append(planned, plannedPhase{phase: phase, searcher: searcher})
-	}
-
-	// Backend-native histogram APIs do not share one bucket origin: Loki's
-	// range vectors are trailing windows while Elasticsearch rounds fixed
-	// intervals to epoch boundaries. Build one product-level grid and use exact
-	// Count calls so switching the active backend never changes bucket shape.
-	// The bounded worker group keeps a normal 60-120 bucket UI request practical
-	// without turning it into unbounded fan-out.
-	out := make([]logquery.HistogramBucket, bucketCount)
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(8)
-	for i := range out {
-		i := i
-		bucketStart := req.Start.Add(time.Duration(i) * interval)
-		bucketEnd := bucketStart.Add(interval)
-		if bucketEnd.After(req.End) {
-			bucketEnd = req.End
-		}
-		out[i].Start = bucketStart.UTC()
-		group.Go(func() error {
-			var count uint64
-			for _, item := range planned {
-				start := laterTime(bucketStart, item.phase.start)
-				end := earlierTime(bucketEnd, item.phase.end)
-				if !end.After(start) {
-					continue
-				}
-				phaseReq := req
-				phaseReq.Start, phaseReq.End, phaseReq.Cursor = start, end, ""
-				value, countErr := item.searcher.Count(groupCtx, phaseReq)
-				if countErr != nil {
-					return countErr
-				}
-				count += value
-			}
-			out[i].Count = count
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
+	searcher, err := s.searcherForPhase(ctx, phases[0])
+	if err != nil {
 		return nil, err
 	}
+	phaseReq := req
+	phaseReq.Cursor = ""
+	buckets, err := searcher.Histogram(ctx, phaseReq, interval)
+	if err != nil {
+		return nil, err
+	}
+
+	// Backend adapters return buckets aligned to the request start. Normalize
+	// sparse backend results onto the product grid so both Loki and
+	// Elasticsearch expose identical zero-filled bucket positions.
+	out := make([]logquery.HistogramBucket, bucketCount)
+	for i := range out {
+		out[i].Start = req.Start.Add(time.Duration(i) * interval).UTC()
+	}
+	for _, bucket := range buckets {
+		delta := bucket.Start.Sub(req.Start)
+		if delta < 0 || delta%interval != 0 {
+			return nil, fmt.Errorf("logquery: backend histogram bucket %s is not aligned to request start %s", bucket.Start, req.Start)
+		}
+		index := int(delta / interval)
+		if index >= len(out) {
+			return nil, fmt.Errorf("logquery: backend histogram bucket %s is outside the request window", bucket.Start)
+		}
+		out[index].Count += bucket.Count
+	}
 	return out, nil
-}
-
-func laterTime(a, b time.Time) time.Time {
-	if b.After(a) {
-		return b
-	}
-	return a
-}
-
-func earlierTime(a, b time.Time) time.Time {
-	if b.Before(a) {
-		return b
-	}
-	return a
 }
 
 func (s *Service) plan(ctx context.Context, start, end time.Time, _ logquery.SortDirection) ([]queryPhase, string, error) {

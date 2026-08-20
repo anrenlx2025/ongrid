@@ -35,7 +35,13 @@ func (r *memorySecretRepo) Update(_ context.Context, id uint64, data, descriptio
 	return nil
 }
 
-func (r *memorySecretRepo) Delete(context.Context, uint64) error { return nil }
+func (r *memorySecretRepo) Delete(_ context.Context, id uint64) error {
+	if r.row == nil || r.row.ID != id {
+		return errs.ErrNotFound
+	}
+	r.row = nil
+	return nil
+}
 
 func (r *memorySecretRepo) List(context.Context) ([]*model.Secret, error) {
 	if r.row == nil {
@@ -74,5 +80,20 @@ func TestCreateManagedEncryptsCredentialAndRejectsNameReuse(t *testing.T) {
 	fields, err = usecase.ResolveFields(ctx, "managed-es-write")
 	if err != nil || fields["api_key"] != "first-value" || repo.row.Description != "generation 1" {
 		t.Fatalf("name reuse mutated credential: fields=%#v description=%q err=%v", fields, repo.row.Description, err)
+	}
+}
+
+func TestDeleteManagedRemovesCredentialByOwnedName(t *testing.T) {
+	repo := &memorySecretRepo{}
+	usecase := NewUsecase(repo)
+	ctx := t.Context()
+	if err := usecase.CreateManaged(ctx, "managed-es-write", "elasticsearch", "generation 1", map[string]string{"api_key": "first-value"}); err != nil {
+		t.Fatalf("CreateManaged: %v", err)
+	}
+	if err := usecase.DeleteManaged(ctx, "managed-es-write"); err != nil {
+		t.Fatalf("DeleteManaged: %v", err)
+	}
+	if repo.row != nil {
+		t.Fatalf("managed credential still exists: %+v", repo.row)
 	}
 }

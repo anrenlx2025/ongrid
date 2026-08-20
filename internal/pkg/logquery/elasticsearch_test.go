@@ -2,6 +2,7 @@ package logquery
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -85,6 +86,91 @@ func TestElasticsearchClient_SearchUsesPITAndOpaqueCursor(t *testing.T) {
 	}
 	if len(second.Records) != 1 || second.HasMore || second.NextCursor != "" || !closed {
 		t.Fatalf("second result = %#v closed=%v", second, closed)
+	}
+}
+
+func TestElasticsearchClient_SearchAcceptsValidPageLargerThanControlResponseLimit(t *testing.T) {
+	const recordCount = 70
+	message := strings.Repeat("x", 240<<10)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/_pit"):
+			writeTestJSON(t, w, map[string]any{"id": "pit-large-page"})
+		case r.Method == http.MethodPost && r.URL.Path == "/_search":
+			hits := make([]any, 0, recordCount)
+			for i := 0; i < recordCount; i++ {
+				hits = append(hits, testElasticsearchHit(
+					fmt.Sprintf("record-%d", i),
+					"2026-08-18T12:00:00Z",
+					message,
+					[]any{"2026-08-18T12:00:00Z", i},
+				))
+			}
+			writeTestJSON(t, w, map[string]any{"pit_id": "pit-large-page", "hits": map[string]any{"hits": hits}})
+		case r.Method == http.MethodDelete && r.URL.Path == "/_pit":
+			writeTestJSON(t, w, map[string]any{"succeeded": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewElasticsearchClient(ElasticsearchConfig{
+		Endpoint: server.URL, APIKey: "test-key", AllowInsecureHTTP: true,
+	}, server.Client(), nil)
+	if err != nil {
+		t.Fatalf("NewElasticsearchClient() error = %v", err)
+	}
+	req := validSearchRequest()
+	req.Limit = recordCount
+	result, err := client.Search(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(result.Records) != recordCount || result.Records[0].Message != message {
+		t.Fatalf("Search() records = %d first message bytes=%d", len(result.Records), len(result.Records[0].Message))
+	}
+}
+
+func TestElasticsearchClient_HistogramAlignsBucketsToRequestStart(t *testing.T) {
+	start := time.Date(2026, 8, 18, 10, 0, 30, 0, time.UTC)
+	end := start.Add(2*time.Minute + 30*time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/_search") {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode request: %v", err)
+		}
+		aggs := body["aggs"].(map[string]any)
+		timeline := aggs["timeline"].(map[string]any)
+		histogram := timeline["date_histogram"].(map[string]any)
+		if histogram["offset"] != "30s" {
+			t.Fatalf("histogram offset = %#v, want 30s", histogram["offset"])
+		}
+		if _, ok := histogram["hard_bounds"]; !ok {
+			t.Fatalf("histogram is missing hard_bounds: %#v", histogram)
+		}
+		writeTestJSON(t, w, map[string]any{"aggregations": map[string]any{"timeline": map[string]any{"buckets": []any{
+			map[string]any{"key_as_string": start.Format(time.RFC3339Nano), "doc_count": 2},
+			map[string]any{"key_as_string": start.Add(time.Minute).Format(time.RFC3339Nano), "doc_count": 3},
+			map[string]any{"key_as_string": start.Add(2 * time.Minute).Format(time.RFC3339Nano), "doc_count": 1},
+		}}}})
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewElasticsearchClient(ElasticsearchConfig{
+		Endpoint: server.URL, APIKey: "test-key", AllowInsecureHTTP: true,
+	}, server.Client(), nil)
+	if err != nil {
+		t.Fatalf("NewElasticsearchClient() error = %v", err)
+	}
+	buckets, err := client.Histogram(t.Context(), SearchRequest{Start: start, End: end, Limit: 1}, time.Minute)
+	if err != nil {
+		t.Fatalf("Histogram() error = %v", err)
+	}
+	if len(buckets) != 3 || !buckets[0].Start.Equal(start) || buckets[2].Count != 1 {
+		t.Fatalf("Histogram() = %#v", buckets)
 	}
 }
 

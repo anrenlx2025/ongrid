@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +39,84 @@ func TestLokiCountUsesInstantStructuredQuery(t *testing.T) {
 	count, err := client.Count(t.Context(), req)
 	if err != nil || count != 7 {
 		t.Fatalf("Count() = %d, %v", count, err)
+	}
+}
+
+func TestLokiHistogramAlignsFullBucketsAndCountsPartialTail(t *testing.T) {
+	start := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	end := start.Add(5*time.Minute + 30*time.Second)
+	interval := 2 * time.Minute
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/loki/api/v1/query_range":
+			if got := r.URL.Query().Get("start"); got != strconv.FormatInt(start.Add(interval).UnixNano(), 10) {
+				t.Fatalf("query_range start = %s", got)
+			}
+			if got := r.URL.Query().Get("end"); got != strconv.FormatInt(start.Add(2*interval).UnixNano(), 10) {
+				t.Fatalf("query_range end = %s", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "success",
+				"data": map[string]any{"resultType": "matrix", "result": []any{
+					map[string]any{"metric": map[string]string{}, "values": []any{
+						[]any{float64(start.Add(interval).Unix()), "2"},
+						[]any{float64(start.Add(2 * interval).Unix()), "3"},
+					}},
+				}},
+			})
+		case "/loki/api/v1/query":
+			if !strings.Contains(r.URL.Query().Get("query"), "[90s]") {
+				t.Fatalf("partial count query = %q", r.URL.Query().Get("query"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "success",
+				"data": map[string]any{"resultType": "vector", "result": []any{
+					map[string]any{"metric": map[string]string{}, "value": []any{float64(end.Unix()), "4"}},
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := NewWithHTTPClient(server.URL, server.Client(), nil)
+	buckets, err := client.Histogram(t.Context(), SearchRequest{Start: start, End: end, Limit: 1}, interval)
+	if err != nil {
+		t.Fatalf("Histogram() error = %v", err)
+	}
+	want := []HistogramBucket{
+		{Start: start, Count: 2},
+		{Start: start.Add(interval), Count: 3},
+		{Start: start.Add(2 * interval), Count: 4},
+	}
+	if !reflect.DeepEqual(buckets, want) {
+		t.Fatalf("Histogram() = %#v, want %#v", buckets, want)
+	}
+}
+
+func TestLokiHistogramCountsSingleBucketWithoutRangeQuery(t *testing.T) {
+	start := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	end := start.Add(time.Minute)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/loki/api/v1/query" {
+			t.Fatalf("unexpected histogram path %q", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{"resultType": "vector", "result": []any{
+				map[string]any{"metric": map[string]string{}, "value": []any{float64(end.Unix()), "5"}},
+			}},
+		})
+	}))
+	t.Cleanup(server.Close)
+	client := NewWithHTTPClient(server.URL, server.Client(), nil)
+	buckets, err := client.Histogram(t.Context(), SearchRequest{Start: start, End: end, Limit: 1}, time.Minute)
+	if err != nil {
+		t.Fatalf("Histogram() error = %v", err)
+	}
+	want := []HistogramBucket{{Start: start, Count: 5}}
+	if !reflect.DeepEqual(buckets, want) {
+		t.Fatalf("Histogram() = %#v, want %#v", buckets, want)
 	}
 }
 
