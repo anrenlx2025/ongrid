@@ -1100,7 +1100,7 @@ func main() {
 		lokiLogClient = pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "logquery")))
 	}
 	logsBackendRepo := managerlogsdata.NewRepo(db)
-	logsBackendSvc := managerbizlogs.NewService(logsBackendRepo, secretUC, lokiLogClient)
+	logsBackendSvc := managerbizlogs.NewService(logsBackendRepo, secretUC, lokiLogClient, log.With(slog.String("comp", "logs-backend")))
 	logsBackendSvc.SetHostDeviceResolver(edgeDeviceRepo)
 	logsBackendSvc.SetRolloutEdgeInventory(logsRolloutEdgeInventory{edges: edgeUC, configs: pluginConfigUC})
 	logsBackendSvc.SetActivationGuard(func(ctx context.Context) error {

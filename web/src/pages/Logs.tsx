@@ -365,6 +365,8 @@ export default function LogsPage() {
   const requestSeq = useRef(0);
   const paginationGeneration = useRef(0);
   const pageRequestRef = useRef<LogSearchRequest | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const pageAbortRef = useRef<AbortController | null>(null);
   const resultScrollRef = useRef<HTMLElement>(null);
   const histogramRef = useRef<HTMLDivElement>(null);
   const histogramPointerID = useRef<number | null>(null);
@@ -446,10 +448,14 @@ export default function LogsPage() {
     }
     const seq = ++requestSeq.current;
     ++paginationGeneration.current;
+    searchAbortRef.current?.abort();
+    pageAbortRef.current?.abort();
+    pageAbortRef.current = null;
     pageRequestRef.current = null;
     setNextCursor('');
     setLoadingMore(false);
     const controller = new AbortController();
+    searchAbortRef.current = controller;
     if (!quiet) setLoading(true);
     setError(null);
     try {
@@ -475,7 +481,8 @@ export default function LogsPage() {
         setNextCursor('');
       }
     } finally {
-      if (seq === requestSeq.current && !quiet) setLoading(false);
+      if (searchAbortRef.current === controller) searchAbortRef.current = null;
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, [buildRequest, resolveWindow, tr]);
 
@@ -485,10 +492,13 @@ export default function LogsPage() {
     if (!pageRequest) return;
     const generation = paginationGeneration.current;
     const input = { ...pageRequest, cursor: nextCursor };
+    pageAbortRef.current?.abort();
+    const controller = new AbortController();
+    pageAbortRef.current = controller;
     setLoadingMore(true);
     setError(null);
     try {
-      const result = await searchLogs(input);
+      const result = await searchLogs(input, controller.signal);
       if (generation !== paginationGeneration.current) return;
       setRecords((current) => {
         const seen = new Set(current.map(recordKey));
@@ -498,8 +508,9 @@ export default function LogsPage() {
       setBackends((current) => Array.from(new Set(current.concat(result.backends ?? []))));
       setTookMS((current) => current + (result.took_ms ?? 0));
     } catch (err) {
-      if (generation === paginationGeneration.current) setError(errorMessage(err));
+      if ((err as Error).name !== 'AbortError' && generation === paginationGeneration.current) setError(errorMessage(err));
     } finally {
+      if (pageAbortRef.current === controller) pageAbortRef.current = null;
       if (generation === paginationGeneration.current) setLoadingMore(false);
     }
   }, [loadingMore, nextCursor]);
@@ -521,6 +532,11 @@ export default function LogsPage() {
   useEffect(() => {
     void runSearch();
   }, [refreshKey, runSearch]);
+
+  useEffect(() => () => {
+    searchAbortRef.current?.abort();
+    pageAbortRef.current?.abort();
+  }, []);
 
   useEffect(() => {
     if (!live) return;

@@ -525,6 +525,23 @@ func TestTunnelConfigFetcherMaterializesExternalElasticsearchSecret(t *testing.T
 	}
 	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
 	fetcher.secretBaseDir = t.TempDir()
+	logsDir := filepath.Join(fetcher.secretBaseDir, "logs")
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		t.Fatalf("mkdir logs runtime: %v", err)
+	}
+	staleFiles := []string{
+		"elasticsearch_api_key.g1", "elasticsearch_api_key.g1.generation",
+		"elasticsearch_ca.g1.pem", "logs_probe.g1.0123456789abcdef.log",
+	}
+	for _, name := range staleFiles {
+		if err := os.WriteFile(filepath.Join(logsDir, name), []byte("stale"), 0o600); err != nil {
+			t.Fatalf("write stale runtime file %s: %v", name, err)
+		}
+	}
+	unrelatedPath := filepath.Join(logsDir, "operator-note.txt")
+	if err := os.WriteFile(unrelatedPath, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("write unrelated runtime file: %v", err)
+	}
 
 	got, err := fetcher.Fetch(context.Background())
 	if err != nil {
@@ -576,6 +593,14 @@ func TestTunnelConfigFetcherMaterializesExternalElasticsearchSecret(t *testing.T
 	if client.reportReq == nil || !client.reportReq.Applied || client.reportReq.Generation != 3 || client.reportReq.ProbeID == "" {
 		t.Fatalf("report request = %+v", client.reportReq)
 	}
+	for _, name := range staleFiles {
+		if _, err := os.Stat(filepath.Join(logsDir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale runtime file %s still exists: %v", name, err)
+		}
+	}
+	if raw, err := os.ReadFile(unrelatedPath); err != nil || string(raw) != "keep" {
+		t.Fatalf("unrelated runtime file = %q, err=%v", raw, err)
+	}
 }
 
 func TestTunnelConfigFetcherMaterializesCandidateAndExternalBaselineSecrets(t *testing.T) {
@@ -607,6 +632,17 @@ func TestTunnelConfigFetcherMaterializesCandidateAndExternalBaselineSecrets(t *t
 	}
 	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
 	fetcher.secretBaseDir = t.TempDir()
+	logsDir := filepath.Join(fetcher.secretBaseDir, "logs")
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		t.Fatalf("mkdir logs runtime: %v", err)
+	}
+	stalePath := filepath.Join(logsDir, "elasticsearch_api_key.g2")
+	if err := os.WriteFile(stalePath, []byte("stale"), 0o600); err != nil {
+		t.Fatalf("write stale credential: %v", err)
+	}
+	if err := os.WriteFile(stalePath+".generation", []byte("2\n"), 0o600); err != nil {
+		t.Fatalf("write stale generation marker: %v", err)
+	}
 
 	got, err := fetcher.Fetch(context.Background())
 	if err != nil {
@@ -632,6 +668,12 @@ func TestTunnelConfigFetcherMaterializesCandidateAndExternalBaselineSecrets(t *t
 	}
 	if caPath, _ := cfg.Spec["baseline_elasticsearch_ca_file"].(string); caPath == "" {
 		t.Fatal("baseline CA file was not materialized")
+	}
+	if _, err := os.Stat(stalePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("superseded candidate credential still exists: %v", err)
+	}
+	if _, err := os.Stat(stalePath + ".generation"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("superseded candidate generation marker still exists: %v", err)
 	}
 }
 
@@ -691,7 +733,7 @@ func TestMaterializeLogsRuntimeUsesUniqueProbePathForSameGenerationRetry(t *test
 
 	materialize := func(probeID string) (PluginConfig, string) {
 		t.Helper()
-		cfg, err := fetcher.materializeLogsRuntime(context.Background(), PluginConfig{Spec: map[string]interface{}{
+		cfg, err := fetcher.materializeLogsRuntime(context.Background(), PluginConfig{Enabled: true, Spec: map[string]interface{}{
 			"backend":            "builtin_loki",
 			"backend_generation": float64(1),
 			"log_probe_id":       probeID,
@@ -713,11 +755,106 @@ func TestMaterializeLogsRuntimeUsesUniqueProbePathForSameGenerationRetry(t *test
 	if firstPath == secondPath {
 		t.Fatalf("same-generation retry reused probe path %q", firstPath)
 	}
-	if raw, err := os.ReadFile(firstPath); err != nil || string(raw) != firstID+"\n" {
-		t.Fatalf("first probe = %q, err=%v", raw, err)
+	if _, err := os.Stat(firstPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("superseded first probe still exists: %v", err)
 	}
 	if raw, err := os.ReadFile(secondPath); err != nil || string(raw) != secondID+"\n" {
 		t.Fatalf("second probe = %q, err=%v", raw, err)
+	}
+}
+
+func TestMaterializeLogsRuntimePrunesManagedFilesWhenElasticsearchIsInactive(t *testing.T) {
+	fetcher := NewTunnelConfigFetcher(nil, []string{"logs"})
+	fetcher.secretBaseDir = t.TempDir()
+	logsDir := filepath.Join(fetcher.secretBaseDir, "logs")
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		t.Fatalf("mkdir logs runtime: %v", err)
+	}
+	managed := []string{
+		"elasticsearch_api_key.g9", "elasticsearch_api_key.g9.generation",
+		"elasticsearch_ca.g9.pem", "logs_probe.g9.0123456789abcdef.log",
+	}
+	for _, name := range managed {
+		if err := os.WriteFile(filepath.Join(logsDir, name), []byte("stale"), 0o600); err != nil {
+			t.Fatalf("write managed runtime file %s: %v", name, err)
+		}
+	}
+	unrelatedPath := filepath.Join(logsDir, "operator-note.txt")
+	if err := os.WriteFile(unrelatedPath, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("write unrelated runtime file: %v", err)
+	}
+
+	if _, err := fetcher.materializeLogsRuntime(t.Context(), PluginConfig{Enabled: true, Spec: map[string]interface{}{
+		"backend": "builtin_loki",
+	}}); err != nil {
+		t.Fatalf("materialize inactive Elasticsearch config: %v", err)
+	}
+	for _, name := range managed {
+		if _, err := os.Stat(filepath.Join(logsDir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("managed runtime file %s still exists: %v", name, err)
+		}
+	}
+	if raw, err := os.ReadFile(unrelatedPath); err != nil || string(raw) != "keep" {
+		t.Fatalf("unrelated runtime file = %q, err=%v", raw, err)
+	}
+}
+
+func TestTunnelConfigFetcherPrunesManagedLogsFilesWhenPluginIsDisabled(t *testing.T) {
+	client := &fakeTunnelClient{resp: tunnel.GetPluginConfigsResponse{
+		EdgeID: 42,
+		Configs: map[string]tunnel.GetPluginConfigsEntry{
+			"logs": {Enabled: false},
+		},
+	}}
+	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
+	fetcher.secretBaseDir = t.TempDir()
+	logsDir := filepath.Join(fetcher.secretBaseDir, "logs")
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		t.Fatalf("mkdir logs runtime: %v", err)
+	}
+	stalePath := filepath.Join(logsDir, "elasticsearch_api_key.g3")
+	if err := os.WriteFile(stalePath, []byte("stale"), 0o600); err != nil {
+		t.Fatalf("write stale credential: %v", err)
+	}
+
+	got, err := fetcher.Fetch(t.Context())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got["logs"].Enabled {
+		t.Fatal("disabled logs plugin became enabled")
+	}
+	if _, err := os.Stat(stalePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("disabled plugin retained managed credential: %v", err)
+	}
+}
+
+func TestTunnelConfigFetcherCleanupFailureDoesNotBlockPluginDisable(t *testing.T) {
+	client := &fakeTunnelClient{resp: tunnel.GetPluginConfigsResponse{
+		EdgeID: 42,
+		Configs: map[string]tunnel.GetPluginConfigsEntry{
+			"logs": {Enabled: false},
+		},
+	}}
+	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
+	fetcher.secretBaseDir = t.TempDir()
+	blockedPath := filepath.Join(fetcher.secretBaseDir, "logs", "elasticsearch_api_key.g3")
+	if err := os.MkdirAll(blockedPath, 0o700); err != nil {
+		t.Fatalf("mkdir non-empty managed path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(blockedPath, "child"), []byte("keep directory non-empty"), 0o600); err != nil {
+		t.Fatalf("write non-empty managed path: %v", err)
+	}
+
+	got, err := fetcher.Fetch(t.Context())
+	if err != nil {
+		t.Fatalf("Fetch must not fail when cleanup fails: %v", err)
+	}
+	if got["logs"].Enabled {
+		t.Fatal("cleanup failure prevented plugin disable")
+	}
+	if _, err := os.Stat(blockedPath); err != nil {
+		t.Fatalf("test did not exercise a retained cleanup failure path: %v", err)
 	}
 }
 

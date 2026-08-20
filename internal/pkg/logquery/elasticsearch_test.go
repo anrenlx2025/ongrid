@@ -131,6 +131,15 @@ func TestElasticsearchClient_SearchAcceptsValidPageLargerThanControlResponseLimi
 	}
 }
 
+func TestMaxESSearchResponseBytesUsesFixedHardLimit(t *testing.T) {
+	if got := maxESSearchResponseBytes(MaxSearchLimit); got != maxESSearchResponseHardBytes {
+		t.Fatalf("maxESSearchResponseBytes(%d) = %d, want %d", MaxSearchLimit, got, maxESSearchResponseHardBytes)
+	}
+	if got := maxESSearchResponseBytes(1); got >= maxESSearchResponseHardBytes {
+		t.Fatalf("maxESSearchResponseBytes(1) = %d, want below hard limit %d", got, maxESSearchResponseHardBytes)
+	}
+}
+
 func TestElasticsearchClient_HistogramAlignsBucketsToRequestStart(t *testing.T) {
 	start := time.Date(2026, 8, 18, 10, 0, 30, 0, time.UTC)
 	end := start.Add(2*time.Minute + 30*time.Second)

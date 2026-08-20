@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -174,6 +175,7 @@ type Service struct {
 	repo    Repo
 	secrets SecretResolver
 	loki    logquery.Searcher
+	log     *slog.Logger
 
 	mu              sync.RWMutex
 	notifier        RolloutNotifier
@@ -184,8 +186,12 @@ type Service struct {
 	cachedES        *logquery.ElasticsearchClient
 }
 
-func NewService(repo Repo, secrets SecretResolver, loki logquery.Searcher) *Service {
-	return &Service{repo: repo, secrets: secrets, loki: loki}
+func NewService(repo Repo, secrets SecretResolver, loki logquery.Searcher, loggers ...*slog.Logger) *Service {
+	logger := slog.Default()
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	}
+	return &Service{repo: repo, secrets: secrets, loki: loki, log: logger}
 }
 
 func (s *Service) SetRolloutNotifier(notifier RolloutNotifier) {
@@ -351,6 +357,9 @@ func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (view *Backend
 		return nil, err
 	}
 	backendPersisted = true
+	if editableInPlace {
+		s.cleanupSupersededManagedAPIKeys(ctx, previous, backend)
+	}
 	s.invalidateCache()
 	return s.view(ctx, backend)
 }
@@ -1246,11 +1255,50 @@ func (s *Service) deleteManagedAPIKeys(ctx context.Context, refs []string) error
 	}
 	var cleanupErr error
 	for i := len(refs) - 1; i >= 0; i-- {
-		if err := store.DeleteManaged(ctx, refs[i]); err != nil {
+		if err := store.DeleteManaged(ctx, refs[i]); err != nil && !errors.Is(err, errs.ErrNotFound) {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete managed credential: %w", err))
 		}
 	}
 	return cleanupErr
+}
+
+func (s *Service) cleanupSupersededManagedAPIKeys(ctx context.Context, previous, current *model.Backend) {
+	refs := supersededManagedAPIKeyRefs(previous, current)
+	if len(refs) == 0 {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), managedSecretCleanupTTL)
+	defer cancel()
+	if err := s.deleteManagedAPIKeys(cleanupCtx, refs); err != nil {
+		s.log.WarnContext(cleanupCtx, "failed to delete superseded managed Elasticsearch credentials",
+			slog.Int("credential_count", len(refs)), slog.Any("error", err))
+	}
+}
+
+func supersededManagedAPIKeyRefs(previous, current *model.Backend) []string {
+	if previous == nil || current == nil {
+		return nil
+	}
+	retained := map[string]struct{}{
+		current.WriteCredentialRef: {},
+		current.QueryCredentialRef: {},
+	}
+	seen := make(map[string]struct{}, 2)
+	refs := make([]string, 0, 2)
+	for _, ref := range []string{previous.WriteCredentialRef, previous.QueryCredentialRef} {
+		if !strings.HasPrefix(ref, managedLogsSecretPrefix) {
+			continue
+		}
+		if _, ok := retained[ref]; ok {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs
 }
 
 func newManagedLogsSecretName(role string, generation uint64) (string, error) {

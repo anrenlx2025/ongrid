@@ -17,12 +17,14 @@ import (
 )
 
 const (
-	defaultKubernetesPodLogPath = "/var/log/pods/*/*/*.log"
-	backendBuiltinLoki          = "builtin_loki"
-	backendExternalES           = "external_elasticsearch"
-	logsStorageExtension        = "file_storage/logs"
-	maxLogSources               = 64
-	maxSourcePatterns           = 32
+	defaultKubernetesPodLogPath  = "/var/log/pods/*/*/*.log"
+	backendBuiltinLoki           = "builtin_loki"
+	backendExternalES            = "external_elasticsearch"
+	logsStorageExtension         = "file_storage/logs"
+	maxLogSources                = 64
+	maxSourcePatterns            = 32
+	sensitiveBodyPattern         = `(?i)['"]?(password|passwd|secret|api[_-]?key|authorization)['"]?\s*[=：:]\s*("[^"]*"|'[^']*'|[^\s,;}]+)`
+	sensitiveAttributeKeyPattern = `(?i)(^|[._-])(password|passwd|secret|api[_-]?key|authorization)($|[._-])`
 )
 
 var (
@@ -147,7 +149,9 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 		return nil, err
 	}
 	guardStatements := []string{
-		`replace_pattern(log.body, "(?i)(password|passwd|secret|api[_-]?key|authorization)[=：:][^\\s,;]+", "$1=<redacted>") where IsString(log.body)`,
+		fmt.Sprintf(`replace_pattern(log.body, %s, "$1=<redacted>") where IsString(log.body)`, strconv.Quote(sensitiveBodyPattern)),
+		fmt.Sprintf(`delete_matching_keys(log.attributes, %s)`, strconv.Quote(sensitiveAttributeKeyPattern)),
+		fmt.Sprintf(`delete_matching_keys(resource.attributes, %s)`, strconv.Quote(sensitiveAttributeKeyPattern)),
 		`limit(log.attributes, 64, ["log.file.path", "systemd.unit", "ongrid.probe_id"])`,
 		`truncate_all(log.attributes, 4096)`,
 		`set(log.attributes["systemd.unit"], log.attributes["_SYSTEMD_UNIT"]) where log.attributes["_SYSTEMD_UNIT"] != nil`,

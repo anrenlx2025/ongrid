@@ -206,6 +206,42 @@ describe('LogsPage', () => {
     expect(searchRequests.at(-1)?.scope?.cluster_ids).toEqual(['12']);
   });
 
+  it('aborts a superseded first-page search before applying a new cluster scope', async () => {
+    const user = userEvent.setup();
+    let abortedCount = 0;
+    server.use(http.post('/api/v1/logs/search', async ({ request }) => {
+      const input = await request.clone().json() as CapturedSearchRequest;
+      searchRequests.push(input);
+      if (input.scope?.cluster_ids?.[0] !== '12') {
+        await new Promise<void>((resolve) => {
+          const onAbort = () => {
+            abortedCount++;
+            resolve();
+          };
+          if (request.signal.aborted) onAbort();
+          else request.signal.addEventListener('abort', onAbort, { once: true });
+        });
+      }
+      return HttpResponse.json({
+        code: 0,
+        message: '',
+        data: { records, has_more: false, took_ms: 27, backends: ['elasticsearch'] },
+      });
+    }));
+
+    render(<MemoryRouter><LogsPage /></MemoryRouter>);
+    const clusterSelect = screen.getByRole('combobox', { name: '集群' });
+    await waitFor(() => expect(within(clusterSelect).getByRole('option', { name: 'production (#12)' })).toBeInTheDocument());
+    await waitFor(() => expect(searchRequests.length).toBeGreaterThan(0));
+    const abortedBeforeSelection = abortedCount;
+
+    await user.selectOptions(clusterSelect, '12');
+
+    await waitFor(() => expect(abortedCount).toBeGreaterThan(abortedBeforeSelection));
+    await screen.findByText('payment request completed');
+    expect(searchRequests.at(-1)?.scope?.cluster_ids).toEqual(['12']);
+  });
+
   it('sends level rather than severity in advanced filters', async () => {
     const user = userEvent.setup();
     render(<MemoryRouter><LogsPage /></MemoryRouter>);

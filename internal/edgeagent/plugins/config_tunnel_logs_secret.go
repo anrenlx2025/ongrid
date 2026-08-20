@@ -21,13 +21,21 @@ const (
 )
 
 var logsProbeIDPattern = regexp.MustCompile(`^ongrid-log-probe-[A-Za-z0-9_-]{20,64}$`)
+var logsManagedRuntimeFilePattern = regexp.MustCompile(`^(elasticsearch_api_key\.g[1-9][0-9]*(\.generation)?|elasticsearch_ca\.g[1-9][0-9]*\.pem|logs_probe\.g[1-9][0-9]*\.[0-9a-f]{16}\.log)$`)
 
 func (t *TunnelConfigFetcher) materializeLogsRuntime(ctx context.Context, cfg PluginConfig) (PluginConfig, error) {
 	spec := copySpec(cfg.Spec)
 	backend := configString(spec, "backend")
 	shadow, _ := spec["rollout_shadow"].(bool)
 	probeID := configString(spec, "log_probe_id")
+	dir := filepath.Join(t.secretBaseDir, "logs")
+	if !cfg.Enabled {
+		t.pruneLogsRuntimeFiles(ctx, dir, nil, "disabled")
+		cfg.Spec = spec
+		return cfg, nil
+	}
 	if backend != logsExternalBackend && !shadow && probeID == "" {
+		t.pruneLogsRuntimeFiles(ctx, dir, nil, "inactive")
 		cfg.Spec = spec
 		return cfg, nil
 	}
@@ -35,7 +43,6 @@ func (t *TunnelConfigFetcher) materializeLogsRuntime(ctx context.Context, cfg Pl
 	if err != nil || generation == 0 {
 		return PluginConfig{}, errors.New("logs backend generation is required")
 	}
-	dir := filepath.Join(t.secretBaseDir, "logs")
 	if backend == logsExternalBackend {
 		slot := configString(spec, "elasticsearch_secret_slot")
 		keyPath, keyErr := t.fetchAndMaterializeESKey(ctx, dir, generation, slot)
@@ -87,8 +94,62 @@ func (t *TunnelConfigFetcher) materializeLogsRuntime(ctx context.Context, cfg Pl
 		}
 		delete(spec, "baseline_elasticsearch_ca_pem")
 	}
+	t.pruneLogsRuntimeFiles(ctx, dir, logsRuntimeKeepPaths(dir, spec), "superseded")
 	cfg.Spec = spec
 	return cfg, nil
+}
+
+func (t *TunnelConfigFetcher) pruneLogsRuntimeFiles(ctx context.Context, dir string, keep map[string]struct{}, reason string) {
+	if err := pruneLogsRuntimeFiles(dir, keep); err != nil {
+		t.log.WarnContext(ctx, "failed to prune managed logs runtime files",
+			"reason", reason, "error", err)
+	}
+}
+
+func logsRuntimeKeepPaths(dir string, spec map[string]interface{}) map[string]struct{} {
+	keep := make(map[string]struct{}, 6)
+	for _, key := range []string{
+		"elasticsearch_api_key_file", "elasticsearch_ca_file", "log_probe_file",
+		"baseline_elasticsearch_api_key_file", "baseline_elasticsearch_ca_file",
+	} {
+		path := filepath.Clean(configString(spec, key))
+		if path == "." || filepath.Dir(path) != filepath.Clean(dir) {
+			continue
+		}
+		name := filepath.Base(path)
+		if !logsManagedRuntimeFilePattern.MatchString(name) {
+			continue
+		}
+		keep[name] = struct{}{}
+		if strings.HasPrefix(name, "elasticsearch_api_key.g") {
+			keep[name+".generation"] = struct{}{}
+		}
+	}
+	return keep
+}
+
+func pruneLogsRuntimeFiles(dir string, keep map[string]struct{}) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var cleanupErr error
+	for _, entry := range entries {
+		name := entry.Name()
+		if !logsManagedRuntimeFilePattern.MatchString(name) {
+			continue
+		}
+		if _, ok := keep[name]; ok {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove %s: %w", name, err))
+		}
+	}
+	return cleanupErr
 }
 
 // logsProbeFilename gives every Manager-issued probe a distinct path, even

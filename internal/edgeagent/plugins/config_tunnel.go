@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"runtime"
@@ -46,6 +47,7 @@ type TunnelConfigFetcher struct {
 	k8sGateway       bool
 	managerPublicURL string
 	secretBaseDir    string
+	log              *slog.Logger
 
 	cacheMu sync.RWMutex
 	last    map[string]PluginConfig
@@ -90,6 +92,7 @@ func NewTunnelConfigFetcherWithCredentials(client tunnel.Client, knownPlugins []
 		k8sGateway:       envBool("ONGRID_K8S_TELEMETRY_GATEWAY_ENABLED"),
 		managerPublicURL: os.Getenv("ONGRID_MANAGER_PUBLIC_URL"),
 		secretBaseDir:    secretBaseDir,
+		log:              slog.Default().With(slog.String("comp", "plugin-config-fetcher")),
 	}
 }
 
@@ -166,7 +169,7 @@ func (t *TunnelConfigFetcher) Fetch(ctx context.Context) (map[string]PluginConfi
 		}
 	}
 	logsCfg, ok := out["logs"]
-	if ok && logsCfg.Enabled {
+	if ok {
 		materialized, err := t.materializeLogsRuntime(ctx, logsCfg)
 		if err != nil {
 			// A rollout can fail before Supervisor sees the config (secret

@@ -3,9 +3,12 @@ package logs
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -228,8 +231,34 @@ func TestRenderHostAddsManagerClusterAndNormalizesLevel(t *testing.T) {
 	assertResourceAction(t, actions, "cluster_id", "7")
 	assertResourceAction(t, actions, "cluster_name", "edge-fleet-a")
 	statements := list(t, object(t, object(t, root, "processors"), "transform/guard")["log_statements"])
+	assertStringListContains(t, statements, fmt.Sprintf(`replace_pattern(log.body, %s, "$1=<redacted>") where IsString(log.body)`, strconv.Quote(sensitiveBodyPattern)))
+	assertStringListContains(t, statements, fmt.Sprintf(`delete_matching_keys(log.attributes, %s)`, strconv.Quote(sensitiveAttributeKeyPattern)))
+	assertStringListContains(t, statements, fmt.Sprintf(`delete_matching_keys(resource.attributes, %s)`, strconv.Quote(sensitiveAttributeKeyPattern)))
 	assertStringListContains(t, statements, `set(log.severity_text, log.attributes["level"]) where (log.severity_text == nil or log.severity_text == "") and log.attributes["level"] != nil`)
 	assertStringListContains(t, statements, `set(resource.attributes["level"], log.severity_text) where log.severity_text != nil and log.severity_text != ""`)
+}
+
+func TestSensitivePatternsCoverJSONBodiesAndStructuredKeys(t *testing.T) {
+	bodyPattern := regexp.MustCompile(sensitiveBodyPattern)
+	input := `{"password":"p a s s","client_secret":"token-123","authorization":"Bearer abc"}`
+	redacted := bodyPattern.ReplaceAllString(input, "$1=<redacted>")
+	for _, secret := range []string{"p a s s", "token-123", "Bearer abc"} {
+		if strings.Contains(redacted, secret) {
+			t.Fatalf("redacted body still contains %q: %s", secret, redacted)
+		}
+	}
+
+	attributePattern := regexp.MustCompile(sensitiveAttributeKeyPattern)
+	for _, key := range []string{"password", "client_secret", "db.password", "authorization.header", "api-key"} {
+		if !attributePattern.MatchString(key) {
+			t.Fatalf("sensitive attribute key %q was not matched", key)
+		}
+	}
+	for _, key := range []string{"notsecret", "author", "service.name"} {
+		if attributePattern.MatchString(key) {
+			t.Fatalf("non-sensitive attribute key %q was matched", key)
+		}
+	}
 }
 
 func TestRenderJournaldIsEnabledByDefault(t *testing.T) {

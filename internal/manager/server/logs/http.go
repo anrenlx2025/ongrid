@@ -30,6 +30,8 @@ import (
 	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
 )
 
+const maxConcurrentStructuredSearches = 4
+
 // Querier is the narrow surface this handler needs. *logquery.Client
 // satisfies it.
 type Querier interface {
@@ -42,9 +44,10 @@ type Querier interface {
 // Querier; when nil the routes return 503 so the SPA can show a clear
 // "logs disabled" state instead of failing silently.
 type Handler struct {
-	q       Querier
-	search  logquery.Searcher
-	backend BackendService
+	q           Querier
+	search      logquery.Searcher
+	backend     BackendService
+	searchSlots chan struct{}
 }
 
 type BackendService interface {
@@ -57,7 +60,7 @@ type BackendService interface {
 
 // NewHandler builds the handler. q may be nil when Loki is disabled.
 func NewHandler(q Querier) *Handler {
-	h := &Handler{q: q}
+	h := newHandler(q, nil, nil)
 	if searcher, ok := q.(logquery.Searcher); ok {
 		h.search = searcher
 	}
@@ -67,13 +70,20 @@ func NewHandler(q Querier) *Handler {
 // NewHandlerWithSearcher wires a backend-neutral search implementation while
 // optionally retaining a Loki querier for the legacy LogQL endpoints.
 func NewHandlerWithSearcher(q Querier, searcher logquery.Searcher) *Handler {
-	return &Handler{q: q, search: searcher}
+	return newHandler(q, searcher, nil)
 }
 
 // NewHandlerWithServices wires the backend-neutral query surface and the
 // administrator-only Elasticsearch backend lifecycle API.
 func NewHandlerWithServices(q Querier, searcher logquery.Searcher, backend BackendService) *Handler {
-	return &Handler{q: q, search: searcher, backend: backend}
+	return newHandler(q, searcher, backend)
+}
+
+func newHandler(q Querier, searcher logquery.Searcher, backend BackendService) *Handler {
+	return &Handler{
+		q: q, search: searcher, backend: backend,
+		searchSlots: make(chan struct{}, maxConcurrentStructuredSearches),
+	}
 }
 
 // Register attaches routes on r. Caller must wrap r in the auth
@@ -234,12 +244,36 @@ func (h *Handler) searchLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	if !h.acquireSearchSlot() {
+		w.Header().Set("Retry-After", "1")
+		writeAPIErr(w, http.StatusTooManyRequests, "LOG_QUERY_BUSY", "too many concurrent log searches")
+		return
+	}
+	defer h.releaseSearchSlot()
 	out, err := h.search.Search(ctx, in)
 	if err != nil {
 		writeSearchError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success", Data: out})
+}
+
+func (h *Handler) acquireSearchSlot() bool {
+	if h.searchSlots == nil {
+		return true
+	}
+	select {
+	case h.searchSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handler) releaseSearchSlot() {
+	if h.searchSlots != nil {
+		<-h.searchSlots
+	}
 }
 
 // fields godoc

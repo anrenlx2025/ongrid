@@ -35,6 +35,12 @@ func TestSearchRequestNormalizeAndValidate_RejectsUnsafeInputs(t *testing.T) {
 	}{
 		{"wide_window", func(r *SearchRequest) { r.Start = r.End.Add(-31 * 24 * time.Hour) }, "time window"},
 		{"zero_device", func(r *SearchRequest) { r.Scope.DeviceIDs = []uint64{0} }, "device_id"},
+		{"too_many_devices", func(r *SearchRequest) {
+			r.Scope.DeviceIDs = make([]uint64, MaxScopeValueCount+1)
+			for i := range r.Scope.DeviceIDs {
+				r.Scope.DeviceIDs[i] = uint64(i + 1)
+			}
+		}, "too many values"},
 		{"unknown_field", func(r *SearchRequest) {
 			r.Filters = []FieldFilter{{Field: "_index", Operator: FilterEqual, Values: []string{"secret"}}}
 		}, "not allowed"},
@@ -56,6 +62,23 @@ func TestSearchRequestNormalizeAndValidate_RejectsUnsafeInputs(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestSearchRequestNormalizeAndValidate_DeduplicatesDeviceIDs(t *testing.T) {
+	req := validSearchRequest()
+	req.Scope.DeviceIDs = []uint64{42, 7, 42, 7, 99}
+	if err := req.NormalizeAndValidate(); err != nil {
+		t.Fatalf("NormalizeAndValidate() error = %v", err)
+	}
+	want := []uint64{42, 7, 99}
+	if len(req.Scope.DeviceIDs) != len(want) {
+		t.Fatalf("DeviceIDs = %v, want %v", req.Scope.DeviceIDs, want)
+	}
+	for i := range want {
+		if req.Scope.DeviceIDs[i] != want[i] {
+			t.Fatalf("DeviceIDs = %v, want %v", req.Scope.DeviceIDs, want)
+		}
 	}
 }
 

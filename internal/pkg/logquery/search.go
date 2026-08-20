@@ -16,6 +16,7 @@ const (
 	MaxSearchWindow    = 30 * 24 * time.Hour
 	MaxKeywordCount    = 20
 	MaxFilterCount     = 20
+	MaxScopeValueCount = 100
 	MaxKeywordLength   = 512
 )
 
@@ -181,6 +182,11 @@ func (r *SearchRequest) NormalizeAndValidate() error {
 	if r.Keywords.Mode != MatchAny && r.Keywords.Mode != MatchAll && r.Keywords.Mode != MatchPhrase {
 		return errors.New("logquery: keyword mode must be any, all, or phrase")
 	}
+	deviceIDs, err := normalizeDeviceIDs(r.Scope.DeviceIDs)
+	if err != nil {
+		return err
+	}
+	r.Scope.DeviceIDs = deviceIDs
 	if err := validateScope(r.Scope); err != nil {
 		return err
 	}
@@ -235,6 +241,14 @@ func (r *FieldValuesRequest) NormalizeAndValidate() error {
 	r.Field = strings.TrimSpace(r.Field)
 	if _, ok := LookupField(r.Field); !ok {
 		return fmt.Errorf("logquery: field %q is not allowed", r.Field)
+	}
+	deviceIDs, err := normalizeDeviceIDs(r.Scope.DeviceIDs)
+	if err != nil {
+		return err
+	}
+	r.Scope.DeviceIDs = deviceIDs
+	if err := validateScope(r.Scope); err != nil {
+		return err
 	}
 	if r.Start.IsZero() || r.End.IsZero() || !r.End.After(r.Start) {
 		return errors.New("logquery: valid start and end are required")
@@ -368,7 +382,7 @@ func validateScope(scope Scope) error {
 		{"file", scope.Files},
 		{"unit", scope.Units},
 	} {
-		if len(item.values) > 100 {
+		if len(item.values) > MaxScopeValueCount {
 			return fmt.Errorf("logquery: scope %s has too many values", item.name)
 		}
 		if err := validateStrings("scope "+item.name, item.values, 256); err != nil {
@@ -376,6 +390,28 @@ func validateScope(scope Scope) error {
 		}
 	}
 	return nil
+}
+
+func normalizeDeviceIDs(values []uint64) ([]uint64, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	seen := make(map[uint64]struct{}, min(len(values), MaxScopeValueCount))
+	out := make([]uint64, 0, min(len(values), MaxScopeValueCount))
+	for _, id := range values {
+		if id == 0 {
+			return nil, errors.New("logquery: device_id must be greater than zero")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+		if len(out) > MaxScopeValueCount {
+			return nil, errors.New("logquery: scope device_id has too many values")
+		}
+	}
+	return out, nil
 }
 
 func encodeCursor(v any) (string, error) {

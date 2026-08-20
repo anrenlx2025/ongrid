@@ -737,8 +737,75 @@ func TestServiceStoresDirectAPIKeysAsManagedWriteOnlyCredentials(t *testing.T) {
 	if got := secrets.apiKey(rotated.WriteCredentialRef); got != "encoded-write-v2" {
 		t.Fatalf("rotated write key = %q", got)
 	}
-	if got := secrets.apiKey(first.WriteCredentialRef); got != "encoded-write-v1" {
-		t.Fatalf("rotation mutated the previously referenced write key = %q", got)
+	if got := secrets.apiKey(first.WriteCredentialRef); got != "" {
+		t.Fatalf("superseded managed write key was retained = %q", got)
+	}
+	if secrets.storedCount() != 2 || secrets.deleteCount() != 1 {
+		t.Fatalf("managed credentials after rotation: stored=%d deleted=%d, want 2/1", secrets.storedCount(), secrets.deleteCount())
+	}
+}
+
+func TestServiceDraftReplacementDoesNotDeleteExternalCredentialRefs(t *testing.T) {
+	secrets := newManagedSecrets()
+	secrets.values["external-write"] = map[string]string{"api_key": "write-v1"}
+	secrets.values["external-query"] = map[string]string{"api_key": "query-v1"}
+	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
+
+	first, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", WriteCredentialRef: "external-write", QueryCredentialRef: "external-query",
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(external refs): %v", err)
+	}
+	rotated, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", WriteAPIKey: "write-v2", QueryAPIKey: "query-v2",
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(managed rotation): %v", err)
+	}
+	if rotated.ID != first.ID {
+		t.Fatalf("draft ID changed from %d to %d", first.ID, rotated.ID)
+	}
+	if secrets.apiKey("external-write") != "write-v1" || secrets.apiKey("external-query") != "query-v1" {
+		t.Fatal("external credential refs were deleted during managed rotation")
+	}
+	if secrets.deleteCount() != 0 {
+		t.Fatalf("external rotation deleted %d credentials", secrets.deleteCount())
+	}
+}
+
+func TestServiceNewGenerationRetainsManagedCredentialsNeededByActiveBackend(t *testing.T) {
+	secrets := newManagedSecrets()
+	repo := logsstore.NewRepo(openTestDB(t))
+	svc := bizlogs.NewService(repo, secrets, nil)
+
+	first, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", WriteAPIKey: "write-v1", QueryAPIKey: "query-v1",
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(first): %v", err)
+	}
+	if err := repo.SetBackendState(t.Context(), first.ID, logsmodel.BackendStatusActive, "8.16.3", "", time.Now().UTC()); err != nil {
+		t.Fatalf("activate first backend state: %v", err)
+	}
+	second, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://next-es.example.com"}, QueryEndpoint: "https://next-es.example.com",
+		Dataset: "ongrid.system", WriteAPIKey: "write-v2", QueryAPIKey: "query-v2",
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(second generation): %v", err)
+	}
+	if second.Generation != first.Generation+1 {
+		t.Fatalf("second generation = %d, want %d", second.Generation, first.Generation+1)
+	}
+	if secrets.apiKey(first.WriteCredentialRef) != "write-v1" || secrets.apiKey(first.QueryCredentialRef) != "query-v1" {
+		t.Fatal("active generation credentials were deleted while creating the next draft")
+	}
+	if secrets.storedCount() != 4 || secrets.deleteCount() != 0 {
+		t.Fatalf("managed credentials across generations: stored=%d deleted=%d, want 4/0", secrets.storedCount(), secrets.deleteCount())
 	}
 }
 

@@ -17,14 +17,15 @@ import (
 )
 
 const (
-	elasticsearchBackendName = "elasticsearch"
-	defaultESIndexPattern    = "logs-ongrid.*.otel-*"
-	defaultESKeepAlive       = 5 * time.Minute
-	maxESResponseBytes       = 16 * 1024 * 1024
+	elasticsearchBackendName     = "elasticsearch"
+	defaultESIndexPattern        = "logs-ongrid.*.otel-*"
+	defaultESKeepAlive           = 5 * time.Minute
+	maxESResponseBytes           = 16 * 1024 * 1024
+	maxESSearchResponseHardBytes = 32 * 1024 * 1024
 	// Edge collectors accept a 256 KiB log body. Search responses therefore
 	// scale with page size and reserve another 64 KiB per hit for the OTel
-	// source envelope and sort metadata, while control responses keep the
-	// smaller fixed cap above.
+	// source envelope and sort metadata. The calculated allowance is still
+	// clamped to a fixed process-memory budget below.
 	maxESSearchEnvelopeBytes = 1 * 1024 * 1024
 	maxESSearchHitBytes      = 320 * 1024
 )
@@ -827,5 +828,6 @@ func maxESSearchResponseBytes(limit int) int64 {
 	if limit < 1 {
 		limit = DefaultSearchLimit
 	}
-	return maxESSearchEnvelopeBytes + int64(limit+1)*maxESSearchHitBytes
+	calculated := maxESSearchEnvelopeBytes + int64(limit+1)*maxESSearchHitBytes
+	return min(calculated, int64(maxESSearchResponseHardBytes))
 }
