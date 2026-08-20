@@ -1079,8 +1079,8 @@ function ActionDialog({
   const cta = kind === 'ack' ? tr('确认', 'Acknowledge') : kind === 'resolve' ? tr('解决', 'Resolve') : tr('静默', 'Silence');
 
   const submit = async () => {
-    if (kind !== 'ack' && !note.trim()) {
-      setErr(kind === 'silence' ? tr('请填写静默原因', 'Please add a silence reason') : tr('请填写备注', 'Please add a note'));
+    if (kind === 'silence' && !note.trim()) {
+      setErr(tr('请填写静默原因', 'Please add a silence reason'));
       return;
     }
     if (kind === 'silence' && !until.trim()) {
@@ -1119,7 +1119,7 @@ function ActionDialog({
             type="button"
             onClick={submit}
             disabled={submitting}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
           >
             {submitting ? tr('提交中…', 'Submitting…') : cta}
           </button>
@@ -1150,9 +1150,7 @@ function ActionDialog({
           <span className="mb-1 block">
             {kind === 'silence'
               ? tr('原因（必填）', 'Reason (required)')
-              : kind === 'ack'
-              ? tr('备注（可选，进入 incident 时间线）', 'Note (optional; recorded in the incident timeline)')
-              : tr('备注（必填，进入 incident 时间线）', 'Note (required; recorded in the incident timeline)')}
+              : tr('备注（可选，进入 incident 时间线）', 'Note (optional; recorded in the incident timeline)')}
           </span>
           <textarea
             value={note}

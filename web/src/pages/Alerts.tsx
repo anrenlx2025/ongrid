@@ -406,10 +406,6 @@ function ResolveDialog({
   const [err, setErr] = useState<string | null>(null);
 
   const submit = async () => {
-    if (!note.trim()) {
-      setErr(tr('请填写备注', 'Please add a note'));
-      return;
-    }
     setSubmitting(true);
     setErr(null);
     try {
@@ -440,7 +436,7 @@ function ResolveDialog({
             type="button"
             onClick={submit}
             disabled={submitting}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
           >
             {submitting ? tr('提交中…', 'Submitting…') : tr('解决', 'Resolve')}
           </button>
@@ -453,7 +449,7 @@ function ResolveDialog({
           <div className="mt-1 text-[11px] text-zinc-500">incident #{incident.id}</div>
         </div>
         <label className="block text-xs text-zinc-400">
-          <span className="mb-1 block">{tr('备注（必填，进入 incident 时间线）', 'Note (required, recorded in the incident timeline)')}</span>
+          <span className="mb-1 block">{tr('备注（可选，进入 incident 时间线）', 'Note (optional; recorded in the incident timeline)')}</span>
           <textarea
             value={note}
             onChange={(e) => setNote(e.target.value)}

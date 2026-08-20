@@ -268,7 +268,7 @@ func (Event) TableName() string { return "alert_events" }
 
 type Silence struct {
 	ID           uint64         `gorm:"column:id;primaryKey;autoIncrement"`
-	Name         string         `gorm:"column:name;size:128;not null;default:''"`
+	Name         string         `gorm:"column:name;size:256;not null;default:''"`
 	Scope        string         `gorm:"column:scope;size:32;not null;default:''"`
 	ScopeType    string         `gorm:"column:scope_type;size:32;not null;default:''"`
 	// DeviceID renamed from EdgeID in May 2026 (entity split).
