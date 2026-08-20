@@ -52,16 +52,40 @@ func (s *Service) AgentLLMTimeout(ctx context.Context) time.Duration {
 	return d
 }
 
+// AgentOutputLocale returns the live system-wide Agent output language.
+// Missing/empty means the caller should keep its contextual fallback (for
+// example, a manual RCA follows Accept-Language while an automatic RCA uses
+// the deployment default). Values are validated on write.
+func (s *Service) AgentOutputLocale(ctx context.Context) (string, bool, error) {
+	v, found, err := s.Get(ctx, model.CategoryAgent, model.KeyAgentOutputLocale)
+	if err != nil || !found {
+		return "", false, err
+	}
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		return "", false, nil
+	}
+	return v, true, nil
+}
+
 // validateAgentSetting validates typed settings before persistence. Other
 // agent keys remain backwards-compatible with the generic setting store.
 func validateAgentSetting(key, value string) error {
-	if key != model.KeyAgentLLMTimeoutSeconds {
+	switch key {
+	case model.KeyAgentOutputLocale:
+		locale := strings.ToLower(strings.TrimSpace(value))
+		if locale != "" && locale != "zh" && locale != "en" {
+			return fmt.Errorf("%w: Agent output locale must be empty, zh, or en", errs.ErrInvalid)
+		}
+		return nil
+	case model.KeyAgentLLMTimeoutSeconds:
+		if _, err := parseAgentLLMTimeout(value); err != nil {
+			return fmt.Errorf("%w: %v", errs.ErrInvalid, err)
+		}
+		return nil
+	default:
 		return nil
 	}
-	if _, err := parseAgentLLMTimeout(value); err != nil {
-		return fmt.Errorf("%w: %v", errs.ErrInvalid, err)
-	}
-	return nil
 }
 
 func parseAgentLLMTimeout(raw string) (time.Duration, error) {

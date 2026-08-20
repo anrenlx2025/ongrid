@@ -1791,7 +1791,8 @@ func main() {
 				// MaxStep cap, read its partial trail back from
 				// chat_messages and synthesise a low-confidence
 				// report instead of an empty failure.
-				WithMessageReader(aiopsRepo)
+				WithMessageReader(aiopsRepo).
+				WithLocaleResolver(settingSvc)
 			rcaInv = rcaInvConcrete
 			log.Info("alert: structured RCA investigator wired",
 				slog.String("summarizer_provider", firstNonEmpty(sumProvider, "llm_default")),

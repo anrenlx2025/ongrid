@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Bot, Clock3, Loader2, Save, ShieldCheck } from 'lucide-react';
+import { Bot, Clock3, Languages, Loader2, Save, ShieldCheck } from 'lucide-react';
 import { listSettings, setSetting } from '@/api/settings';
 import { Button } from '@/components/ui';
 import { useI18n } from '@/i18n/locale';
@@ -16,6 +16,7 @@ import { cn } from '@/lib/cn';
 const CATEGORY = 'agent';
 const KEY = 'write_enabled';
 const LLM_TIMEOUT_KEY = 'llm_timeout_seconds';
+const OUTPUT_LOCALE_KEY = 'output_locale';
 const DEFAULT_LLM_TIMEOUT_SECONDS = 120;
 const MIN_LLM_TIMEOUT_SECONDS = 30;
 const MAX_LLM_TIMEOUT_SECONDS = 900;
@@ -24,9 +25,11 @@ export default function SettingsAgent() {
   const { tr } = useI18n();
   const [writeEnabled, setWriteEnabled] = useState(false);
   const [llmTimeoutSeconds, setLLMTimeoutSeconds] = useState(String(DEFAULT_LLM_TIMEOUT_SECONDS));
+  const [outputLocale, setOutputLocale] = useState<'' | 'zh' | 'en'>('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savingTimeout, setSavingTimeout] = useState(false);
+  const [savingLocale, setSavingLocale] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -34,10 +37,12 @@ export default function SettingsAgent() {
       const res = await listSettings(CATEGORY);
       const row = res.items.find((i) => i.key === KEY);
       const timeoutRow = res.items.find((i) => i.key === LLM_TIMEOUT_KEY);
+      const localeRow = res.items.find((i) => i.key === OUTPUT_LOCALE_KEY);
       // Missing row → server default is DISABLED (fail-safe).
       setWriteEnabled(row ? row.value === 'true' : false);
       // Missing timeout row → server and UI both use the stable 120s default.
       setLLMTimeoutSeconds(timeoutRow?.value || String(DEFAULT_LLM_TIMEOUT_SECONDS));
+      setOutputLocale(localeRow?.value === 'zh' || localeRow?.value === 'en' ? localeRow.value : '');
       setErr(null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -90,6 +95,18 @@ export default function SettingsAgent() {
       setSavingTimeout(false);
     }
   }, [llmTimeoutSeconds, tr]);
+
+  const onSaveLocale = useCallback(async () => {
+    setSavingLocale(true);
+    setErr(null);
+    try {
+      await setSetting(CATEGORY, OUTPUT_LOCALE_KEY, outputLocale, false);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingLocale(false);
+    }
+  }, [outputLocale]);
 
   return (
     <div className="space-y-4">
@@ -155,6 +172,52 @@ export default function SettingsAgent() {
           {tr(
             '提示：改动立即生效，对所有用户的新对话轮次生效，无需重启。已在进行中的工具调用不受影响。',
             'Note: takes effect immediately on the next chat turn for every user, no restart needed. Tool calls already in flight are unaffected.',
+          )}
+        </p>
+      </section>
+
+      <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
+        <div className="mb-3 flex items-center gap-2">
+          <Languages size={14} className="text-zinc-400" />
+          <h2 className="text-sm font-medium text-zinc-100">{tr('Agent 输出语言', 'Agent output language')}</h2>
+        </div>
+        <p className="mb-4 text-xs leading-relaxed text-zinc-500">
+          {tr(
+            '设置无浏览器上下文的 Agent 后台任务输出语言，当前包括自动根因分析。显式选择后，手动重新分析也使用同一语言。',
+            'Sets the output language for background Agent work without browser context, currently including automatic root-cause analysis. Once selected, manual reruns use the same language.',
+          )}
+        </p>
+        {loading ? (
+          <div className="flex h-10 items-center text-xs text-zinc-500">
+            <Loader2 size={13} className="mr-2 animate-spin" /> {tr('加载中…', 'Loading…')}
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label htmlFor="agent-output-locale" className="mb-1.5 block text-sm text-zinc-300">
+                {tr('输出语言', 'Output language')}
+              </label>
+              <select
+                id="agent-output-locale"
+                value={outputLocale}
+                onChange={(event) => setOutputLocale(event.target.value as '' | 'zh' | 'en')}
+                className="h-10 w-64 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none transition focus:border-zinc-600"
+              >
+                <option value="">{tr('按任务上下文', 'Use task context')}</option>
+                <option value="zh">中文</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+            <Button variant="subtle" disabled={savingLocale} onClick={() => void onSaveLocale()}>
+              <Save size={14} />
+              {savingLocale ? tr('保存中…', 'Saving…') : tr('保存语言', 'Save language')}
+            </Button>
+          </div>
+        )}
+        <p className="mt-3 text-[11px] text-zinc-600">
+          {tr(
+            '未配置时，交互任务跟随用户界面语言，自动任务使用部署默认语言。配置保存后对新任务立即生效。',
+            'When unset, interactive work follows the UI language and automatic work uses the deployment default. Saved changes apply to new work immediately.',
           )}
         </p>
       </section>
