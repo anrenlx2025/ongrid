@@ -177,11 +177,12 @@ func NewExecuteK8sActionToolWithProposer(caller Caller, reader K8sSnapshotReader
 
 func (t *ExecuteK8sActionTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 	return &basetool.ToolInfo{
-		Name:        ToolNameExecuteK8sAction,
-		Description: ExecuteK8sActionDescription,
-		WhenToUse:   executeK8sActionWhenToUse,
-		Parameters:  ExecuteK8sActionSchema,
-		Class:       "write",
+		Name:         ToolNameExecuteK8sAction,
+		Description:  ExecuteK8sActionDescription,
+		WhenToUse:    executeK8sActionWhenToUse,
+		Parameters:   ExecuteK8sActionSchema,
+		Class:        "write",
+		Confirmation: basetool.ConfirmationSelfManaged,
 	}, nil
 }
 

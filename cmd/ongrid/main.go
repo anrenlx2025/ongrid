@@ -1505,8 +1505,9 @@ func main() {
 		// aiopsRuntime is what the chat service consumes.
 		chatRT *aiopschatruntime.Runtime
 	)
+	humanApprovalBroker := newHumanApprovalBroker()
 	if kernel == managersvcaiops.KernelGraph {
-		rt, rterr := buildAIOpsRuntime(rootCtx, cfg, llmClient, llmRouter, toolsReg, aiopsRepo, mutatingProposalRepo, fbClient, edgeUC, deviceUC, reg, log, bootstrapSkillReg, bootstrapAgentReg, llmSettingsResolver)
+		rt, rterr := buildAIOpsRuntime(rootCtx, cfg, llmClient, llmRouter, toolsReg, aiopsRepo, mutatingProposalRepo, fbClient, edgeUC, deviceUC, reg, log, bootstrapSkillReg, bootstrapAgentReg, llmSettingsResolver, humanApprovalBroker)
 		if rterr != nil {
 			log.Warn("aiops runtime build failed — falling back to legacy kernel", slog.Any("err", rterr))
 			kernel = managersvcaiops.KernelLegacy
@@ -1539,14 +1540,16 @@ func main() {
 			// after 15s" and the coordinator loops trying to
 			// re-dispatch.
 			coordDepsFast := aiopstoolsdec.Deps{
-				Timeout:    15 * time.Second,
-				Limiter:    aiopstoolsdec.NewTokenBucketLimiter(0),
-				Registerer: reg,
+				Timeout:       15 * time.Second,
+				Limiter:       aiopstoolsdec.NewTokenBucketLimiter(0),
+				Registerer:    reg,
+				HumanApproval: humanApprovalBroker,
 			}
 			coordDepsDispatch := aiopstoolsdec.Deps{
-				Timeout:    180 * time.Second,
-				Limiter:    aiopstoolsdec.NewTokenBucketLimiter(0),
-				Registerer: reg,
+				Timeout:       180 * time.Second,
+				Limiter:       aiopstoolsdec.NewTokenBucketLimiter(0),
+				Registerer:    reg,
+				HumanApproval: humanApprovalBroker,
 			}
 			wrappedCoord := []aiopstoolsbase.BaseTool{
 				aiopstoolsdec.Wrap(aiopstools.NewAgentTool(chatruntimeSpawnerShim{rt: rt}, agentRegistryShim{inner: rt.AgentRegistry()}, log), coordDepsDispatch),
@@ -2078,6 +2081,8 @@ func main() {
 	// actions (agent cloud-shell, etc.). Additive — empty until a producer
 	// proposes; producers register their execute-on-approve executor.
 	approvalUC := managerbizapproval.NewUsecase(managerapprovaldata.NewRepo(db), log.With(slog.String("comp", "approval")))
+	humanApprovalBroker.SetUsecase(approvalUC)
+	approvalUC.RegisterExecutor(genericAgentToolApprovalKind, humanApprovalBroker.Execute)
 	approvalHandler := managerserverapproval.NewHandler(approvalUC)
 	// HLD-017 cloud_bash producer: register the execute-on-approve executor
 	// (resolve the bound credential → inject into the Runner sandbox → run)
@@ -2268,9 +2273,10 @@ func main() {
 			// a minute longer so the tool's own clean timeout blob wins over a
 			// decorator-imposed ErrToolTimeout. install_skill (same deps)
 			// still returns instantly, so the long bound is harmless there.
-			Timeout:    approvalWaitTimeout + time.Minute,
-			Limiter:    aiopstoolsdec.NewTokenBucketLimiter(0),
-			Registerer: reg,
+			Timeout:       approvalWaitTimeout + time.Minute,
+			Limiter:       aiopstoolsdec.NewTokenBucketLimiter(0),
+			Registerer:    reg,
+			HumanApproval: humanApprovalBroker,
 		}
 		// serve_page + messaging tools are registered AFTER buildAIOpsRuntime
 		// (SetPageStore / SetNotificationSender above), so like cloud_bash they're absent
@@ -2280,9 +2286,10 @@ func main() {
 		// First registration on reg here (not in the startup bag) → no
 		// double-register.
 		quickDeps := aiopstoolsdec.Deps{
-			Timeout:    60 * time.Second,
-			Limiter:    aiopstoolsdec.NewTokenBucketLimiter(0),
-			Registerer: reg,
+			Timeout:       60 * time.Second,
+			Limiter:       aiopstoolsdec.NewTokenBucketLimiter(0),
+			Registerer:    reg,
+			HumanApproval: humanApprovalBroker,
 		}
 		chatRT.AppendToolBag([]aiopstoolsbase.BaseTool{
 			aiopstoolsdec.Wrap(aiopstools.NewBashToolWithProposer(fbClient, edgeUC, deviceUC, hostBashProposerShim{uc: approvalUC}, log), cbDeps),
@@ -2310,9 +2317,10 @@ func main() {
 		// inbox. Best-effort per server — a slow/unreachable server is logged
 		// and skipped, never blocks boot.
 		mcpDeps := aiopstoolsdec.Deps{
-			Timeout:    90 * time.Second,
-			Limiter:    aiopstoolsdec.NewTokenBucketLimiter(0),
-			Registerer: reg,
+			Timeout:       90 * time.Second,
+			Limiter:       aiopstoolsdec.NewTokenBucketLimiter(0),
+			Registerer:    reg,
+			HumanApproval: humanApprovalBroker,
 		}
 		mcpCaller := mcpCallerShim{uc: mcpUC}
 		mcpProposer := mcpProposerShim{uc: approvalUC}
@@ -3409,6 +3417,135 @@ type chatruntimeReviewSpawner struct {
 	rt *aiopschatruntime.Runtime
 }
 
+const genericAgentToolApprovalKind = "agent_tool"
+
+type genericAgentToolApprovalPayload struct {
+	ExecutionToken string `json:"execution_token"`
+	ToolName       string `json:"tool_name"`
+	ArgsJSON       string `json:"args_json"`
+	Summary        string `json:"summary"`
+}
+
+// humanApprovalBroker is the composition-root bridge between the generic
+// tool decorator and the durable approval inbox. Each pending proposal owns
+// an in-memory, single-use executor that closes over the exact wrapped tool,
+// arguments and request context. A manager restart loses that capability and
+// therefore fails closed; it can never execute an unapproved reconstruction.
+type humanApprovalBroker struct {
+	mu      sync.Mutex
+	uc      *managerbizapproval.Usecase
+	pending map[string]aiopstoolsdec.HumanApprovalExecutor
+}
+
+func newHumanApprovalBroker() *humanApprovalBroker {
+	return &humanApprovalBroker{pending: make(map[string]aiopstoolsdec.HumanApprovalExecutor)}
+}
+
+func (b *humanApprovalBroker) SetUsecase(uc *managerbizapproval.Usecase) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.uc = uc
+}
+
+func (b *humanApprovalBroker) ProposeAndAwait(ctx context.Context, req aiopstoolsdec.HumanApprovalRequest, execute aiopstoolsdec.HumanApprovalExecutor) (string, error) {
+	if execute == nil {
+		return "", fmt.Errorf("human approval: executor is required")
+	}
+	token := uuid.NewString()
+	b.mu.Lock()
+	uc := b.uc
+	if uc != nil {
+		b.pending[token] = execute
+	}
+	b.mu.Unlock()
+	if uc == nil {
+		return "", fmt.Errorf("human approval: approval usecase not wired")
+	}
+	cleanup := func() {
+		b.mu.Lock()
+		delete(b.pending, token)
+		b.mu.Unlock()
+	}
+	a, err := uc.Propose(ctx, managerbizapproval.ProposeInput{
+		Kind:       genericAgentToolApprovalKind,
+		Title:      truncateApprovalTitle(req.ToolName + " confirmation"),
+		Summary:    req.Summary,
+		Payload:    genericAgentToolApprovalPayload{ExecutionToken: token, ToolName: req.ToolName, ArgsJSON: req.ArgsJSON, Summary: req.Summary},
+		Source:     "agent",
+		SessionID:  req.SessionID,
+		ProposedBy: req.UserID,
+	})
+	if err != nil {
+		cleanup()
+		return "", err
+	}
+	if emit := aiopschatruntime.EmitFromContext(ctx); emit != nil {
+		emit(aiopschatruntime.Event{
+			Type: aiopschatruntime.EventApprovalPending,
+			Approval: &aiopschatruntime.ApprovalPending{
+				ApprovalID: a.ID,
+				ToolCallID: req.ToolCallID,
+				Kind:       genericAgentToolApprovalKind,
+				ToolName:   req.ToolName,
+				Command:    req.Summary,
+			},
+		})
+	}
+
+	deadline := time.Now().Add(approvalWaitTimeout)
+	ticker := time.NewTicker(approvalPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			cleanup()
+			return `{"status":"cancelled","message":"The approval wait was interrupted; the action was not run."}`, nil
+		case <-ticker.C:
+			row, getErr := uc.Get(ctx, a.ID)
+			if getErr != nil {
+				continue
+			}
+			switch row.Status {
+			case "executed", "failed":
+				cleanup()
+				if row.ResultJSON != nil {
+					return *row.ResultJSON, nil
+				}
+				return fmt.Sprintf(`{"status":%q}`, row.Status), nil
+			case "rejected":
+				cleanup()
+				return `{"status":"rejected","message":"The user rejected this action; it was not run. Do not retry it without new instructions."}`, nil
+			}
+			if time.Now().After(deadline) {
+				cleanup()
+				return `{"status":"timeout","message":"No approval within 30 minutes; the action was not run."}`, nil
+			}
+		}
+	}
+}
+
+func (b *humanApprovalBroker) Execute(ctx context.Context, payloadJSON string) (string, error) {
+	var payload genericAgentToolApprovalPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return "", fmt.Errorf("decode generic tool approval: %w", err)
+	}
+	b.mu.Lock()
+	execute := b.pending[payload.ExecutionToken]
+	delete(b.pending, payload.ExecutionToken)
+	b.mu.Unlock()
+	if execute == nil {
+		return "", fmt.Errorf("approved tool execution is no longer available; retry the request")
+	}
+	return execute(ctx)
+}
+
+func truncateApprovalTitle(title string) string {
+	if len(title) > 100 {
+		return title[:100] + "…"
+	}
+	return title
+}
+
 func (s *chatruntimeReviewSpawner) SetRuntime(rt *aiopschatruntime.Runtime) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -3676,6 +3813,7 @@ func buildAIOpsRuntime(
 	skillReg *aiopschatruntime.SkillRegistry,
 	agentReg *aiopschatruntime.AgentRegistry,
 	resolver *managerbizsetting.LLMSettingsResolver,
+	humanApproval aiopstoolsdec.HumanApprovalProposer,
 ) (*aiopschatruntime.Runtime, error) {
 	// 1. RoutingChatModel — one inner per provider that exists. We
 	//    layer providerInjectingClient around the existing
@@ -3812,6 +3950,7 @@ func buildAIOpsRuntime(
 		Registerer:    reg,
 		ReviewSpawner: reviewSpawner,
 		ReviewSink:    reviewSink,
+		HumanApproval: humanApproval,
 	}
 	wrapped := make([]aiopstoolsbase.BaseTool, 0, len(baseTools))
 	for _, t := range baseTools {
@@ -4366,6 +4505,7 @@ func (s cloudBashProposerShim) ProposeAndAwait(ctx context.Context, command stri
 				ApprovalID:  a.ID,
 				ToolCallID:  toolCallID,
 				Kind:        "cloud_bash",
+				ToolName:    aiopstools.ToolNameCloudBash,
 				Command:     command,
 				Credentials: credentials,
 			},
@@ -4402,6 +4542,7 @@ func (s hostBashProposerShim) ProposeAndAwait(ctx context.Context, deviceIDs []u
 				ApprovalID: a.ID,
 				ToolCallID: toolCallID,
 				Kind:       "host_bash",
+				ToolName:   aiopstools.ToolNameBash,
 				Command:    fmt.Sprintf("device_ids=%v %s", deviceIDs, command),
 			},
 		})
@@ -4444,6 +4585,7 @@ func (s k8sActionProposerShim) ProposeAndAwait(ctx context.Context, args aiopsto
 				ApprovalID: a.ID,
 				ToolCallID: toolCallID,
 				Kind:       aiopstools.ToolNameExecuteK8sAction,
+				ToolName:   aiopstools.ToolNameExecuteK8sAction,
 				Command:    command,
 			},
 		})
@@ -4454,6 +4596,7 @@ func (s k8sActionProposerShim) ProposeAndAwait(ctx context.Context, args aiopsto
 				ApprovalID: a.ID,
 				ToolCallID: toolCallID,
 				Kind:       aiopstools.ToolNameExecuteK8sAction,
+				ToolName:   aiopstools.ToolNameExecuteK8sAction,
 				Command:    command,
 			},
 		})

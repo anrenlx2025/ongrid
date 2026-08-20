@@ -185,6 +185,9 @@ func TestCapturePCAPToolRequiresExplicitOrStructuredTargetConfirmation(t *testin
 	if _, err := tool.InvokableRun(context.Background(), args, basetool.WithConfirmedDeviceIDs([]uint64{24})); err != nil {
 		t.Fatalf("structured device selection should permit capture: %v", err)
 	}
+	if _, err := tool.InvokableRun(context.Background(), args, basetool.WithHumanApproval(true)); err != nil {
+		t.Fatalf("shared approval gate should permit its frozen target: %v", err)
+	}
 }
 
 func TestCapturePCAPToolCreatesRepeatedMembersInOneSession(t *testing.T) {

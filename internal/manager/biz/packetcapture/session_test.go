@@ -309,3 +309,18 @@ func TestUpdateSessionAnalysisKeepsActiveCaptureCollecting(t *testing.T) {
 		t.Fatalf("state = %q, want collecting", detail.Session.State)
 	}
 }
+
+func TestUpdateSessionAnalysisMarksEmptySessionFailed(t *testing.T) {
+	repo := &sessionTestRepo{fakeRepo: newFakeRepo(), sessions: map[string]*model.Session{}}
+	session := &model.Session{ID: 1, PublicID: "pcap-session-empty", State: model.SessionStateCollecting}
+	repo.sessions[session.PublicID] = session
+	uc := New(repo, &fakeCaller{}, sessionResolver{}, nil)
+
+	detail, err := uc.updateSessionAnalysis(context.Background(), session.PublicID)
+	if err != nil {
+		t.Fatalf("update session analysis: %v", err)
+	}
+	if detail.Session.State != model.SessionStateFailed {
+		t.Fatalf("state = %q, want failed", detail.Session.State)
+	}
+}

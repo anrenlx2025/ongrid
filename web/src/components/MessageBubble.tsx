@@ -196,7 +196,7 @@ function ToolCallSummaryBlock({
   // plain result blob — the human confirms right here, no inbox detour.
   const approval = pendingApproval(call.result);
   if (approval) {
-    return <PendingApprovalCard approvalID={approval.id} kind={approval.kind} command={argCommandText(call.arguments)} />;
+    return <PendingApprovalCard approvalID={approval.id} kind={approval.kind} toolName={approval.toolName || call.name} command={approval.command || argCommandText(call.arguments)} />;
   }
   const operation = !isError ? operationFromToolResult(call.result) : null;
   if (operation) {
@@ -878,11 +878,16 @@ function Dot({ delay }: { delay: number }) {
 
 // pendingApproval returns the approval metadata when a tool result is the
 // approval "pending_approval" envelope, else null.
-function pendingApproval(result: unknown): { id: string; kind: string } | null {
+function pendingApproval(result: unknown): { id: string; kind: string; toolName: string; command: string } | null {
   if (result && typeof result === 'object') {
     const r = result as Record<string, unknown>;
     if (r.status === 'pending_approval' && typeof r.approval_id === 'string') {
-      return { id: r.approval_id, kind: typeof r.kind === 'string' ? r.kind : 'cloud_bash' };
+      return {
+        id: r.approval_id,
+        kind: typeof r.kind === 'string' ? r.kind : 'cloud_bash',
+        toolName: typeof r.tool_name === 'string' ? r.tool_name : '',
+        command: typeof r.command === 'string' ? r.command : '',
+      };
     }
   }
   return null;
@@ -896,16 +901,17 @@ function argCommandText(args: unknown): string {
   return '';
 }
 
-// PendingApprovalCard renders an in-conversation approve/reject prompt for a
-// proposed cloud_bash command. Approve runs the command (the backend executor
-// runs synchronously) and shows the result inline; reject discards it.
-function PendingApprovalCard({ approvalID, kind, command }: { approvalID: string; kind: string; command: string }) {
+// PendingApprovalCard renders the shared in-conversation approve/reject
+// prompt. Approve runs the frozen tool candidate (the backend executor runs
+// synchronously) and shows the result inline; reject discards it.
+function PendingApprovalCard({ approvalID, kind, toolName, command }: { approvalID: string; kind: string; toolName: string; command: string }) {
   const { tr } = useI18n();
   const [state, setState] = useState<'loading' | 'idle' | 'busy' | 'done' | 'rejected' | 'error' | 'stale'>('loading');
   const [resultText, setResultText] = useState('');
   const [errText, setErrText] = useState('');
   const [cmd, setCmd] = useState(command);
   const [approvalKind, setApprovalKind] = useState(kind);
+  const [approvedToolName, setApprovedToolName] = useState(toolName);
   const [creds, setCreds] = useState<string[]>([]);
   const isHostBash = approvalKind === 'host_bash';
 
@@ -924,8 +930,9 @@ function PendingApprovalCard({ approvalID, kind, command }: { approvalID: string
         if (!alive) return;
         setApprovalKind(a.kind || approvalKind);
         try {
-          const p = JSON.parse(a.payload) as { command?: string; credentials?: string[] };
-          if (!cmd && p.command) setCmd(p.command);
+          const p = JSON.parse(a.payload) as { command?: string; credentials?: string[]; tool_name?: string; summary?: string };
+          if (!cmd && (p.command || p.summary)) setCmd(p.command ?? p.summary ?? '');
+          if (p.tool_name) setApprovedToolName(p.tool_name);
           if (Array.isArray(p.credentials)) setCreds(p.credentials.filter(Boolean));
         } catch {
           /* payload not JSON — leave placeholder */
@@ -987,12 +994,14 @@ function PendingApprovalCard({ approvalID, kind, command }: { approvalID: string
         <span className="font-medium text-zinc-200">
           {isHostBash
             ? tr('需要你确认才能在边端主机执行', 'Needs your approval to run on the edge host')
-            : tr('需要你确认才能在云端执行', 'Needs your approval to run in the cloud')}
+            : approvalKind === 'cloud_bash'
+              ? tr('需要你确认才能在云端执行', 'Needs your approval to run in the cloud')
+              : tr(`需要你确认才能执行 ${approvedToolName}`, `Needs your approval to run ${approvedToolName}`)}
         </span>
       </div>
       <div className="px-3 pb-2.5">
         <pre className="mb-2 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-zinc-950 p-2 text-[11px] text-zinc-300">
-          {cmd || tr('(命令)', '(command)')}
+          {cmd || tr('(待执行操作)', '(proposed action)')}
         </pre>
         {creds.length > 0 && (
           <div className="mb-2 flex flex-wrap items-center gap-1 text-[11px] text-zinc-400">

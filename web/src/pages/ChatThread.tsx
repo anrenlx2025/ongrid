@@ -139,9 +139,7 @@ export default function ChatThreadPage() {
           if (cancelled) return;
           if (!initial && submittingRef.current) return;
           const items = r.items ?? [];
-          const pending = (ap.items ?? []).filter(
-            (a) => a.session_id === sessionId && (a.kind === 'cloud_bash' || a.kind === 'host_bash'),
-          );
+          const pending = (ap.items ?? []).filter((a) => a.session_id === sessionId);
           const merged = pending.length
             ? [...items, ...pending.map(approvalCardMessage)]
             : items;
@@ -326,7 +324,8 @@ export default function ChatThreadPage() {
             );
           },
           onApprovalPending: (a) => {
-            // HLD-021: cloud_bash is now blocking on a human decision. Drive
+            // HLD-021: a confirmation-gated tool is blocking on a human
+            // decision. Drive
             // the inline approve/reject card from this live frame by stamping
             // a synthetic pending_approval result onto the tool call's
             // existing streaming card (keyed by tool_call_id) — the same blob
@@ -338,11 +337,12 @@ export default function ChatThreadPage() {
               status: 'pending_approval',
               approval_id: a.approval_id,
               kind: a.kind ?? 'cloud_bash',
+              tool_name: a.tool_name,
               command: a.command,
               credentials: a.credentials,
             };
             const args = a.command ? { command: a.command } : undefined;
-            const toolName = a.kind === 'host_bash' ? 'host_bash' : 'cloud_bash';
+            const toolName = a.tool_name ?? a.kind ?? 'cloud_bash';
             setMessages((prev) => {
               const targetId = a.tool_call_id ? toolCardId(a.tool_call_id) : '';
               const idx = targetId ? prev.findIndex((m) => m.id === targetId) : -1;
@@ -470,16 +470,18 @@ export default function ChatThreadPage() {
     return `tool-card-${toolCallId}`;
   }
 
-  // approvalCardMessage rebuilds a pending command approval (from the
+  // approvalCardMessage rebuilds a pending tool approval (from the
   // inbox) into the same synthetic tool card the live SSE path renders, so a
   // user who refreshed mid-wait still sees approve/reject. PendingApprovalCard
   // self-reconciles via getApproval, so a since-decided one resolves cleanly.
   function approvalCardMessage(a: Approval): ChatMessage {
     let command = '';
+    let toolName = a.kind || 'cloud_bash';
     let credentials: string[] = [];
     try {
-      const p = JSON.parse(a.payload) as { command?: string; credentials?: string[] };
-      command = p.command ?? '';
+      const p = JSON.parse(a.payload) as { command?: string; credentials?: string[]; tool_name?: string; summary?: string };
+      command = p.command ?? p.summary ?? '';
+      toolName = p.tool_name ?? toolName;
       credentials = Array.isArray(p.credentials) ? p.credentials.filter(Boolean) : [];
     } catch {
       /* payload not JSON — card recovers command via getApproval on mount */
@@ -490,10 +492,10 @@ export default function ChatThreadPage() {
       kind: 'tool_card',
       tool_call: {
         id: a.id,
-        name: a.kind === 'host_bash' ? 'host_bash' : 'cloud_bash',
+        name: toolName,
         status: 'pending',
         arguments: command ? { command } : undefined,
-        result: { status: 'pending_approval', approval_id: a.id, kind: a.kind, command, credentials },
+        result: { status: 'pending_approval', approval_id: a.id, kind: a.kind, tool_name: toolName, command, credentials },
       },
     };
   }

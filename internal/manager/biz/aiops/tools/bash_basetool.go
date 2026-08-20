@@ -217,11 +217,12 @@ func NewBashToolWithProposer(c Caller, e *edgebiz.Usecase, d *devicebiz.Usecase,
 // preset rejects writes at the edge.
 func (t *BashTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 	return &basetool.ToolInfo{
-		Name:        ToolNameBash,
-		Description: BashDescription,
-		WhenToUse:   bashWhenToUse,
-		Parameters:  BashSchema,
-		Class:       "read",
+		Name:         ToolNameBash,
+		Description:  BashDescription,
+		WhenToUse:    bashWhenToUse,
+		Parameters:   BashSchema,
+		Class:        "read",
+		Confirmation: basetool.ConfirmationSelfManaged,
 	}, nil
 }
 

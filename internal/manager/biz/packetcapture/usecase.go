@@ -506,7 +506,13 @@ func (u *Usecase) Refresh(ctx context.Context, id uint64) (*model.Capture, error
 		if processed, processErr := u.ingestCompletedCapture(ctx, refreshed); processErr == nil && processed != nil {
 			return processed, nil
 		} else if processErr != nil {
-			u.discardFailedCapture(ctx, refreshed, processErr)
+			latest, preserveErr := u.preserveFailedIngestion(ctx, refreshed.ID, processErr)
+			if preserveErr != nil {
+				return nil, fmt.Errorf("packet capture: preserve failed artifact: %w", preserveErr)
+			}
+			if latest != nil && latest.State == model.StateReady && latest.ParsedJSON != "" {
+				return latest, nil
+			}
 			return nil, fmt.Errorf("packet capture: publish artifact: %w", processErr)
 		}
 	}
@@ -594,68 +600,98 @@ func (u *Usecase) Stop(ctx context.Context, id uint64) (*model.Capture, error) {
 }
 
 func (u *Usecase) ingestCompletedCapture(ctx context.Context, capture *model.Capture) (*model.Capture, error) {
-	if capture == nil || capture.ID == 0 || capture.RawObjectKey != "" {
+	if capture == nil || capture.ID == 0 || capture.ParsedJSON != "" || capture.State == model.StateParsing {
 		return capture, nil
 	}
 	if u.rawStore == nil {
 		return capture, nil
 	}
-	edgeCaptureID := edgeCaptureIDFromResolved(capture.ResolvedTargetJSON)
-	if edgeCaptureID == "" {
+	if capture.RawObjectKey == "" && edgeCaptureIDFromResolved(capture.ResolvedTargetJSON) == "" {
 		return capture, nil
 	}
-	body, err := json.Marshal(tunnel.PacketCaptureReadRequest{
-		CaptureID: edgeCaptureID,
-		MaxBytes:  capture.MaxBytes,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("packet capture: marshal read request: %w", err)
-	}
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	respBody, err := u.caller.Call(callCtx, capture.EdgeID, tunnel.MethodReadPacketCapture, body)
-	if err != nil {
-		return nil, fmt.Errorf("packet capture: read raw object from edge: %w", err)
-	}
-	var edgeRaw tunnel.PacketCaptureReadResponse
-	if err := json.Unmarshal(respBody, &edgeRaw); err != nil {
-		return nil, fmt.Errorf("packet capture: decode raw object response: %w", err)
-	}
-	data, err := base64.StdEncoding.DecodeString(edgeRaw.DataBase64)
-	if err != nil {
-		return nil, fmt.Errorf("packet capture: decode raw object: %w", err)
-	}
-	if uint64(len(data)) != edgeRaw.SizeBytes {
-		return nil, fmt.Errorf("%w: packet capture raw size mismatch", errs.ErrInvalid)
-	}
-	sum := sha256.Sum256(data)
-	sha256Hex := hex.EncodeToString(sum[:])
-	if edgeRaw.SHA256Hex != "" && !strings.EqualFold(edgeRaw.SHA256Hex, sha256Hex) {
-		return nil, fmt.Errorf("%w: packet capture raw checksum mismatch", errs.ErrInvalid)
-	}
-	key, savedSHA, size, err := u.rawStore.Save(ctx, capture.ID, data)
-	if err != nil {
-		return nil, err
-	}
-	raw := RawObject{Key: key, SHA256Hex: savedSHA, SizeBytes: size, Data: data}
-	if err := u.repo.SetRawObject(ctx, capture.ID, raw.Key, raw.SHA256Hex, raw.SizeBytes); err != nil {
+	// ready -> parsing 是解析所有权的唯一入口。轮询、停止请求和后台协调器
+	// 即使同时看到 edge succeeded，也只能有一个调用方读取并解析 PCAP。
+	if err := u.repo.Transition(ctx, capture.ID, []string{model.StateReady}, model.StateParsing, nil); err != nil {
+		if errors.Is(err, errs.ErrConflict) {
+			return u.repo.Get(ctx, capture.ID)
+		}
 		return nil, err
 	}
 	refreshed, err := u.repo.Get(ctx, capture.ID)
 	if err != nil {
 		return nil, err
 	}
+	if refreshed.ParsedJSON != "" {
+		return refreshed, nil
+	}
+
+	var raw RawObject
+	if refreshed.RawObjectKey != "" {
+		data, readErr := u.rawStore.Read(ctx, refreshed.RawObjectKey)
+		if readErr != nil {
+			return nil, fmt.Errorf("packet capture: read retained raw object: %w", readErr)
+		}
+		sum := sha256.Sum256(data)
+		sha256Hex := hex.EncodeToString(sum[:])
+		if refreshed.RawSHA256 != "" && !strings.EqualFold(refreshed.RawSHA256, sha256Hex) {
+			return nil, fmt.Errorf("%w: packet capture raw checksum mismatch", errs.ErrInvalid)
+		}
+		raw = RawObject{Key: refreshed.RawObjectKey, SHA256Hex: sha256Hex, SizeBytes: uint64(len(data)), Data: data}
+	} else {
+		edgeCaptureID := edgeCaptureIDFromResolved(refreshed.ResolvedTargetJSON)
+		if edgeCaptureID == "" {
+			return refreshed, nil
+		}
+		body, marshalErr := json.Marshal(tunnel.PacketCaptureReadRequest{
+			CaptureID: edgeCaptureID,
+			MaxBytes:  refreshed.MaxBytes,
+		})
+		if marshalErr != nil {
+			return nil, fmt.Errorf("packet capture: marshal read request: %w", marshalErr)
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		respBody, callErr := u.caller.Call(callCtx, refreshed.EdgeID, tunnel.MethodReadPacketCapture, body)
+		if callErr != nil {
+			return nil, fmt.Errorf("packet capture: read raw object from edge: %w", callErr)
+		}
+		var edgeRaw tunnel.PacketCaptureReadResponse
+		if unmarshalErr := json.Unmarshal(respBody, &edgeRaw); unmarshalErr != nil {
+			return nil, fmt.Errorf("packet capture: decode raw object response: %w", unmarshalErr)
+		}
+		data, decodeErr := base64.StdEncoding.DecodeString(edgeRaw.DataBase64)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("packet capture: decode raw object: %w", decodeErr)
+		}
+		if uint64(len(data)) != edgeRaw.SizeBytes {
+			return nil, fmt.Errorf("%w: packet capture raw size mismatch", errs.ErrInvalid)
+		}
+		sum := sha256.Sum256(data)
+		sha256Hex := hex.EncodeToString(sum[:])
+		if edgeRaw.SHA256Hex != "" && !strings.EqualFold(edgeRaw.SHA256Hex, sha256Hex) {
+			return nil, fmt.Errorf("%w: packet capture raw checksum mismatch", errs.ErrInvalid)
+		}
+		key, savedSHA, size, saveErr := u.rawStore.Save(ctx, capture.ID, data)
+		if saveErr != nil {
+			return nil, saveErr
+		}
+		raw = RawObject{Key: key, SHA256Hex: savedSHA, SizeBytes: size, Data: data}
+		if setErr := u.repo.SetRawObject(ctx, capture.ID, raw.Key, raw.SHA256Hex, raw.SizeBytes); setErr != nil {
+			return nil, setErr
+		}
+		refreshed, err = u.repo.Get(ctx, capture.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if u.parser == nil {
 		return nil, fmt.Errorf("%w: packet parser is required to publish an artifact", errs.ErrNotWiredYet)
-	}
-	if err := u.repo.Transition(ctx, capture.ID, []string{model.StateReady}, model.StateParsing, nil); err != nil {
-		return refreshed, err
 	}
 	parsed, err := u.parser.Parse(ctx, refreshed, raw)
 	if err != nil {
 		return nil, fmt.Errorf("packet capture: parse raw object: %w", err)
 	}
-	artifactID := strings.TrimSpace(capture.ArtifactID)
+	artifactID := strings.TrimSpace(refreshed.ArtifactID)
 	if artifactID == "" {
 		return nil, fmt.Errorf("%w: packet artifact id required", errs.ErrInvalid)
 	}
@@ -668,9 +704,26 @@ func (u *Usecase) ingestCompletedCapture(ctx context.Context, capture *model.Cap
 		return nil, err
 	}
 	if err := u.repo.Transition(ctx, capture.ID, []string{model.StateParsing}, model.StateReady, nil); err != nil {
+		if errors.Is(err, errs.ErrConflict) {
+			latest, getErr := u.repo.Get(ctx, capture.ID)
+			if getErr == nil && latest.State == model.StateReady && latest.ParsedJSON != "" {
+				return latest, nil
+			}
+		}
 		return nil, err
 	}
 	return u.repo.Get(ctx, capture.ID)
+}
+
+func (u *Usecase) preserveFailedIngestion(ctx context.Context, captureID uint64, cause error) (*model.Capture, error) {
+	fields := map[string]any{
+		"error_code":   "artifact_publish_failed",
+		"error_detail": cause.Error(),
+	}
+	if err := u.repo.Transition(ctx, captureID, []string{model.StateParsing}, model.StateFailed, fields); err != nil && !errors.Is(err, errs.ErrConflict) {
+		return nil, err
+	}
+	return u.repo.Get(ctx, captureID)
 }
 
 func (u *Usecase) discardFailedCapture(ctx context.Context, capture *model.Capture, cause error) {
@@ -842,9 +895,5 @@ func refreshableStates() []string {
 		model.StateDispatching,
 		model.StateCapturing,
 		model.StateUploading,
-		model.StateParsing,
-		model.StateReady,
-		model.StateFailed,
-		model.StateCancelled,
 	}
 }

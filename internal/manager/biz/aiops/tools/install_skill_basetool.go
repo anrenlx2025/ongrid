@@ -79,11 +79,12 @@ const installSkillWhenToUse = "当用户在对话里给出一个技能的源地�
 // human approval.
 func (t *InstallSkillTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 	return &basetool.ToolInfo{
-		Name:        ToolNameInstallSkill,
-		Description: "Install a skill from a source URL the user provided (git repo / tarball / skills.sh link); queued for human approval before it installs.",
-		WhenToUse:   installSkillWhenToUse,
-		Parameters:  InstallSkillSchema,
-		Class:       "destructive",
+		Name:         ToolNameInstallSkill,
+		Description:  "Install a skill from a source URL the user provided (git repo / tarball / skills.sh link); queued for human approval before it installs.",
+		WhenToUse:    installSkillWhenToUse,
+		Parameters:   InstallSkillSchema,
+		Class:        "destructive",
+		Confirmation: basetool.ConfirmationSelfManaged,
 	}, nil
 }
 

@@ -19,19 +19,20 @@ import (
 // fakeTool is a minimal BaseTool stub for decorator unit tests. It
 // records calls and lets the test plant a result/error.
 type fakeTool struct {
-	name       string
-	desc       string
-	whenToUse  string
-	params     json.RawMessage
-	class      string
-	result     string
-	err        error
-	delay      time.Duration
-	calls      int32
-	gotArgs    string
-	gotOpts    basetool.Resolved
-	infoErr    error
-	respectCtx bool
+	name         string
+	desc         string
+	whenToUse    string
+	params       json.RawMessage
+	class        string
+	confirmation string
+	result       string
+	err          error
+	delay        time.Duration
+	calls        int32
+	gotArgs      string
+	gotOpts      basetool.Resolved
+	infoErr      error
+	respectCtx   bool
 }
 
 func (f *fakeTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
@@ -39,11 +40,12 @@ func (f *fakeTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 		return nil, f.infoErr
 	}
 	return &basetool.ToolInfo{
-		Name:        f.name,
-		Description: f.desc,
-		WhenToUse:   f.whenToUse,
-		Parameters:  f.params,
-		Class:       f.class,
+		Name:         f.name,
+		Description:  f.desc,
+		WhenToUse:    f.whenToUse,
+		Parameters:   f.params,
+		Class:        f.class,
+		Confirmation: f.confirmation,
 	}, nil
 }
 

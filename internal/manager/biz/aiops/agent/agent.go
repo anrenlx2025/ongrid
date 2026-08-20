@@ -111,6 +111,7 @@ type ApprovalPendingEvent struct {
 	ApprovalID  string
 	ToolCallID  string
 	Kind        string
+	ToolName    string
 	Command     string
 	Credentials []string
 }

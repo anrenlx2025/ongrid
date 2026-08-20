@@ -567,7 +567,10 @@ function PacketAnalysisView({ capture, ready, tr }: { capture: PacketCapture; re
   const streams = packetStreams(packets);
   const visiblePackets = packets.filter((packet) => packetMatchesQuery(packet, filter));
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950">
+    <div
+      data-testid="packet-analysis-view"
+      className="flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain rounded-lg border border-zinc-800 bg-zinc-950 [@media(min-height:900px)]:overflow-hidden"
+    >
       <div className="grid shrink-0 grid-cols-[minmax(260px,1fr)_auto] items-center gap-3 border-b border-zinc-800 bg-zinc-900 px-3 py-2">
         <div className="flex min-w-0 items-center gap-2 rounded border border-zinc-700 bg-zinc-950 px-2">
           <Search size={13} className="shrink-0 text-zinc-500" />
@@ -608,7 +611,7 @@ function PacketAnalysisView({ capture, ready, tr }: { capture: PacketCapture; re
       {capture.error_detail ? (
         <div className="shrink-0 border-b border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">{capture.error_detail}</div>
       ) : null}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-zinc-950">
+      <div className="flex min-h-0 flex-none flex-col overflow-visible bg-zinc-950 [@media(min-height:900px)]:flex-1 [@media(min-height:900px)]:overflow-hidden">
         <div className="shrink-0 overflow-hidden border-b border-zinc-800">
           <div className="flex h-8 items-center justify-between border-b border-zinc-800 bg-zinc-900 px-3 font-mono text-[11px] text-zinc-500">
             <span>Packet List</span>
@@ -664,7 +667,7 @@ function PacketAnalysisView({ capture, ready, tr }: { capture: PacketCapture; re
             </table>
           </div>
         </div>
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(150px,62fr)_minmax(100px,38fr)] overflow-hidden">
+        <div className="grid h-[440px] shrink-0 grid-rows-[minmax(220px,1fr)_minmax(180px,1fr)] overflow-hidden [@media(min-height:900px)]:h-auto [@media(min-height:900px)]:min-h-0 [@media(min-height:900px)]:flex-1 [@media(min-height:900px)]:grid-rows-[minmax(150px,62fr)_minmax(100px,38fr)]">
           <PacketProtocolTree packet={selected} tr={tr} />
           <PacketHexView packet={selected} tr={tr} />
         </div>

@@ -347,8 +347,8 @@ func TestEinoToolAdapter_QueryPromQLUsesStrictCallCap(t *testing.T) {
 	ctx := context.Background()
 	limit := maxCallsForTool("query_promql")
 
-	if limit != 4 {
-		t.Fatalf("query_promql limit = %d, want 4", limit)
+	if limit != 10 {
+		t.Fatalf("query_promql limit = %d, want 10", limit)
 	}
 	for i := 0; i < limit; i++ {
 		out, _ := a.InvokableRun(ctx, fmt.Sprintf(`{"q":"m%d"}`, i))
@@ -371,13 +371,14 @@ func TestEinoToolAdapter_QueryPromQLUsesStrictCallCap(t *testing.T) {
 func TestEinoToolAdapter_ReadToolsUseGenericCallCap(t *testing.T) {
 	t.Parallel()
 	for name, wantLimit := range map[string]int{
-		"AgentTool":             4,
-		"query_logql":           4,
-		"query_traceql":         4,
-		"host_bash":             4,
+		"AgentTool":             maxToolCallsPerRun,
+		"query_logql":           maxToolCallsPerRun,
+		"query_traceql":         maxToolCallsPerRun,
+		"host_bash":             maxToolCallsPerRun,
 		"host_du_summary":       maxToolCallsPerRun,
 		"host_find_large_files": maxToolCallsPerRun,
-		"query_k8s_snapshot":    4,
+		"query_k8s_snapshot":    maxToolCallsPerRun,
+		"ToolSearch":            maxToolCallsPerRun,
 	} {
 		name := name
 		wantLimit := wantLimit
@@ -397,8 +398,8 @@ func TestEinoToolAdapter_ReadToolsUseGenericCallCap(t *testing.T) {
 				}
 			}
 			out, _ := a.InvokableRun(ctx, `{"q":"over"}`)
-			if !strings.Contains(out, "call_budget_exceeded") || !strings.Contains(out, "final_answer_required") {
-				t.Fatalf("past %s cap should require final answer, got %q", name, out)
+			if !strings.Contains(out, "call_budget_exceeded") || !strings.Contains(out, `"final_answer_required":false`) {
+				t.Fatalf("past %s cap should block only that tool, got %q", name, out)
 			}
 			if got := inner.calls.Load(); got != int32(limit) {
 				t.Fatalf("%s executions = %d, want %d", name, got, limit)
@@ -444,31 +445,23 @@ func TestEinoToolAdapter_PerToolCallCapReservesBeforeConcurrentExecution(t *test
 	}
 }
 
-func TestEinoToolAdapter_TotalCallCapStopsWideInvestigation(t *testing.T) {
+func TestEinoToolAdapter_DoesNotCapAggregateToolCalls(t *testing.T) {
 	t.Parallel()
 	memo := newToolMemo()
 	ctx := context.Background()
 	var executed int32
-	for i := 0; i < maxTotalToolCallsPerRun; i++ {
+	const distinctTools = 24
+	for i := 0; i < distinctTools; i++ {
 		inner := &concurrentCountTool{name: fmt.Sprintf("tool_%02d", i), class: "read"}
 		a := &einoToolAdapter{inner: inner, memo: memo}
 		out, _ := a.InvokableRun(ctx, `{}`)
 		if strings.Contains(out, "call_budget_exceeded") {
-			t.Fatalf("tool %d should execute before total cap, got %s", i, out)
+			t.Fatalf("distinct tool %d was blocked by an aggregate cap: %s", i, out)
 		}
 		executed += inner.calls.Load()
 	}
-	over := &concurrentCountTool{name: "tool_over", class: "read"}
-	a := &einoToolAdapter{inner: over, memo: memo}
-	out, _ := a.InvokableRun(ctx, `{}`)
-	if !strings.Contains(out, "call_budget_exceeded") {
-		t.Fatalf("over total cap should return budget result, got %q", out)
-	}
-	if over.calls.Load() != 0 {
-		t.Fatalf("over total cap tool executed %d times, want 0", over.calls.Load())
-	}
-	if executed != int32(maxTotalToolCallsPerRun) {
-		t.Fatalf("executed before cap = %d, want %d", executed, maxTotalToolCallsPerRun)
+	if executed != distinctTools {
+		t.Fatalf("executed = %d, want all %d distinct tools", executed, distinctTools)
 	}
 }
 

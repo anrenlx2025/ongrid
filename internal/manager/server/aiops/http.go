@@ -725,6 +725,7 @@ func eventPayload(sessionID string, e agent.Event) any {
 			"approval_id":  e.Approval.ApprovalID,
 			"tool_call_id": e.Approval.ToolCallID,
 			"kind":         e.Approval.Kind,
+			"tool_name":    e.Approval.ToolName,
 			"command":      e.Approval.Command,
 		}
 		if len(e.Approval.Credentials) > 0 {

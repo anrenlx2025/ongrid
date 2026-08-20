@@ -16,6 +16,8 @@ import (
 	"math/big"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +32,67 @@ type fakeRepo struct {
 	nextID uint64
 	byID   map[uint64]*model.Capture
 	byKey  map[string]*model.Capture
+}
+
+type lockedRepo struct {
+	mu          sync.Mutex
+	repo        *fakeRepo
+	deleteCalls int
+}
+
+func newLockedRepo() *lockedRepo { return &lockedRepo{repo: newFakeRepo()} }
+
+func (r *lockedRepo) Create(ctx context.Context, capture *model.Capture) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.repo.Create(ctx, capture)
+}
+func (r *lockedRepo) Get(ctx context.Context, id uint64) (*model.Capture, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.repo.Get(ctx, id)
+}
+func (r *lockedRepo) GetByArtifactID(ctx context.Context, artifactID string) (*model.Capture, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.repo.GetByArtifactID(ctx, artifactID)
+}
+func (r *lockedRepo) GetByIdempotencyKey(ctx context.Context, key string) (*model.Capture, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.repo.GetByIdempotencyKey(ctx, key)
+}
+func (r *lockedRepo) List(ctx context.Context, filter ListFilter) ([]*model.Capture, int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.repo.List(ctx, filter)
+}
+func (r *lockedRepo) Delete(ctx context.Context, id uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deleteCalls++
+	return r.repo.Delete(ctx, id)
+}
+func (r *lockedRepo) Transition(ctx context.Context, id uint64, from []string, to string, fields map[string]any) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.repo.Transition(ctx, id, from, to, fields)
+}
+func (r *lockedRepo) SetRawObject(ctx context.Context, id uint64, objectKey, sha256Hex string, sizeBytes uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.repo.SetRawObject(ctx, id, objectKey, sha256Hex, sizeBytes)
+}
+func (r *lockedRepo) SetParsedArtifact(ctx context.Context, id uint64, artifactID, parsedJSON string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.repo.SetParsedArtifact(ctx, id, artifactID, parsedJSON)
+}
+
+func (r *lockedRepo) deleted() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.deleteCalls
 }
 
 func (r *fakeRepo) GetByArtifactID(_ context.Context, artifactID string) (*model.Capture, error) {
@@ -303,6 +366,23 @@ type fakeParser struct {
 	err    error
 }
 
+type blockingParser struct {
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (p *blockingParser) Parse(_ context.Context, capture *model.Capture, raw RawObject) (ParsedArtifact, error) {
+	if p.calls.Add(1) == 1 {
+		close(p.started)
+	}
+	<-p.release
+	return ParsedArtifact{
+		Summary: map[string]any{"packets_seen": 1, "bytes_seen": raw.SizeBytes},
+		Packets: []map[string]any{{"number": 1, "protocol": "TCP", "info": capture.InterfaceName}},
+	}, nil
+}
+
 func (p *fakeParser) Parse(_ context.Context, capture *model.Capture, raw RawObject) (ParsedArtifact, error) {
 	p.called = true
 	if p.err != nil {
@@ -341,6 +421,17 @@ type fakeCaller struct {
 	state            string
 	livePayloadBytes int64
 	livePreview      []string
+}
+
+type lockedCaller struct {
+	mu     sync.Mutex
+	caller *fakeCaller
+}
+
+func (c *lockedCaller) Call(ctx context.Context, edgeID uint64, method string, body []byte) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.caller.Call(ctx, edgeID, method, body)
 }
 
 func (c *fakeCaller) Call(_ context.Context, edgeID uint64, method string, body []byte) ([]byte, error) {
@@ -668,7 +759,7 @@ func TestUsecaseRefreshStoresParsedArtifact(t *testing.T) {
 	}
 }
 
-func TestUsecaseRefreshWhenParserFailsReturnsFailedCapture(t *testing.T) {
+func TestUsecaseRefreshWhenParserFailsPreservesFailedCapture(t *testing.T) {
 	repo := newFakeRepo()
 	caller := &fakeCaller{state: "succeeded"}
 	store, err := NewLocalRawStore(t.TempDir())
@@ -687,12 +778,16 @@ func TestUsecaseRefreshWhenParserFailsReturnsFailedCapture(t *testing.T) {
 	if err == nil {
 		t.Fatal("Refresh expected parser error")
 	}
-	if _, getErr := repo.Get(context.Background(), created.Capture.ID); !errors.Is(getErr, errs.ErrNotFound) {
-		t.Fatalf("Get after parser failure = %v, want not found", getErr)
+	failed, getErr := repo.Get(context.Background(), created.Capture.ID)
+	if getErr != nil {
+		t.Fatalf("Get after parser failure: %v", getErr)
+	}
+	if failed.State != model.StateFailed || failed.RawObjectKey == "" || failed.ErrorCode != "artifact_publish_failed" {
+		t.Fatalf("failed capture not preserved: %+v", failed)
 	}
 }
 
-func TestUsecaseRefreshParserFailureDeletesRawObject(t *testing.T) {
+func TestUsecaseRefreshParserFailureRetainsRawObject(t *testing.T) {
 	repo := newFakeRepo()
 	caller := &fakeCaller{state: "succeeded"}
 	store, err := NewLocalRawStore(t.TempDir())
@@ -715,8 +810,72 @@ func TestUsecaseRefreshParserFailureDeletesRawObject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("raw artifact retained after parser failure: %+v", entries)
+	if len(entries) != 1 {
+		t.Fatalf("raw artifact count after parser failure = %d, want 1", len(entries))
+	}
+}
+
+func TestUsecaseConcurrentRefreshPublishesArtifactOnce(t *testing.T) {
+	repo := newLockedRepo()
+	caller := &lockedCaller{caller: &fakeCaller{state: "succeeded"}}
+	store, err := NewLocalRawStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalRawStore: %v", err)
+	}
+	parser := &blockingParser{started: make(chan struct{}), release: make(chan struct{})}
+	uc := New(repo, caller, fakeResolver{edgeID: 9}, nil)
+	uc.SetRawStore(store)
+	uc.SetParser(parser)
+
+	created, err := uc.Create(context.Background(), CreateInput{DeviceID: 3, Interface: "eth0"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	errsCh := make(chan error, 2)
+	go func() {
+		_, refreshErr := uc.Refresh(context.Background(), created.Capture.ID)
+		errsCh <- refreshErr
+	}()
+	select {
+	case <-parser.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first refresh did not enter parser")
+	}
+	go func() {
+		_, refreshErr := uc.Refresh(context.Background(), created.Capture.ID)
+		errsCh <- refreshErr
+	}()
+
+	select {
+	case refreshErr := <-errsCh:
+		if refreshErr != nil {
+			t.Fatalf("overlapping Refresh: %v", refreshErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("overlapping refresh waited on the active parser")
+	}
+	close(parser.release)
+	select {
+	case refreshErr := <-errsCh:
+		if refreshErr != nil {
+			t.Fatalf("publishing Refresh: %v", refreshErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("publishing refresh did not finish")
+	}
+
+	if got := parser.calls.Load(); got != 1 {
+		t.Fatalf("parser calls = %d, want 1", got)
+	}
+	if got := repo.deleted(); got != 0 {
+		t.Fatalf("delete calls = %d, want 0", got)
+	}
+	final, err := repo.Get(context.Background(), created.Capture.ID)
+	if err != nil {
+		t.Fatalf("Get final capture: %v", err)
+	}
+	if final.State != model.StateReady || final.ParsedJSON == "" || final.RawObjectKey == "" {
+		t.Fatalf("final capture not published: %+v", final)
 	}
 }
 
