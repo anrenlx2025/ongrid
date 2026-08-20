@@ -88,6 +88,20 @@ func (u *Usecase) Update(ctx context.Context, id uint64, description string, fie
 	return u.repo.Update(ctx, id, sealed, strings.TrimSpace(description))
 }
 
+// CreateManaged stores a fresh credential owned by another Manager bounded
+// context. It is an in-process-only capability used when a product form accepts
+// a write-only secret directly. Callers generate a new name for every rotation
+// so a failed config save cannot mutate an in-use credential.
+func (u *Usecase) CreateManaged(ctx context.Context, name, credType, description string, fields map[string]string) error {
+	name = strings.TrimSpace(name)
+	credType = strings.TrimSpace(credType)
+	if name == "" || credType == "" {
+		return fmt.Errorf("%w: managed credential name and type are required", errs.ErrInvalid)
+	}
+	_, err := u.Create(ctx, name, credType, description, fields)
+	return err
+}
+
 // Delete removes a credential.
 func (u *Usecase) Delete(ctx context.Context, id uint64) error { return u.repo.Delete(ctx, id) }
 

@@ -38,6 +38,9 @@ func TestSearchRequestNormalizeAndValidate_RejectsUnsafeInputs(t *testing.T) {
 		{"unknown_field", func(r *SearchRequest) {
 			r.Filters = []FieldFilter{{Field: "_index", Operator: FilterEqual, Values: []string{"secret"}}}
 		}, "not allowed"},
+		{"severity_is_not_a_field", func(r *SearchRequest) {
+			r.Filters = []FieldFilter{{Field: "severity", Operator: FilterEqual, Values: []string{"ERROR"}}}
+		}, "not allowed"},
 		{"bad_limit", func(r *SearchRequest) { r.Limit = MaxSearchLimit + 1 }, "limit"},
 		{"equal_requires_one_value", func(r *SearchRequest) {
 			r.Filters = []FieldFilter{{Field: "service_name", Operator: FilterEqual, Values: []string{"api", "worker"}}}
@@ -57,9 +60,14 @@ func TestSearchRequestNormalizeAndValidate_RejectsUnsafeInputs(t *testing.T) {
 }
 
 func TestAllowedFields_DoNotExposeElasticsearchIndexControls(t *testing.T) {
+	names := map[string]bool{}
 	for _, field := range AllowedFields() {
+		names[field.Name] = true
 		if strings.HasPrefix(field.Name, "_") || field.Name == "elasticsearch.index" {
 			t.Fatalf("unsafe field exposed: %q", field.Name)
 		}
+	}
+	if !names["level"] || names["severity"] {
+		t.Fatalf("allowed fields = %#v, want level and no severity", names)
 	}
 }

@@ -269,6 +269,13 @@ func (t *TunnelConfigFetcher) withKubernetesLogsDefaults(cfg PluginConfig) Plugi
 	if _, ok := spec["enable_journald"]; !ok {
 		spec["enable_journald"] = false
 	}
+	// Node-local CRI logs already carry namespace, Pod UID/name, container,
+	// restart count, and node metadata from the container parser and the
+	// Downward API. Do not let a stale Manager spec make every Node Agent use
+	// cluster-wide Kubernetes API permissions for k8sattributes enrichment.
+	// Central telemetry gateway collectors retain their separate, explicit
+	// k8sattributes configuration and ServiceAccount.
+	spec["enable_k8sattributes"] = false
 	cfg.Spec = spec
 	return cfg
 }

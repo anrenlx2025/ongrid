@@ -1,11 +1,12 @@
-// Package logs owns the external log backend control plane and the dynamic
-// query planner. It never receives log payloads from Edge collectors.
+// Package logs owns the external log backend control plane and active-backend
+// query routing. It never receives log payloads from Edge collectors.
 package logs
 
 import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -26,10 +27,13 @@ import (
 )
 
 const (
-	DefaultBackendName  = "external-elasticsearch"
-	SecretSlotESAPIKey  = "elasticsearch_api_key"
-	maxCAPEMBytes       = 256 << 10
-	maxBackendEndpoints = 8
+	DefaultBackendName      = "external-elasticsearch"
+	SecretSlotESAPIKey      = "elasticsearch_api_key"
+	managedLogsSecretPrefix = "ongrid-managed-logs-es-"
+	elasticsearchCredType   = "elasticsearch"
+	maxAPIKeyBytes          = 16 << 10
+	maxCAPEMBytes           = 256 << 10
+	maxBackendEndpoints     = 8
 )
 
 var (
@@ -42,7 +46,6 @@ type Repo interface {
 	GetBackend(ctx context.Context, id uint64) (*model.Backend, error)
 	LatestBackend(ctx context.Context) (*model.Backend, error)
 	ActiveBackend(ctx context.Context) (*model.Backend, error)
-	ListQueryBackends(ctx context.Context) ([]*model.Backend, error)
 	BeginRollout(ctx context.Context, backend *model.Backend, assignments []*model.BackendAssignment) error
 	BeginRollback(ctx context.Context, backend *model.Backend, assignments []*model.BackendAssignment) error
 	ActivateBackend(ctx context.Context, id uint64, version string, cutover time.Time) error
@@ -60,6 +63,15 @@ type Repo interface {
 // authenticated plugin-secret RPC.
 type SecretResolver interface {
 	ResolveFields(ctx context.Context, name string) (map[string]string, error)
+}
+
+// ManagedSecretStore is implemented by Manager's encrypted credential vault.
+// It is intentionally an in-process capability rather than an HTTP API: direct
+// API keys submitted with a log backend are write-only request fields and are
+// converted to ordinary credential references before the backend is persisted.
+type ManagedSecretStore interface {
+	SecretResolver
+	CreateManaged(ctx context.Context, name, credType, description string, fields map[string]string) error
 }
 
 type RolloutNotifier interface {
@@ -88,8 +100,11 @@ type SaveInput struct {
 	QueryEndpoint      string   `json:"query_endpoint"`
 	Dataset            string   `json:"dataset"`
 	Namespace          string   `json:"namespace"`
-	WriteCredentialRef string   `json:"write_credential_ref"`
-	QueryCredentialRef string   `json:"query_credential_ref"`
+	WriteCredentialRef string   `json:"write_credential_ref,omitempty"`
+	QueryCredentialRef string   `json:"query_credential_ref,omitempty"`
+	WriteAPIKey        string   `json:"write_api_key,omitempty"`
+	QueryAPIKey        string   `json:"query_api_key,omitempty"`
+	ReuseWriteAPIKey   bool     `json:"reuse_write_api_key,omitempty"`
 	CAPEM              string   `json:"ca_pem,omitempty"`
 	PreserveCA         bool     `json:"preserve_ca,omitempty"`
 	KibanaURL          string   `json:"kibana_url,omitempty"`
@@ -109,6 +124,8 @@ type BackendView struct {
 	ID                  uint64                     `json:"id"`
 	Name                string                     `json:"name"`
 	Type                model.BackendType          `json:"type"`
+	CurrentBackend      string                     `json:"current_backend"`
+	CurrentBackendID    uint64                     `json:"current_backend_id,omitempty"`
 	Status              model.BackendStatus        `json:"status"`
 	Generation          uint64                     `json:"generation"`
 	WriteEndpoints      []string                   `json:"write_endpoints"`
@@ -202,11 +219,82 @@ func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (*BackendView,
 	if err != nil {
 		return nil, err
 	}
-	if err := s.requireAPIKey(ctx, normalized.WriteCredentialRef); err != nil {
-		return nil, fmt.Errorf("%w: invalid write credential", errs.ErrInvalid)
+	previous, loadErr := s.repo.LatestBackend(ctx)
+	if loadErr != nil && !errors.Is(loadErr, errs.ErrNotFound) {
+		return nil, loadErr
 	}
-	if err := s.requireAPIKey(ctx, normalized.QueryCredentialRef); err != nil {
-		return nil, fmt.Errorf("%w: invalid query credential", errs.ErrInvalid)
+
+	generation := uint64(1)
+	editableInPlace := false
+	if loadErr == nil {
+		generation = previous.Generation
+		switch previous.Status {
+		case model.BackendStatusDraft, model.BackendStatusDistributing,
+			model.BackendStatusVerifying, model.BackendStatusDegraded:
+			// A not-yet-active revision remains editable in place. The active
+			// revision (if any) keeps serving queries and Edge configs.
+			editableInPlace = true
+		default:
+			generation++
+		}
+	}
+
+	writeRef := normalized.WriteCredentialRef
+	queryRef := normalized.QueryCredentialRef
+	if loadErr == nil {
+		// Direct key fields are write-only. An empty value means "keep the
+		// current key", so clients never need to fetch plaintext to edit the
+		// non-sensitive parts of an existing backend.
+		if writeRef == "" {
+			writeRef = previous.WriteCredentialRef
+		}
+		if queryRef == "" {
+			queryRef = previous.QueryCredentialRef
+		}
+	}
+	writeKey := normalized.WriteAPIKey
+	if writeKey == "" {
+		if writeRef == "" {
+			return nil, fmt.Errorf("%w: write API key or credential ref is required", errs.ErrInvalid)
+		}
+		writeKey, err = s.apiKey(ctx, writeRef)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid write credential", errs.ErrInvalid)
+		}
+	}
+	queryKey := normalized.QueryAPIKey
+	if normalized.ReuseWriteAPIKey {
+		queryKey = writeKey
+	} else if queryKey == "" {
+		if queryRef == "" {
+			return nil, fmt.Errorf("%w: query API key or credential ref is required", errs.ErrInvalid)
+		}
+		queryKey, err = s.apiKey(ctx, queryRef)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid query credential", errs.ErrInvalid)
+		}
+	}
+	// Resolve and compare every effective key before mutating a managed vault
+	// row. A rejected request must not rotate a credential still referenced by
+	// the current draft.
+	if !normalized.ReuseWriteAPIKey && subtle.ConstantTimeCompare([]byte(writeKey), []byte(queryKey)) == 1 {
+		return nil, fmt.Errorf("%w: write and query API keys must differ unless reuse_write_api_key is enabled", errs.ErrInvalid)
+	}
+
+	if normalized.WriteAPIKey != "" {
+		writeRef, err = s.storeManagedAPIKey(ctx, "write", writeKey, generation)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if normalized.ReuseWriteAPIKey || normalized.QueryAPIKey != "" {
+		queryRef, err = s.storeManagedAPIKey(ctx, "query", queryKey, generation)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if writeRef == queryRef {
+		return nil, fmt.Errorf("%w: write and query credentials must be different", errs.ErrInvalid)
 	}
 
 	endpointsJSON, err := json.Marshal(normalized.WriteEndpoints)
@@ -217,19 +305,18 @@ func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (*BackendView,
 		Name:               normalized.Name,
 		Type:               model.BackendTypeElasticsearch,
 		Status:             model.BackendStatusDraft,
-		Generation:         1,
+		Generation:         generation,
 		WriteEndpointsJSON: string(endpointsJSON),
 		QueryEndpoint:      normalized.QueryEndpoint,
 		Dataset:            normalized.Dataset,
 		Namespace:          normalized.Namespace,
 		IndexPattern:       indexPattern(normalized.Namespace),
-		WriteCredentialRef: normalized.WriteCredentialRef,
-		QueryCredentialRef: normalized.QueryCredentialRef,
+		WriteCredentialRef: writeRef,
+		QueryCredentialRef: queryRef,
 		CAPEM:              normalized.CAPEM,
 		KibanaURL:          normalized.KibanaURL,
 		TLSInsecure:        normalized.TLSInsecure,
 	}
-	previous, loadErr := s.repo.LatestBackend(ctx)
 	if normalized.PreserveCA && normalized.CAPEM == "" {
 		if loadErr != nil {
 			if errors.Is(loadErr, errs.ErrNotFound) {
@@ -239,20 +326,9 @@ func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (*BackendView,
 		}
 		backend.CAPEM = previous.CAPEM
 	}
-	if loadErr == nil {
-		backend.Generation = previous.Generation
-		switch previous.Status {
-		case model.BackendStatusDraft, model.BackendStatusDistributing,
-			model.BackendStatusVerifying, model.BackendStatusDegraded:
-			// A not-yet-active revision remains editable in place. The active
-			// revision (if any) keeps serving queries and Edge configs.
-			backend.ID = previous.ID
-			backend.CreatedAt = previous.CreatedAt
-		default:
-			backend.Generation++
-		}
-	} else if !errors.Is(loadErr, errs.ErrNotFound) {
-		return nil, loadErr
+	if editableInPlace {
+		backend.ID = previous.ID
+		backend.CreatedAt = previous.CreatedAt
 	}
 	if err := s.repo.SaveBackend(ctx, backend); err != nil {
 		return nil, err
@@ -753,16 +829,18 @@ func (s *Service) backendForEdgeGeneration(ctx context.Context, edgeID, generati
 	}
 	if active.Status == model.BackendStatusRollingBack {
 		assignment, assignmentErr := s.repo.GetAssignment(ctx, active.ID, edgeID)
-		if assignmentErr != nil {
-			if errors.Is(assignmentErr, errs.ErrNotFound) {
-				return nil, nil, errs.ErrForbidden
-			}
+		if assignmentErr != nil && !errors.Is(assignmentErr, errs.ErrNotFound) {
 			return nil, nil, assignmentErr
 		}
-		if assignment.DesiredGeneration != generation || assignment.Status == model.AssignmentStatusFailed {
-			return nil, nil, errs.ErrForbidden
+		if assignmentErr == nil && assignment.DesiredGeneration == generation && assignment.Status != model.AssignmentStatusFailed {
+			return active, assignment, nil
 		}
-		return active, assignment, nil
+		// Elasticsearch remains the authoritative backend until every Loki
+		// rollback probe succeeds. A missing or failed rollback assignment must
+		// not prevent an authenticated Edge from re-fetching that active
+		// generation after a restart; MarkApplied still rejects it because the
+		// assignment returned here is nil.
+		return active, nil, nil
 	}
 	return active, nil, nil
 }
@@ -1124,9 +1202,34 @@ func (s *Service) apiKey(ctx context.Context, ref string) (string, error) {
 	return key, nil
 }
 
-func (s *Service) requireAPIKey(ctx context.Context, ref string) error {
-	_, err := s.apiKey(ctx, ref)
-	return err
+func (s *Service) storeManagedAPIKey(ctx context.Context, role, apiKey string, generation uint64) (string, error) {
+	store, ok := s.secrets.(ManagedSecretStore)
+	if !ok {
+		return "", errors.New("encrypted log backend credential storage is unavailable")
+	}
+	// A directly pasted key always gets a new isolated reference. The backend
+	// row is switched only after both keys validate and are stored, so a failed
+	// save cannot rotate the credential referenced by the current generation.
+	name, err := newManagedLogsSecretName(role, generation)
+	if err != nil {
+		return "", fmt.Errorf("generate managed Elasticsearch credential name: %w", err)
+	}
+	description := fmt.Sprintf("Managed by Ongrid logs backend (%s key, generation %d)", role, generation)
+	if err := store.CreateManaged(ctx, name, elasticsearchCredType, description, map[string]string{"api_key": apiKey}); err != nil {
+		return "", fmt.Errorf("store managed Elasticsearch %s credential: %w", role, err)
+	}
+	return name, nil
+}
+
+func newManagedLogsSecretName(role string, generation uint64) (string, error) {
+	if role != "write" && role != "query" {
+		return "", fmt.Errorf("unsupported Elasticsearch credential role %q", role)
+	}
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s%s-g%d-%s", managedLogsSecretPrefix, role, generation, hex.EncodeToString(random)), nil
 }
 
 func (s *Service) newESClient(endpoint, pattern, apiKey string, backend *model.Backend) (*logquery.ElasticsearchClient, error) {
@@ -1147,12 +1250,21 @@ func (s *Service) view(ctx context.Context, backend *model.Backend) (*BackendVie
 	if err != nil {
 		return nil, err
 	}
+	currentBackend := "loki"
+	var currentBackendID uint64
+	active, activeErr := s.repo.ActiveBackend(ctx)
+	if activeErr == nil && active != nil {
+		currentBackend = string(active.Type)
+		currentBackendID = active.ID
+	} else if activeErr != nil && !errors.Is(activeErr, errs.ErrNotFound) {
+		return nil, activeErr
+	}
 	assignments, err := s.repo.ListAssignments(ctx, backend.ID)
 	if err != nil {
 		return nil, err
 	}
 	return &BackendView{
-		ID: backend.ID, Name: backend.Name, Type: backend.Type, Status: backend.Status,
+		ID: backend.ID, Name: backend.Name, Type: backend.Type, CurrentBackend: currentBackend, CurrentBackendID: currentBackendID, Status: backend.Status,
 		Generation: backend.Generation, WriteEndpoints: endpoints, QueryEndpoint: backend.QueryEndpoint,
 		Dataset: backend.Dataset, Namespace: backend.Namespace, IndexPattern: backend.IndexPattern,
 		WriteCredentialRef: backend.WriteCredentialRef, QueryCredentialRef: backend.QueryCredentialRef,
@@ -1244,11 +1356,19 @@ func normalizeSaveInput(input SaveInput) (SaveInput, error) {
 	}
 	input.WriteCredentialRef = strings.TrimSpace(input.WriteCredentialRef)
 	input.QueryCredentialRef = strings.TrimSpace(input.QueryCredentialRef)
-	if input.WriteCredentialRef == "" || input.QueryCredentialRef == "" {
-		return SaveInput{}, fmt.Errorf("%w: separate write and query credential refs are required", errs.ErrInvalid)
+	if len(input.WriteCredentialRef) > 128 || len(input.QueryCredentialRef) > 128 {
+		return SaveInput{}, fmt.Errorf("%w: credential ref too long", errs.ErrInvalid)
 	}
-	if input.WriteCredentialRef == input.QueryCredentialRef {
-		return SaveInput{}, fmt.Errorf("%w: write and query credentials must be different", errs.ErrInvalid)
+	input.WriteAPIKey, err = normalizeDirectAPIKey(input.WriteAPIKey)
+	if err != nil {
+		return SaveInput{}, fmt.Errorf("%w: invalid write_api_key", errs.ErrInvalid)
+	}
+	input.QueryAPIKey, err = normalizeDirectAPIKey(input.QueryAPIKey)
+	if err != nil {
+		return SaveInput{}, fmt.Errorf("%w: invalid query_api_key", errs.ErrInvalid)
+	}
+	if input.ReuseWriteAPIKey && input.QueryAPIKey != "" {
+		return SaveInput{}, fmt.Errorf("%w: query_api_key must be empty when reuse_write_api_key is enabled", errs.ErrInvalid)
 	}
 	input.CAPEM = strings.TrimSpace(input.CAPEM)
 	if len(input.CAPEM) > maxCAPEMBytes {
@@ -1268,6 +1388,20 @@ func normalizeSaveInput(input SaveInput) (SaveInput, error) {
 		}
 	}
 	return input, nil
+}
+
+func normalizeDirectAPIKey(raw string) (string, error) {
+	key := strings.TrimSpace(raw)
+	if len(key) >= len("ApiKey ") && strings.EqualFold(key[:len("ApiKey ")], "ApiKey ") {
+		key = strings.TrimSpace(key[len("ApiKey "):])
+	}
+	if len(key) > maxAPIKeyBytes {
+		return "", errors.New("API key too large")
+	}
+	if strings.ContainsAny(key, " \t\r\n") {
+		return "", errors.New("API key contains whitespace")
+	}
+	return key, nil
 }
 
 func normalizeHTTPSURL(raw string, allowHTTP, allowPath bool) (string, error) {

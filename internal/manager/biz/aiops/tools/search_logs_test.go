@@ -47,14 +47,15 @@ func TestSearchLogsRegisteredAndBackendNeutral(t *testing.T) {
 	out, err := registry.Invoke(context.Background(), ToolNameSearchLogs, json.RawMessage(`{
 		"keywords":["connection refused"],"match_mode":"phrase","device_ids":[42],
 		"nodes":["worker-a"],"units":["kubelet.service"],
-		"severities":["ERROR"],"start":"now-15m","limit":25
+		"levels":["ERROR"],"start":"now-15m","limit":25
 	}`))
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
 	if searcher.request.Keywords.Mode != logquery.MatchPhrase || len(searcher.request.Scope.DeviceIDs) != 1 || searcher.request.Scope.DeviceIDs[0] != 42 ||
 		len(searcher.request.Scope.Nodes) != 1 || searcher.request.Scope.Nodes[0] != "worker-a" ||
-		len(searcher.request.Scope.Units) != 1 || searcher.request.Scope.Units[0] != "kubelet.service" || searcher.request.Limit != 25 {
+		len(searcher.request.Scope.Units) != 1 || searcher.request.Scope.Units[0] != "kubelet.service" ||
+		len(searcher.request.Scope.Levels) != 1 || searcher.request.Scope.Levels[0] != "ERROR" || searcher.request.Limit != 25 {
 		t.Fatalf("request = %+v", searcher.request)
 	}
 	var result logquery.SearchResult

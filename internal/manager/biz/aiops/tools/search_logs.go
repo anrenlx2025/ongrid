@@ -15,7 +15,7 @@ import (
 const ToolNameSearchLogs = "search_logs"
 
 const SearchLogsDescription = "Search log content through Ongrid's backend-neutral log API. " +
-	"Use it for keyword, exact-phrase, severity, device, Kubernetes, service, or source-scoped investigations. " +
+	"Use it for keyword, exact-phrase, level, device, cluster, Kubernetes, service, or source-scoped investigations. " +
 	"It searches Loki history and Elasticsearch data without requiring LogQL or Elasticsearch DSL and returns normalized records."
 
 const searchLogsWhenToUse = "Use for production log content, errors, panic/fatal lines, service failures, or correlated trace IDs. " +
@@ -37,7 +37,7 @@ var SearchLogsSchema = json.RawMessage(`{
     "nodes": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
     "service_names": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
     "source_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
-    "severities": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+    "levels": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
     "files": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
     "units": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
     "start": {"type": "string", "description": "RFC3339 or relative time such as now-1h; defaults to now-1h."},
@@ -61,7 +61,7 @@ type SearchLogsArgs struct {
 	Nodes           []string `json:"nodes,omitempty"`
 	ServiceNames    []string `json:"service_names,omitempty"`
 	SourceIDs       []string `json:"source_ids,omitempty"`
-	Severities      []string `json:"severities,omitempty"`
+	Levels          []string `json:"levels,omitempty"`
 	Files           []string `json:"files,omitempty"`
 	Units           []string `json:"units,omitempty"`
 	Start           string   `json:"start,omitempty"`
@@ -156,7 +156,7 @@ func executeStructuredLogSearch(ctx context.Context, search logquery.Searcher, r
 		Scope: logquery.Scope{
 			DeviceIDs: in.DeviceIDs, ClusterIDs: in.ClusterIDs, Namespaces: in.Namespaces,
 			Workloads: in.Workloads, Pods: in.Pods, Containers: in.Containers, Nodes: in.Nodes,
-			ServiceNames: in.ServiceNames, SourceIDs: in.SourceIDs, Severities: in.Severities,
+			ServiceNames: in.ServiceNames, SourceIDs: in.SourceIDs, Levels: in.Levels,
 			Files: in.Files, Units: in.Units,
 		},
 	}

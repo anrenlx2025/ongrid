@@ -381,6 +381,24 @@ func TestRenderStandaloneGatewayUsesBoundedRemoteWritePipelines(t *testing.T) {
 	}
 }
 
+func TestLokiOTLPLogsEndpointSupportsDirectAndManagerTargets(t *testing.T) {
+	tests := map[string]string{
+		"https://manager.example.com/loki/api/v1/push":  "https://manager.example.com/loki/otlp/v1/logs",
+		"https://manager.example.com/loki/otlp/v1/logs": "https://manager.example.com/loki/otlp/v1/logs",
+		"https://loki.example.com/otlp/v1/logs":         "https://loki.example.com/otlp/v1/logs",
+		"https://loki.example.com/prefix":               "https://loki.example.com/prefix/otlp/v1/logs",
+	}
+	for input, want := range tests {
+		got, err := lokiOTLPLogsEndpoint(input)
+		if err != nil {
+			t.Fatalf("lokiOTLPLogsEndpoint(%q): %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("lokiOTLPLogsEndpoint(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestRenderTLSInsecureSkipVerifyDefaultsOn(t *testing.T) {
 	cfg := plugins.PluginConfig{
 		Enabled:  true,

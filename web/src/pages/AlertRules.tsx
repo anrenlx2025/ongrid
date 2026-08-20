@@ -1524,7 +1524,7 @@ function KindSpecificFields({
       { key: 'pods', label: 'pod', placeholder: 'api-server-7c9d...' },
       { key: 'containers', label: 'container', placeholder: 'api' },
       { key: 'service_names', label: 'service.name', placeholder: 'checkout' },
-      { key: 'severities', label: 'severity', placeholder: 'ERROR, WARN' },
+      { key: 'levels', label: 'level', placeholder: 'ERROR, WARN' },
       { key: 'source_ids', label: 'source', placeholder: 'journald, kubernetes' },
       { key: 'files', label: 'file', placeholder: '/var/log/app.log' },
     ];

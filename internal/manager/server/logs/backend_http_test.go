@@ -82,16 +82,20 @@ func TestPutBackendUsesStrictJSONAndCallsService(t *testing.T) {
 		"query_endpoint":"https://es-query.example",
 		"dataset":"ongrid.system",
 		"namespace":"prod",
-		"write_credential_ref":"write",
-		"query_credential_ref":"query"
+		"write_api_key":"direct-write-value",
+		"query_api_key":"direct-query-value"
 	}`))
 	goodRec := httptest.NewRecorder()
 	router.ServeHTTP(goodRec, good)
 	if goodRec.Code != http.StatusOK {
 		t.Fatalf("valid status=%d body=%s", goodRec.Code, goodRec.Body.String())
 	}
-	if svc.saved == nil || svc.saved.Dataset != "ongrid.system" || svc.saved.Namespace != "prod" {
+	if svc.saved == nil || svc.saved.Dataset != "ongrid.system" || svc.saved.Namespace != "prod" ||
+		svc.saved.WriteAPIKey != "direct-write-value" || svc.saved.QueryAPIKey != "direct-query-value" {
 		t.Fatalf("saved input = %+v", svc.saved)
+	}
+	if bytes.Contains(goodRec.Body.Bytes(), []byte("direct-write-value")) || bytes.Contains(goodRec.Body.Bytes(), []byte("direct-query-value")) {
+		t.Fatalf("response leaked a direct API key: %s", goodRec.Body.String())
 	}
 }
 

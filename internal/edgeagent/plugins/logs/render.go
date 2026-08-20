@@ -77,6 +77,7 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 	if mode == "kubernetes" && clusterID == "" {
 		return nil, errors.New("logs plugin: cluster_id required when mode=kubernetes")
 	}
+	clusterName := strings.TrimSpace(stringSpec(spec, "cluster_name"))
 	nodeName := strings.TrimSpace(stringSpec(spec, "node_name"))
 	startAt, err := startAtSpec(spec, "start_at", "end")
 	if err != nil {
@@ -141,7 +142,7 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 	}
 	sort.Strings(receiverIDs)
 
-	resourceActions, err := commonResourceActions(cfg, spec, clusterID, nodeName)
+	resourceActions, err := commonResourceActions(cfg, spec, clusterID, clusterName, nodeName)
 	if err != nil {
 		return nil, err
 	}
@@ -155,6 +156,7 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 	// records as well makes a bounded rollout fan-out deterministic and gives
 	// both adapters the same document vocabulary.
 	guardStatements = append(guardStatements,
+		`set(log.severity_text, log.attributes["level"]) where (log.severity_text == nil or log.severity_text == "") and log.attributes["level"] != nil`,
 		`set(resource.attributes["level"], log.severity_text) where log.severity_text != nil and log.severity_text != ""`,
 		`set(resource.attributes["filename"], log.attributes["log.file.path"]) where log.attributes["log.file.path"] != nil`,
 		`set(resource.attributes["unit"], log.attributes["systemd.unit"]) where log.attributes["systemd.unit"] != nil`,
@@ -180,7 +182,7 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 		},
 	}
 	baseProcessorIDs := []string{"memory_limiter/logs"}
-	if mode == "kubernetes" && boolSpecDefault(spec, "enable_k8sattributes", true) {
+	if mode == "kubernetes" && boolSpecDefault(spec, "enable_k8sattributes", false) {
 		processors["k8sattributes/logs"] = k8sAttributesProcessor()
 		baseProcessorIDs = append(baseProcessorIDs, "k8sattributes/logs")
 	}
@@ -300,9 +302,13 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 
 func journaldReceiver(spec map[string]interface{}, edgeID uint64, startAt string) map[string]interface{} {
 	resource := map[string]interface{}{"device_id": strconv.FormatUint(edgeID, 10), "ongrid_source": "journald"}
+	operators := resourceAddOperators(resource)
+	operators = append(operators, map[string]interface{}{
+		"id": "journald-message", "type": "move", "from": "body.MESSAGE", "to": "body",
+	})
 	receiver := map[string]interface{}{
 		"start_at": startAt, "storage": logsStorageExtension, "priority": "info",
-		"convert_message_bytes": true, "operators": resourceAddOperators(resource),
+		"convert_message_bytes": true, "operators": operators,
 		"retry_on_failure": receiverRetry(),
 	}
 	if units := normalizedStrings(stringSlice(spec, "journald_units"), 64); len(units) > 0 {
@@ -408,12 +414,18 @@ func resourceAddOperators(resource map[string]interface{}) []interface{} {
 	return operators
 }
 
-func commonResourceActions(cfg plugins.PluginConfig, spec map[string]interface{}, clusterID, nodeName string) ([]interface{}, error) {
+func commonResourceActions(cfg plugins.PluginConfig, spec map[string]interface{}, clusterID, clusterName, nodeName string) ([]interface{}, error) {
 	actions := []interface{}{
 		resourceAction("device_id", strconv.FormatUint(cfg.EdgeID, 10)),
 	}
 	if clusterID != "" {
 		actions = append(actions, resourceAction("cluster_id", clusterID))
+	}
+	if clusterName != "" {
+		if len(clusterName) > 1024 {
+			return nil, errors.New("logs plugin: cluster_name is too long")
+		}
+		actions = append(actions, resourceAction("cluster_name", clusterName))
 	}
 	if nodeName != "" {
 		actions = append(actions, resourceAction("k8s.node.name", nodeName))
@@ -428,7 +440,7 @@ func commonResourceActions(cfg plugins.PluginConfig, spec map[string]interface{}
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		if !resourceKeyRegex.MatchString(key) || strings.HasPrefix(key, "data_stream.") || key == "device_id" {
+		if !resourceKeyRegex.MatchString(key) || strings.HasPrefix(key, "data_stream.") || key == "device_id" || key == "cluster_id" || key == "cluster_name" {
 			return nil, fmt.Errorf("logs plugin: unsafe extra resource key %q", key)
 		}
 		if len(extra[key]) > 1024 {
@@ -617,11 +629,11 @@ func lokiOTLPLogsEndpoint(raw string) (string, error) {
 	switch {
 	case strings.HasSuffix(path, "/loki/api/v1/push"):
 		path = strings.TrimSuffix(path, "/loki/api/v1/push") + "/loki/otlp/v1/logs"
-	case strings.HasSuffix(path, "/loki/otlp/v1/logs"):
-	case strings.HasSuffix(path, "/loki/otlp"):
+	case strings.HasSuffix(path, "/otlp/v1/logs"):
+	case strings.HasSuffix(path, "/otlp"):
 		path += "/v1/logs"
 	default:
-		path += "/loki/otlp/v1/logs"
+		path += "/otlp/v1/logs"
 	}
 	parsed.Path, parsed.RawPath, parsed.RawQuery, parsed.Fragment = path, "", "", ""
 	return parsed.String(), nil

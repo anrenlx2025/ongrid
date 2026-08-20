@@ -431,11 +431,11 @@ func lokiOTLPLogsEndpoint(raw string) (string, error) {
 	switch {
 	case strings.HasSuffix(path, "/loki/api/v1/push"):
 		path = strings.TrimSuffix(path, "/loki/api/v1/push") + "/loki/otlp/v1/logs"
-	case strings.HasSuffix(path, "/loki/otlp/v1/logs"):
-	case strings.HasSuffix(path, "/loki/otlp"):
+	case strings.HasSuffix(path, "/otlp/v1/logs"):
+	case strings.HasSuffix(path, "/otlp"):
 		path += "/v1/logs"
 	default:
-		path += "/loki/otlp/v1/logs"
+		path += "/otlp/v1/logs"
 	}
 	parsed.Path, parsed.RawPath, parsed.RawQuery, parsed.Fragment = path, "", "", ""
 	return parsed.String(), nil

@@ -51,7 +51,7 @@ message LogScope {
   repeated string containers = 6;
   repeated string service_names = 7;
   repeated string source_ids = 8;
-  repeated string severities = 9;
+  repeated string levels = 9;
   repeated string files = 10;
 }
 

@@ -1,7 +1,6 @@
 package logs
 
 import (
-	"sort"
 	"testing"
 	"time"
 
@@ -9,61 +8,36 @@ import (
 	"github.com/ongridio/ongrid/internal/pkg/logquery"
 )
 
-func TestSearchPhasesRespectCutoverAndDirection(t *testing.T) {
+func TestBuildActiveQueryPhaseUsesOnlyCurrentBackend(t *testing.T) {
 	start := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
 	cutover := start.Add(30 * time.Minute)
 	end := start.Add(time.Hour)
 	backend := &logsmodel.Backend{ID: 7, Generation: 3, CutoverAt: &cutover}
 
-	forward := buildQueryPhases(start, end, []*logsmodel.Backend{backend})
-	if len(forward) != 2 || forward[0].backend != nil || forward[1].backend != backend {
-		t.Fatalf("forward phases = %#v", forward)
+	es := buildActiveQueryPhase(start, end, backend)
+	if es.backend != backend || es.name != "elasticsearch:7" {
+		t.Fatalf("Elasticsearch phase = %#v", es)
 	}
-	if !forward[0].end.Equal(cutover) || !forward[1].start.Equal(cutover) {
-		t.Fatalf("cutover boundaries = %#v", forward)
-	}
-
-	backward := append([]queryPhase(nil), forward...)
-	sort.SliceStable(backward, func(i, j int) bool { return backward[i].start.After(backward[j].start) })
-	if len(backward) != 2 || backward[0].backend != backend || backward[1].backend != nil {
-		t.Fatalf("backward phases = %#v", backward)
+	if !es.start.Equal(start) || !es.end.Equal(end) {
+		t.Fatalf("Elasticsearch phase does not own the full query window: %#v", es)
 	}
 
-	before := buildQueryPhases(start, cutover, []*logsmodel.Backend{backend})
-	if len(before) != 1 || before[0].backend != nil {
-		t.Fatalf("before-cutover phases = %#v", before)
+	loki := buildActiveQueryPhase(start, end, nil)
+	if loki.backend != nil || loki.name != "loki" {
+		t.Fatalf("Loki phase = %#v", loki)
 	}
-	afterStart := cutover.Add(time.Nanosecond)
-	after := buildQueryPhases(afterStart, end, []*logsmodel.Backend{backend})
-	if len(after) != 1 || after[0].backend != backend {
-		t.Fatalf("after-cutover phases = %#v", after)
+	if !loki.start.Equal(start) || !loki.end.Equal(end) {
+		t.Fatalf("Loki phase does not own the full query window: %#v", loki)
 	}
 }
 
-func TestBuildQueryPhasesRetainsMultipleRolledBackGenerations(t *testing.T) {
+func TestInactiveHistoricalBackendsAreNotPartOfActiveQueryPlan(t *testing.T) {
 	start := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
 	end := start.Add(2 * time.Hour)
-	firstStart, firstEnd := start.Add(20*time.Minute), start.Add(40*time.Minute)
-	secondStart, secondEnd := start.Add(time.Hour), start.Add(80*time.Minute)
-	first := &logsmodel.Backend{ID: 1, Generation: 1, CutoverAt: &firstStart, EndedAt: &firstEnd}
-	second := &logsmodel.Backend{ID: 2, Generation: 2, CutoverAt: &secondStart, EndedAt: &secondEnd}
-
-	phases := buildQueryPhases(start, end, []*logsmodel.Backend{second, first})
-	if len(phases) != 5 {
-		t.Fatalf("phases = %#v, want Loki/ES1/Loki/ES2/Loki", phases)
-	}
-	wantBackends := []uint64{0, 1, 0, 2, 0}
-	for i, want := range wantBackends {
-		var got uint64
-		if phases[i].backend != nil {
-			got = phases[i].backend.ID
-		}
-		if got != want {
-			t.Fatalf("phase[%d] backend = %d, want %d (%#v)", i, got, want, phases)
-		}
-	}
-	if !phases[1].end.Equal(firstEnd) || !phases[2].start.Equal(firstEnd) {
-		t.Fatalf("rollback boundary = %#v", phases)
+	active := &logsmodel.Backend{ID: 3, Generation: 4}
+	phase := buildActiveQueryPhase(start, end, active)
+	if phase.backend != active || phase.name != "elasticsearch:3" {
+		t.Fatalf("phase = %#v", phase)
 	}
 }
 

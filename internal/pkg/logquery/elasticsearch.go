@@ -19,7 +19,7 @@ import (
 const (
 	elasticsearchBackendName = "elasticsearch"
 	defaultESIndexPattern    = "logs-ongrid.*.otel-*"
-	defaultESKeepAlive       = time.Minute
+	defaultESKeepAlive       = 5 * time.Minute
 	maxESResponseBytes       = 16 * 1024 * 1024
 )
 
@@ -547,7 +547,7 @@ func elasticsearchFilterClausesWithStart(req SearchRequest, startOperator string
 	addTerms("node", req.Scope.Nodes)
 	addTerms("service_name", req.Scope.ServiceNames)
 	addTerms("source_id", req.Scope.SourceIDs)
-	addTerms("severity", req.Scope.Severities)
+	addTerms("level", req.Scope.Levels)
 	addTerms("file", req.Scope.Files)
 	addTerms("unit", req.Scope.Units)
 	return filters, nil
@@ -570,7 +570,7 @@ func decodeElasticsearchRecord(id string, raw json.RawMessage) (Record, error) {
 		Timestamp:          timestamp,
 		ObservedTimestamp:  observed,
 		Message:            stringify(lookupPath(source, "body.text")),
-		SeverityText:       stringify(lookupPath(source, "severity_text")),
+		SeverityText:       firstNonEmpty(stringify(lookupPath(source, "severity_text")), resources["level"]),
 		SeverityNumber:     int32Value(lookupPath(source, "severity_number")),
 		Backend:            elasticsearchBackendName,
 		Attributes:         attrs,

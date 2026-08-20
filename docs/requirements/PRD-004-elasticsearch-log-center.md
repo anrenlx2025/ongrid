@@ -19,6 +19,7 @@
 - 新增外部 Elasticsearch 8.16+ 日志后端，日志正文由 Edge 直接写入，Manager 不承载写入字节流。
 - 用 `otelcol-contrib` 替换 Promtail，同时保留 `logs` 插件名和现有控制通道。
 - 提供后端无关的日志查询 API，支持 Loki 与 Elasticsearch，并让页面不再拼接后端 DSL。
+- Loki 与 Elasticsearch 互斥启用；Edge 写入和日志中心查询始终指向同一个当前后端，不做跨后端联邦查询。
 - 支持关键字、短语、包含/排除、字段筛选、时间直方图、上下文和游标分页。
 - 保留内置 Loki 作为默认与回滚后端；Elasticsearch 故障时无需退回 Promtail。
 - 正常状态端到端日志可见延迟 P95 不超过 10 秒；15 分钟单集群查询 P95 不超过 3 秒。
@@ -27,16 +28,20 @@
 
 ### 外部 Elasticsearch 接入
 
-- 管理员可以保存写入 endpoint 列表、Manager 查询 endpoint、数据流 namespace、自定义 CA、写 API Key 和只读 API Key。
-- 写凭证与查询凭证必须分离；敏感值不可由读取 API 返回。
+- 管理员可以在日志后端表单中直接粘贴 Elasticsearch 创建接口返回的 encoded 写 API Key 和只读 API Key，无需先跳转到通用凭证页创建记录；设置页不再暴露通用凭证复用入口。
+- 直接提交的 Key 是只写字段：Manager 立即将其写入加密 secret vault，并只在 `log_backends` 保存托管引用；敏感值不可由读取 API 返回。空值表示保留当前 Key。
+- 生产模式下写凭证与查询凭证必须分离；兼容测试可显式复用同一个 Key，但 Manager 仍生成两个独立托管引用，且页面必须提示扩大权限的风险。
 - 激活前必须分别通过 Manager 查询探针和选定 Edge 的真实写入探针。
 - 后端状态包含草稿、分发中、验证中、已激活、降级和已回滚。
-- 每个 Edge 展示期望版本、已应用版本、最后写入成功时间和错误原因。
+- Manager 继续记录每个 Edge 的期望版本、已应用版本、最后写入成功时间和错误原因；设置页仅展示整体切换状态和可操作错误，不展示逐台验证列表或启用数量。
+- 从日志中心点击“采集与后端配置”进入集成设置时，日志集成必须置于页面首位并默认展示当前日志后端；从设置侧栏普通进入集成页时保留全局集成的默认排序。
+- 当前使用 Elasticsearch 时仍允许编辑配置，包括 Loki 回滚验证尚未完成、ES 仍保持权威的状态；保存修改必须创建下一代草稿，不隐式取消现有回滚，当前 generation 在后端切换完成前继续承担读写。
 
 ### 日志采集
 
 - Host 支持 journald 和多个独立文件源。
-- Kubernetes Node 支持 CRI 容器日志并补全 cluster、namespace、pod、container、node 和 workload 字段。
+- 普通 Host Edge 根据其 Device 在通用拓扑中的 `member_of` 关系，由 Manager 向采集配置注入稳定的 `cluster_id` 和 `cluster_name`；设备未绑定集群时不伪造集群字段。
+- Kubernetes Node 支持 CRI 容器日志，并在不访问 Kubernetes API 的前提下从日志路径和节点环境补全 cluster、namespace、pod、container 和 node；workload 字段仅在中央元数据补全可用时提供。
 - 每个文件源可以配置稳定 source id、service name、dataset、include/exclude、JSON/regex/plain parser 和 multiline。
 - Collector 重启后必须从持久化 file offset/journal cursor 继续读取。
 - 下游暂时失败时使用有界持久化发送队列，不允许无限占满系统盘或静默丢弃。
@@ -44,17 +49,19 @@
 ### 日志查询
 
 - 页面通过结构化查询请求搜索，不直接提交 Elasticsearch DSL 或新建 LogQL。
-- 支持设备、角色、集群、namespace、workload、pod、container、service、source、severity 和文件筛选。
+- 支持设备、角色、集群、namespace、pod、container、service、source、level 和文件筛选；workload 筛选依赖中央元数据补全能力。
+- 日志后端互斥，因此逐条日志和左侧字段面板不展示 `backend`；页面标题仍可展示当前启用后端。左侧字段面板展示 `level` 与通用拓扑集群。
 - 支持全文关键字、短语、包含任一/全部、排除关键字。
 - 支持时间直方图、字段名/字段值、上下文日志、游标分页、自动刷新和受限导出。
-- 灰度期间选定 Edge 有界双写当前权威后端和候选 ES，查询保持读取权威后端且无日志盲区；全局切换后按 `cutover_at/ended_at` 读取 Loki 和各历史 ES generation。
+- 时间直方图支持单击柱体下钻到该聚合粒度，也支持按住鼠标横向拖拽选择任意绝对时间窗；选中后立即重新查询、暂停实时模式，并可返回上一级时间范围。键盘用户仍可通过自定义起止时间完成同一操作。
+- 灰度期间选定 Edge 有界双写当前权威后端和候选 ES，查询保持读取权威后端且无日志盲区；全局切换后只查询新的当前后端，旧后端数据保留但不自动归并或迁移。
 
 ### 兼容功能
 
 - 新增后端无关 `search_logs` AIOps 工具；旧 `query_logql` 仅在 Loki 可用时保留。
 - 新增结构化日志匹配告警；原始 LogQL 规则标记为 Loki-only，存在未迁移启用规则时阻止 ES 全量激活。
 - Incident 日志关联消费统一日志结果，不再解析 Loki stream。
-- ES 模式默认跳转产品日志页；只有配置 Kibana URL 时显示 Discover 跳转。
+- ES 模式统一使用产品日志页，不依赖 Kibana，也不在默认设置页提供 Kibana 或自定义 CA 配置。
 
 ## 边界情况
 
@@ -108,11 +115,12 @@
 - [ ] Host journald、文件和 Kubernetes CRI 日志均可由 OTel 收集并写入 ES。
 - [ ] 抓包证明外部 ES 日志正文不经过 Manager。
 - [ ] 日志页面在 ES 下支持关键字、短语、字段筛选、直方图、上下文和游标分页。
+- [ ] 单击直方图柱体可查询对应 bucket；横向拖拽可查询所选绝对时间窗，选区、起止时间和返回上一级范围均有可见反馈。
 - [ ] Collector/Edge 重启后 offset/cursor 可恢复，文件轮转测试无从头回放。
 - [ ] 断网 30 分钟后队列续传，达到边界时有明确告警且不占满系统盘。
 - [ ] 写、读 API Key 不出现在数据库明文、普通快照、进程参数、环境变量、日志或 API 响应。
 - [ ] ES 激活前真实 Edge 写探针与 Manager 读探针均成功。
-- [ ] 迁移期间跨切换时间查询能归并 Loki 与 ES 数据。
+- [ ] 设置页明确展示当前日志后端，Loki/ES 切换只在全量真实写探针成功后生效；切换前后不产生同一查询内的跨后端归并。
 - [ ] 未迁移的启用 LogQL 告警会阻止 ES 全量激活。
 - [ ] ES 故障可在 5 分钟内将同一个 OTel 流水线切回内置 Loki。
 - [ ] AMD64/ARM64 配置校验、Go race 测试、前端测试、构建和深浅主题截图通过。
@@ -137,7 +145,7 @@ P0
 - [ ] Task 7：Loki native OTLP 与 Elasticsearch exporter。
 - [ ] Task 8：Logs UI 与设置页改造。
 - [ ] Task 9：告警、AIOps、Incident 和外部跳转解耦。
-- [ ] Task 10：灰度、历史查询、回滚、安装包和运维文档。
+- [ ] Task 10：灰度、互斥切换、回滚、安装包和运维文档。
 - [ ] Task 11：故障注入、E2E、性能与视觉验收。
 
 ## 变更记录
@@ -145,6 +153,12 @@ P0
 | 日期 | 变更人 | 变更内容 | 原因 |
 | --- | --- | --- | --- |
 | 2026-08-18 | Codex | 初始版本并进入开发 | 用户确认技术方案并要求实现 |
+| 2026-08-19 | Codex | 增加直方图单击下钻、拖拽选时与范围回退 | 用户要求补齐高级日志中心的时间钻取能力 |
+| 2026-08-20 | Codex | Loki 与 Elasticsearch 改为互斥启用，查询只读当前后端 | 外部 ES 启用时不再查询或展示内置 Loki 历史 |
+| 2026-08-20 | Codex | 精简日志后端设置页，隐藏 Edge 明细、凭证高级复用、自定义 CA 与 Kibana 配置 | 默认配置路径只保留启用日志后端所需字段 |
+| 2026-08-20 | Codex | 日志中心进入集成设置时将日志集成置顶 | 保留入口上下文，减少定位当前日志后端的滚动和认知成本 |
+| 2026-08-20 | Codex | 允许编辑当前 Elasticsearch 配置并保存为下一代草稿 | 配置编辑与运行中 generation 解耦，避免把当前后端误呈现为只读 |
+| 2026-08-20 | Codex | 普通 Host 日志携带拓扑集群，页面字段统一为 level/cluster 并隐藏逐条 backend | 对齐普通 Edge 集群绑定能力和互斥日志后端语义 |
 
 ## 上线后复盘
 

@@ -99,7 +99,10 @@ func TestTunnelConfigFetcherAppliesKubernetesLogsDefaults(t *testing.T) {
 	client := &fakeTunnelClient{resp: tunnel.GetPluginConfigsResponse{
 		EdgeID: 100,
 		Configs: map[string]tunnel.GetPluginConfigsEntry{
-			"logs": {Enabled: true, Endpoint: "https://127.0.0.1/loki/api/v1/push"},
+			"logs": {
+				Enabled: true, Endpoint: "https://127.0.0.1/loki/api/v1/push",
+				Spec: map[string]interface{}{"enable_k8sattributes": true},
+			},
 		},
 	}}
 	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
@@ -122,6 +125,7 @@ func TestTunnelConfigFetcherAppliesKubernetesLogsDefaults(t *testing.T) {
 	assertSpecEqual(t, cfg.Spec, "node_name", "kind-worker")
 	assertSpecEqual(t, cfg.Spec, "pod_log_path", "/var/log/pods/*/*/*.log")
 	assertSpecEqual(t, cfg.Spec, "enable_journald", false)
+	assertSpecEqual(t, cfg.Spec, "enable_k8sattributes", false)
 }
 
 func TestTunnelConfigFetcherNeverUsesTunnelEdgeIDAsDeviceLabel(t *testing.T) {
@@ -497,6 +501,7 @@ func TestTunnelConfigFetcherAppliesKubernetesDefaultsToEnvFallback(t *testing.T)
 	assertSpecEqual(t, cfg.Spec, "mode", "kubernetes")
 	assertSpecEqual(t, cfg.Spec, "cluster_id", "9")
 	assertSpecEqual(t, cfg.Spec, "node_name", "kind-worker")
+	assertSpecEqual(t, cfg.Spec, "enable_k8sattributes", false)
 }
 
 func TestTunnelConfigFetcherMaterializesExternalElasticsearchSecret(t *testing.T) {
@@ -680,6 +685,42 @@ func TestTunnelConfigFetcherMaterializesRollbackLokiCandidate(t *testing.T) {
 	}
 }
 
+func TestMaterializeLogsRuntimeUsesUniqueProbePathForSameGenerationRetry(t *testing.T) {
+	fetcher := NewTunnelConfigFetcher(nil, []string{"logs"})
+	fetcher.secretBaseDir = t.TempDir()
+
+	materialize := func(probeID string) (PluginConfig, string) {
+		t.Helper()
+		cfg, err := fetcher.materializeLogsRuntime(context.Background(), PluginConfig{Spec: map[string]interface{}{
+			"backend":            "builtin_loki",
+			"backend_generation": float64(1),
+			"log_probe_id":       probeID,
+		}})
+		if err != nil {
+			t.Fatalf("materialize probe %q: %v", probeID, err)
+		}
+		path, _ := cfg.Spec["log_probe_file"].(string)
+		if path == "" {
+			t.Fatalf("probe %q path is empty", probeID)
+		}
+		return cfg, path
+	}
+
+	firstID := "ongrid-log-probe-abcdefghijklmnopqrstuvwx"
+	secondID := "ongrid-log-probe-zyxwvutsrqponmlkjihgfedc"
+	_, firstPath := materialize(firstID)
+	_, secondPath := materialize(secondID)
+	if firstPath == secondPath {
+		t.Fatalf("same-generation retry reused probe path %q", firstPath)
+	}
+	if raw, err := os.ReadFile(firstPath); err != nil || string(raw) != firstID+"\n" {
+		t.Fatalf("first probe = %q, err=%v", raw, err)
+	}
+	if raw, err := os.ReadFile(secondPath); err != nil || string(raw) != secondID+"\n" {
+		t.Fatalf("second probe = %q, err=%v", raw, err)
+	}
+}
+
 func TestMaterializeGenerationFileRejectsRollbackAndSymlink(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "logs")
 	path := filepath.Join(dir, "elasticsearch_api_key")
@@ -697,6 +738,16 @@ func TestMaterializeGenerationFileRejectsRollbackAndSymlink(t *testing.T) {
 	}
 	if err := materializeGenerationFile(dir, path, 6, []byte("next")); err == nil {
 		t.Fatal("secret symlink was replaced")
+	}
+}
+
+func TestConfigApplyErrorClassIdentifiesSecretMaterializationFailure(t *testing.T) {
+	err := fmt.Errorf("write Elasticsearch API key: %w", os.ErrPermission)
+	if got := configApplyErrorClass(err); got != "secret_materialization_failed" {
+		t.Fatalf("configApplyErrorClass() = %q, want secret_materialization_failed", got)
+	}
+	if got := configApplyErrorClass(errors.New("collector readiness deadline exceeded")); got != "collector_not_ready" {
+		t.Fatalf("readiness configApplyErrorClass() = %q, want collector_not_ready", got)
 	}
 }
 

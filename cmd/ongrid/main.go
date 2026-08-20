@@ -95,6 +95,7 @@ import (
 	managermetricdata "github.com/ongridio/ongrid/internal/manager/data/metric/store"
 	managertopologydata "github.com/ongridio/ongrid/internal/manager/data/topology/store"
 	managermodelalert "github.com/ongridio/ongrid/internal/manager/model/alert"
+	managermodeledge "github.com/ongridio/ongrid/internal/manager/model/edge"
 
 	managerbizaiops "github.com/ongridio/ongrid/internal/manager/biz/aiops"
 	aiopsagent "github.com/ongridio/ongrid/internal/manager/biz/aiops/agent"
@@ -1126,7 +1127,9 @@ func main() {
 		}
 		return nil
 	})
-	pluginConfigUC.SetRuntimeOverlayProvider(logsBackendSvc)
+	pluginConfigUC.SetRuntimeOverlayProvider(logsRuntimeOverlayProvider{
+		base: logsBackendSvc, hosts: edgeDeviceRepo, devices: deviceUC, clusters: topologyUC,
+	})
 	logsHandler := managerserverlogs.NewHandlerWithServices(lokiLogClient, logsBackendSvc, logsBackendSvc)
 
 	// Tempo query proxy. Mirrors the Loki block above — same role for the
@@ -2998,7 +3001,7 @@ func (r pluginEndpointResolver) ResolveTelemetryTarget(ctx context.Context, sign
 			if u := edgeReachableLokiURL(r.loki.URL(ctx)); u != "" {
 				user, password := r.loki.Auth(ctx)
 				return managerbizk8s.TelemetryTarget{
-					Endpoint:      u + "/loki/api/v1/push",
+					Endpoint:      u + "/otlp/v1/logs",
 					BasicUser:     user,
 					BasicPassword: password,
 					TLSInsecure:   r.loki.TLSInsecure(ctx),
@@ -3009,7 +3012,7 @@ func (r pluginEndpointResolver) ResolveTelemetryTarget(ctx context.Context, sign
 			return managerbizk8s.TelemetryTarget{}, nil
 		}
 		return managerbizk8s.TelemetryTarget{
-			Endpoint:               strings.TrimRight(r.publicURL, "/") + "/loki/api/v1/push",
+			Endpoint:               strings.TrimRight(r.publicURL, "/") + "/loki/otlp/v1/logs",
 			UseTelemetryCredential: true,
 		}, nil
 	case "traces":
@@ -4063,7 +4066,7 @@ func (i logsRolloutEdgeInventory) ListRolloutEdges(ctx context.Context) ([]manag
 	}
 	items := make([]managerbizlogs.RolloutEdge, 0, len(edges))
 	for _, edge := range edges {
-		if edge == nil || edge.ID == 0 {
+		if !isHostLogsRolloutEdge(edge) {
 			continue
 		}
 		if i.configs != nil {
@@ -4078,6 +4081,16 @@ func (i logsRolloutEdgeInventory) ListRolloutEdges(ctx context.Context) ([]manag
 		items = append(items, managerbizlogs.RolloutEdge{EdgeID: edge.ID, Online: edge.Status == "online"})
 	}
 	return items, nil
+}
+
+// isHostLogsRolloutEdge excludes control-plane-only Edge identities from a
+// fleet log cutover. The rollout's real-write gate scopes every probe by the
+// linked Host device; an identity without that link (for example the
+// Kubernetes controller) cannot emit or verify such a probe and would make a
+// fleet cutover permanently impossible even though no logs process runs on
+// that identity.
+func isHostLogsRolloutEdge(edge *managermodeledge.Edge) bool {
+	return edge != nil && edge.ID != 0 && edge.DeviceID != nil && *edge.DeviceID != 0
 }
 
 func (b *logsPluginReloadBroadcaster) NotifyLogsBackendChanged(ctx context.Context) error {

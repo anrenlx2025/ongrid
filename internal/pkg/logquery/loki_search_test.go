@@ -47,6 +47,7 @@ func TestCompileLogQL_MapsScopeAndKeywords(t *testing.T) {
 		Namespaces:   []string{"prod"},
 		Nodes:        []string{"node-a"},
 		ServiceNames: []string{"api", "worker"},
+		Levels:       []string{"ERROR"},
 		Files:        []string{"/var/log/app.log"},
 		Units:        []string{"sshd.service"},
 	}
@@ -64,6 +65,7 @@ func TestCompileLogQL_MapsScopeAndKeywords(t *testing.T) {
 		`namespace="prod"`,
 		`| node="node-a"`,
 		`service_name=~"(?:api|worker)"`,
+		`level="ERROR"`,
 		`| filename="/var/log/app.log"`,
 		`| unit="sshd.service"`,
 		`|~ "(?i)(connection refused|broken pipe)"`,
@@ -79,7 +81,7 @@ func TestCompileLogQL_MapsScopeAndKeywords(t *testing.T) {
 func TestDecodeLokiRecords_ProducesStableRecord(t *testing.T) {
 	raw, err := json.Marshal([]map[string]any{{
 		"stream": map[string]string{
-			"device_id": "42", "ongrid_source": "journald", "level": "ERROR",
+			"device_id": "42", "cluster_id": "7", "cluster_name": "edge-fleet-a", "ongrid_source": "journald", "level": "ERROR",
 		},
 		"values": []any{[]any{
 			"1787054400000000000", "connection refused",
@@ -104,7 +106,7 @@ func TestDecodeLokiRecords_ProducesStableRecord(t *testing.T) {
 	if first[0].Timestamp.IsZero() || first[0].Message != "connection refused" || first[0].SeverityText != "ERROR" {
 		t.Fatalf("decoded record = %#v", first[0])
 	}
-	if first[0].ResourceAttributes["device_id"] != "42" {
+	if first[0].ResourceAttributes["device_id"] != "42" || first[0].ResourceAttributes["cluster_id"] != "7" || first[0].ResourceAttributes["cluster_name"] != "edge-fleet-a" {
 		t.Fatalf("resource attributes = %#v", first[0].ResourceAttributes)
 	}
 	if first[0].Attributes["filename"] != "/var/log/app.log" || first[0].TraceID != "abc123" {
@@ -150,7 +152,13 @@ func TestLokiSearchCursorDoesNotSkipRecordsSharingTimestamp(t *testing.T) {
 }
 
 func TestLogQLDuration_UsesSupportedUnits(t *testing.T) {
-	cases := map[time.Duration]string{time.Hour: "1h", 5 * time.Minute: "5m", 30 * time.Second: "30s"}
+	cases := map[time.Duration]string{
+		time.Hour:                          "1h",
+		5 * time.Minute:                    "5m",
+		30 * time.Second:                   "30s",
+		1337 * time.Millisecond:            "1337ms",
+		time.Millisecond + time.Nanosecond: "2ms",
+	}
 	for input, want := range cases {
 		if got := logQLDuration(input); got != want {
 			t.Fatalf("logQLDuration(%s) = %q, want %q", input, got, want)

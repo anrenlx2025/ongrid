@@ -36,6 +36,57 @@ func (m mapSecrets) ResolveFields(_ context.Context, name string) (map[string]st
 	return out, nil
 }
 
+type managedSecrets struct {
+	mu      sync.Mutex
+	values  map[string]map[string]string
+	creates []string
+}
+
+func newManagedSecrets() *managedSecrets {
+	return &managedSecrets{values: map[string]map[string]string{}}
+}
+
+func (m *managedSecrets) ResolveFields(_ context.Context, name string) (map[string]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fields := m.values[name]
+	out := make(map[string]string, len(fields))
+	for key, value := range fields {
+		out[key] = value
+	}
+	return out, nil
+}
+
+func (m *managedSecrets) CreateManaged(_ context.Context, name, credType, _ string, fields map[string]string) error {
+	if credType != "elasticsearch" {
+		return errors.New("unexpected credential type")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.values[name]; exists {
+		return errors.New("managed credential already exists")
+	}
+	stored := make(map[string]string, len(fields))
+	for key, value := range fields {
+		stored[key] = value
+	}
+	m.values[name] = stored
+	m.creates = append(m.creates, name)
+	return nil
+}
+
+func (m *managedSecrets) apiKey(name string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.values[name]["api_key"]
+}
+
+func (m *managedSecrets) createCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.creates)
+}
+
 type mapHostDevices map[uint64]uint64
 
 func (m mapHostDevices) LookupHostDevice(_ context.Context, edgeID uint64) (uint64, error) {
@@ -358,6 +409,24 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 	for _, item := range rollingBack.Assignments {
 		rollbackProbeIDs[item.EdgeID] = item.ProbeID
 	}
+	failedRollback, err := repo.GetAssignment(context.Background(), first.ID, 42)
+	if err != nil {
+		t.Fatalf("GetAssignment(failed rollback): %v", err)
+	}
+	failedRollback.Status = logsmodel.AssignmentStatusFailed
+	failedRollback.AppliedGeneration = 0
+	failedRollback.LastError = "probe log is not visible yet"
+	if err := repo.UpsertAssignment(context.Background(), failedRollback); err != nil {
+		t.Fatalf("UpsertAssignment(failed rollback): %v", err)
+	}
+	if _, err := svc.PluginSecretForEdge(context.Background(), 42, "logs", bizlogs.SecretSlotESAPIKey, first.Generation); err != nil {
+		t.Fatalf("authoritative secret after failed rollback probe: %v", err)
+	}
+	failedRollback.Status = logsmodel.AssignmentStatusPending
+	failedRollback.LastError = ""
+	if err := repo.UpsertAssignment(context.Background(), failedRollback); err != nil {
+		t.Fatalf("restore rollback assignment: %v", err)
+	}
 	for _, edgeID := range []uint64{42, 43} {
 		if _, err := svc.PluginSecretForEdge(context.Background(), edgeID, "logs", bizlogs.SecretSlotESAPIKey, first.Generation); err != nil {
 			t.Fatalf("PluginSecretForEdge(rollback edge %d): %v", edgeID, err)
@@ -372,10 +441,6 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 	}
 	if rolledBack.Status != logsmodel.BackendStatusRolledBack || rolledBack.EndedAt == nil || notifier.count() != 5 {
 		t.Fatalf("completed rollback = status %q notifications %d", rolledBack.Status, notifier.count())
-	}
-	queryBackends, err := repo.ListQueryBackends(context.Background())
-	if err != nil || len(queryBackends) != 1 || queryBackends[0].ID != first.ID || queryBackends[0].EndedAt == nil {
-		t.Fatalf("query history after rollback = %#v, %v", queryBackends, err)
 	}
 	runtime, err = svc.ActiveRuntime(context.Background())
 	if err != nil {
@@ -565,6 +630,115 @@ func TestServiceTestChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testing
 	}
 }
 
+func TestServiceStoresDirectAPIKeysAsManagedWriteOnlyCredentials(t *testing.T) {
+	secrets := newManagedSecrets()
+	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
+
+	first, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", Namespace: "prod",
+		WriteAPIKey: "ApiKey encoded-write-v1", QueryAPIKey: "encoded-query-v1",
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(direct keys): %v", err)
+	}
+	if first.WriteCredentialRef == first.QueryCredentialRef ||
+		!strings.HasPrefix(first.WriteCredentialRef, "ongrid-managed-logs-es-write-") ||
+		!strings.HasPrefix(first.QueryCredentialRef, "ongrid-managed-logs-es-query-") {
+		t.Fatalf("managed refs = write %q query %q", first.WriteCredentialRef, first.QueryCredentialRef)
+	}
+	if got := secrets.apiKey(first.WriteCredentialRef); got != "encoded-write-v1" {
+		t.Fatalf("stored write key = %q", got)
+	}
+	if got := secrets.apiKey(first.QueryCredentialRef); got != "encoded-query-v1" {
+		t.Fatalf("stored query key = %q", got)
+	}
+	encoded, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("marshal backend view: %v", err)
+	}
+	if strings.Contains(string(encoded), "encoded-write-v1") || strings.Contains(string(encoded), "encoded-query-v1") {
+		t.Fatalf("backend response leaked direct API key: %s", encoded)
+	}
+
+	unchanged, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.application", Namespace: "prod",
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(blank write-only fields): %v", err)
+	}
+	if unchanged.WriteCredentialRef != first.WriteCredentialRef || unchanged.QueryCredentialRef != first.QueryCredentialRef {
+		t.Fatalf("blank write-only fields replaced refs: first=%+v unchanged=%+v", first, unchanged)
+	}
+	if secrets.createCount() != 2 {
+		t.Fatalf("blank write-only fields performed %d creates, want 2 total", secrets.createCount())
+	}
+
+	rotated, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.application", Namespace: "prod", WriteAPIKey: "encoded-write-v2",
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(rotate write key): %v", err)
+	}
+	if rotated.WriteCredentialRef == first.WriteCredentialRef || rotated.QueryCredentialRef != first.QueryCredentialRef {
+		t.Fatalf("draft rotation did not isolate the new write ref: first=%+v rotated=%+v", first, rotated)
+	}
+	if got := secrets.apiKey(rotated.WriteCredentialRef); got != "encoded-write-v2" {
+		t.Fatalf("rotated write key = %q", got)
+	}
+	if got := secrets.apiKey(first.WriteCredentialRef); got != "encoded-write-v1" {
+		t.Fatalf("rotation mutated the previously referenced write key = %q", got)
+	}
+}
+
+func TestServiceCanReuseWriteAPIKeyWithoutSharingCredentialReference(t *testing.T) {
+	secrets := newManagedSecrets()
+	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
+
+	backend, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", WriteAPIKey: "encoded-shared", ReuseWriteAPIKey: true,
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(reuse write key): %v", err)
+	}
+	if backend.WriteCredentialRef == backend.QueryCredentialRef {
+		t.Fatalf("reuse mode shared a credential reference: %+v", backend)
+	}
+	if write, query := secrets.apiKey(backend.WriteCredentialRef), secrets.apiKey(backend.QueryCredentialRef); write != "encoded-shared" || query != write {
+		t.Fatalf("stored reuse keys = write %q query %q", write, query)
+	}
+}
+
+func TestServiceRejectsSharedDirectKeyBeforeWritingManagedCredentials(t *testing.T) {
+	secrets := newManagedSecrets()
+	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
+
+	_, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", WriteAPIKey: "encoded-shared", QueryAPIKey: "encoded-shared",
+	})
+	if err == nil || !strings.Contains(err.Error(), "reuse_write_api_key") {
+		t.Fatalf("SaveDraft error = %v, want explicit reuse-mode validation", err)
+	}
+	if secrets.createCount() != 0 {
+		t.Fatalf("rejected request created %d managed credentials", secrets.createCount())
+	}
+}
+
+func TestServiceDirectAPIKeyRequiresEncryptedManagedStore(t *testing.T) {
+	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), mapSecrets{}, nil)
+	_, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", WriteAPIKey: "encoded-write", QueryAPIKey: "encoded-query",
+	})
+	if err == nil || !strings.Contains(err.Error(), "credential storage is unavailable") {
+		t.Fatalf("SaveDraft error = %v, want managed storage failure", err)
+	}
+}
+
 func TestServiceRejectsUnsafeBackendInput(t *testing.T) {
 	db := openTestDB(t)
 	svc := bizlogs.NewService(logsstore.NewRepo(db), mapSecrets{
@@ -590,6 +764,16 @@ func TestServiceRejectsUnsafeBackendInput(t *testing.T) {
 			name: "dataset outside product namespace",
 			in: bizlogs.SaveInput{WriteEndpoints: []string{"https://es.example"}, QueryEndpoint: "https://es.example",
 				Dataset: "customer-arbitrary", WriteCredentialRef: "shared", QueryCredentialRef: "query"},
+		},
+		{
+			name: "direct API key containing whitespace",
+			in: bizlogs.SaveInput{WriteEndpoints: []string{"https://es.example"}, QueryEndpoint: "https://es.example",
+				Dataset: "ongrid.system", WriteAPIKey: "encoded write", QueryAPIKey: "encoded-query"},
+		},
+		{
+			name: "query API key supplied in reuse mode",
+			in: bizlogs.SaveInput{WriteEndpoints: []string{"https://es.example"}, QueryEndpoint: "https://es.example",
+				Dataset: "ongrid.system", WriteAPIKey: "encoded-write", QueryAPIKey: "encoded-query", ReuseWriteAPIKey: true},
 		},
 	}
 	for _, tt := range tests {
@@ -679,11 +863,14 @@ func TestServiceCancelledDraftDoesNotHideActiveBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveDraft(second): %v", err)
 	}
+	if second.CurrentBackend != "elasticsearch" || second.CurrentBackendID != first.ID {
+		t.Fatalf("SaveDraft(second) current backend = %q #%d, want elasticsearch #%d", second.CurrentBackend, second.CurrentBackendID, first.ID)
+	}
 	if _, err := svc.Rollback(context.Background(), second.ID); err != nil {
 		t.Fatalf("Rollback(cancel draft): %v", err)
 	}
 	visible, err := svc.Get(context.Background())
-	if err != nil || visible.ID != first.ID || visible.Status != logsmodel.BackendStatusActive {
+	if err != nil || visible.ID != first.ID || visible.Status != logsmodel.BackendStatusActive || visible.CurrentBackend != "elasticsearch" || visible.CurrentBackendID != first.ID {
 		t.Fatalf("Get after draft cancellation = %+v, %v", visible, err)
 	}
 }

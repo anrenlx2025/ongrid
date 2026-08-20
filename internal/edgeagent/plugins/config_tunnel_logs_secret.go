@@ -59,7 +59,7 @@ func (t *TunnelConfigFetcher) materializeLogsRuntime(ctx context.Context, cfg Pl
 		if !logsProbeIDPattern.MatchString(probeID) {
 			return PluginConfig{}, errors.New("invalid logs probe id")
 		}
-		probePath := filepath.Join(dir, fmt.Sprintf("logs_probe.g%d.log", generation))
+		probePath := filepath.Join(dir, logsProbeFilename(generation, probeID))
 		if err := atomicWriteRestricted(dir, probePath, []byte(probeID+"\n"), 0o600); err != nil {
 			return PluginConfig{}, fmt.Errorf("write logs probe: %w", err)
 		}
@@ -89,6 +89,15 @@ func (t *TunnelConfigFetcher) materializeLogsRuntime(ctx context.Context, cfg Pl
 	}
 	cfg.Spec = spec
 	return cfg, nil
+}
+
+// logsProbeFilename gives every Manager-issued probe a distinct path, even
+// when a retry reuses the same backend generation. The filelog receiver keeps
+// persistent offsets by file identity; overwriting a same-length token at the
+// old path would otherwise leave its offset at EOF and the retry invisible.
+func logsProbeFilename(generation uint64, probeID string) string {
+	digest := sha256.Sum256([]byte(probeID))
+	return fmt.Sprintf("logs_probe.g%d.%s.log", generation, hex.EncodeToString(digest[:8]))
 }
 
 func (t *TunnelConfigFetcher) fetchAndMaterializeESKey(ctx context.Context, dir string, generation uint64, slot string) (string, error) {
@@ -155,6 +164,9 @@ func configApplyErrorClass(err error) string {
 	}
 	message := strings.ToLower(err.Error())
 	switch {
+	case errors.Is(err, os.ErrPermission), strings.Contains(message, "read-only file system"),
+		strings.Contains(message, "operation not permitted"):
+		return "secret_materialization_failed"
 	case strings.Contains(message, "validate"), strings.Contains(message, "configuration"):
 		return "collector_config_rejected"
 	case strings.Contains(message, "binary missing"), strings.Contains(message, "no such file"):

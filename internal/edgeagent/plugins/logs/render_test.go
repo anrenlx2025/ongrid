@@ -216,10 +216,33 @@ func TestRenderHostWithoutJournaldUsesFileSource(t *testing.T) {
 	assertStringListContains(t, file["include"], "/var/log/x.log")
 }
 
+func TestRenderHostAddsManagerClusterAndNormalizesLevel(t *testing.T) {
+	root := renderConfig(t, plugins.PluginConfig{
+		Enabled: true, EdgeID: 42, Endpoint: "https://x/loki/api/v1/push",
+		Spec: map[string]interface{}{
+			"cluster_id": "7", "cluster_name": "edge-fleet-a",
+		},
+	})
+	actions := list(t, object(t, object(t, root, "processors"), "resource/common")["attributes"])
+	assertResourceAction(t, actions, "device_id", "42")
+	assertResourceAction(t, actions, "cluster_id", "7")
+	assertResourceAction(t, actions, "cluster_name", "edge-fleet-a")
+	statements := list(t, object(t, object(t, root, "processors"), "transform/guard")["log_statements"])
+	assertStringListContains(t, statements, `set(log.severity_text, log.attributes["level"]) where (log.severity_text == nil or log.severity_text == "") and log.attributes["level"] != nil`)
+	assertStringListContains(t, statements, `set(resource.attributes["level"], log.severity_text) where log.severity_text != nil and log.severity_text != ""`)
+}
+
 func TestRenderJournaldIsEnabledByDefault(t *testing.T) {
 	root := renderConfig(t, plugins.PluginConfig{Enabled: true, EdgeID: 1, Endpoint: "https://x/loki/api/v1/push"})
-	if _, exists := object(t, root, "receivers")["journald/system"]; !exists {
+	receiver, exists := object(t, root, "receivers")["journald/system"]
+	if !exists {
 		t.Fatal("journald receiver must be enabled by default")
+	}
+	operators := list(t, asObject(t, receiver)["operators"])
+	message := asObject(t, operators[len(operators)-1])
+	if scalar(t, message, "id") != "journald-message" || scalar(t, message, "type") != "move" ||
+		scalar(t, message, "from") != "body.MESSAGE" || scalar(t, message, "to") != "body" {
+		t.Fatalf("journald MESSAGE normalization operator = %#v", message)
 	}
 }
 
@@ -246,8 +269,21 @@ func TestRenderKubernetesMode(t *testing.T) {
 		t.Fatalf("operator = %#v", container)
 	}
 	processors := object(t, root, "processors")
-	if _, exists := processors["k8sattributes/logs"]; !exists {
-		t.Fatal("k8sattributes processor is missing")
+	if _, exists := processors["k8sattributes/logs"]; exists {
+		t.Fatal("node-local kubernetes logs must not require k8sattributes by default")
+	}
+}
+
+func TestRenderKubernetesModeCanExplicitlyEnableK8sAttributes(t *testing.T) {
+	root := renderConfig(t, plugins.PluginConfig{
+		Enabled: true, EdgeID: 42, Endpoint: "https://manager.example.com/loki/api/v1/push",
+		Spec: map[string]interface{}{
+			"mode": "kubernetes", "cluster_id": float64(7), "node_name": "kind-worker",
+			"enable_k8sattributes": true,
+		},
+	})
+	if _, exists := object(t, root, "processors")["k8sattributes/logs"]; !exists {
+		t.Fatal("explicit k8sattributes setting was ignored")
 	}
 }
 
@@ -509,7 +545,9 @@ func TestLokiOTLPLogsEndpoint(t *testing.T) {
 		"https://manager.example.com/loki/api/v1/push":  "https://manager.example.com/loki/otlp/v1/logs",
 		"https://manager.example.com/loki/otlp":         "https://manager.example.com/loki/otlp/v1/logs",
 		"https://manager.example.com/loki/otlp/v1/logs": "https://manager.example.com/loki/otlp/v1/logs",
-		"https://manager.example.com/prefix":            "https://manager.example.com/prefix/loki/otlp/v1/logs",
+		"https://loki.example.com/otlp":                 "https://loki.example.com/otlp/v1/logs",
+		"https://loki.example.com/otlp/v1/logs":         "https://loki.example.com/otlp/v1/logs",
+		"https://loki.example.com/prefix":               "https://loki.example.com/prefix/otlp/v1/logs",
 	}
 	for input, want := range tests {
 		got, err := lokiOTLPLogsEndpoint(input)

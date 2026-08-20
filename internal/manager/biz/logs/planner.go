@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	model "github.com/ongridio/ongrid/internal/manager/model/logs"
+	apperrs "github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/logquery"
 )
 
@@ -114,9 +115,8 @@ func (s *Service) Search(ctx context.Context, req logquery.SearchRequest) (*logq
 	return result, nil
 }
 
-// Count follows the same historical plan as Search and sums exact backend
-// counts for each non-overlapping phase. Structured alerts therefore remain
-// correct across activation, replacement, and rollback boundaries.
+// Count uses the same single active backend as Search. Data retained in an
+// inactive backend is intentionally outside the product query surface.
 func (s *Service) Count(ctx context.Context, req logquery.SearchRequest) (uint64, error) {
 	if err := req.NormalizeAndValidate(); err != nil {
 		return 0, err
@@ -212,11 +212,10 @@ func (s *Service) Histogram(ctx context.Context, req logquery.SearchRequest, int
 
 	// Backend-native histogram APIs do not share one bucket origin: Loki's
 	// range vectors are trailing windows while Elasticsearch rounds fixed
-	// intervals to epoch boundaries. They also become incorrect when a global
-	// bucket crosses cutover_at/ended_at. Build one product-level grid and use
-	// exact Count calls for every backend intersection instead. The bounded
-	// worker group keeps a normal 60-120 bucket UI request practical without
-	// turning it into unbounded fan-out.
+	// intervals to epoch boundaries. Build one product-level grid and use exact
+	// Count calls so switching the active backend never changes bucket shape.
+	// The bounded worker group keeps a normal 60-120 bucket UI request practical
+	// without turning it into unbounded fan-out.
 	out := make([]logquery.HistogramBucket, bucketCount)
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(8)
@@ -268,18 +267,15 @@ func earlierTime(a, b time.Time) time.Time {
 	return a
 }
 
-func (s *Service) plan(ctx context.Context, start, end time.Time, direction logquery.SortDirection) ([]queryPhase, string, error) {
-	backends, err := s.repo.ListQueryBackends(ctx)
-	if err != nil {
+func (s *Service) plan(ctx context.Context, start, end time.Time, _ logquery.SortDirection) ([]queryPhase, string, error) {
+	backend, err := s.repo.ActiveBackend(ctx)
+	if err != nil && !errors.Is(err, apperrs.ErrNotFound) {
 		return nil, "", err
 	}
-	phases := buildQueryPhases(start, end, backends)
-	if direction == logquery.SortBackward {
-		sort.SliceStable(phases, func(i, j int) bool { return phases[i].start.After(phases[j].start) })
+	if errors.Is(err, apperrs.ErrNotFound) {
+		backend = nil
 	}
-	if len(phases) == 0 {
-		return nil, "", errors.New("logs backend disabled")
-	}
+	phases := []queryPhase{buildActiveQueryPhase(start, end, backend)}
 	planSum, err := queryPlanSum(phases)
 	if err != nil {
 		return nil, "", err
@@ -287,10 +283,19 @@ func (s *Service) plan(ctx context.Context, start, end time.Time, direction logq
 	return phases, planSum, nil
 }
 
+func buildActiveQueryPhase(start, end time.Time, backend *model.Backend) queryPhase {
+	if backend == nil {
+		return queryPhase{name: "loki", start: start, end: end}
+	}
+	return queryPhase{
+		name: fmt.Sprintf("elasticsearch:%d", backend.ID), start: start, end: end, backend: backend,
+	}
+}
+
 func (s *Service) searcherForPhase(ctx context.Context, phase queryPhase) (logquery.Searcher, error) {
 	if phase.backend == nil {
 		if s.loki == nil {
-			return nil, errors.New("built-in Loki is unavailable for the requested historical range")
+			return nil, errors.New("current Loki backend is unavailable")
 		}
 		return s.loki, nil
 	}
@@ -318,76 +323,6 @@ func (s *Service) elasticsearchClient(ctx context.Context, backend *model.Backen
 	s.cacheKey, s.cachedES = cacheKey, client
 	s.mu.Unlock()
 	return client, nil
-}
-
-// buildQueryPhases reconstructs the real data path over time using one shared
-// (start, end] convention. The previous authoritative backend owns the exact
-// cutover timestamp; an external generation owns (cutover_at, ended_at]. This
-// matches Count and lets adjacent histogram buckets compose without gaps or
-// double-counting. Search advances each phase start by one nanosecond because
-// backend range-search APIs use an inclusive lower bound.
-func buildQueryPhases(start, end time.Time, backends []*model.Backend) []queryPhase {
-	if !end.After(start) {
-		return nil
-	}
-	ordered := append([]*model.Backend(nil), backends...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		if ordered[i] == nil || ordered[i].CutoverAt == nil {
-			return false
-		}
-		if ordered[j] == nil || ordered[j].CutoverAt == nil {
-			return true
-		}
-		return ordered[i].CutoverAt.Before(*ordered[j].CutoverAt)
-	})
-
-	phases := make([]queryPhase, 0, len(ordered)*2+1)
-	cursor := start
-	for _, backend := range ordered {
-		if backend == nil || backend.CutoverAt == nil {
-			continue
-		}
-		esStart := *backend.CutoverAt
-		if esStart.Before(start) {
-			esStart = start
-		}
-		esEnd := end
-		if backend.EndedAt != nil && backend.EndedAt.Before(esEnd) {
-			esEnd = *backend.EndedAt
-		}
-		if !esEnd.After(esStart) || !end.After(esStart) {
-			continue
-		}
-		if esStart.After(cursor) {
-			phases = append(phases, queryPhase{name: lokiPhaseName(cursor), start: cursor, end: esStart})
-		}
-		if esStart.Before(cursor) {
-			esStart = cursor
-		}
-		if esEnd.After(end) {
-			esEnd = end
-		}
-		if esEnd.After(esStart) {
-			phases = append(phases, queryPhase{
-				name: fmt.Sprintf("elasticsearch:%d", backend.ID), start: esStart, end: esEnd, backend: backend,
-			})
-		}
-		if backend.EndedAt == nil || !backend.EndedAt.Before(end) {
-			cursor = end
-			break
-		}
-		if backend.EndedAt.After(cursor) {
-			cursor = *backend.EndedAt
-		}
-	}
-	if end.After(cursor) {
-		phases = append(phases, queryPhase{name: lokiPhaseName(cursor), start: cursor, end: end})
-	}
-	return phases
-}
-
-func lokiPhaseName(start time.Time) string {
-	return fmt.Sprintf("loki:%d", start.UnixNano())
 }
 
 func queryPlanSum(phases []queryPhase) (string, error) {

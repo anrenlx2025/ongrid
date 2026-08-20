@@ -55,7 +55,7 @@ type Scope struct {
 	Nodes        []string `json:"nodes,omitempty"`
 	ServiceNames []string `json:"service_names,omitempty"`
 	SourceIDs    []string `json:"source_ids,omitempty"`
-	Severities   []string `json:"severities,omitempty"`
+	Levels       []string `json:"levels,omitempty"`
 	Files        []string `json:"files,omitempty"`
 	Units        []string `json:"units,omitempty"`
 }
@@ -271,7 +271,7 @@ func LookupField(name string) (FieldDefinition, bool) {
 		return field(name, "keyword", "service_name", "resource.attributes.service_name"), true
 	case "source_id":
 		return field(name, "keyword", "ongrid_source", "resource.attributes.ongrid_source"), true
-	case "severity":
+	case "level":
 		return field(name, "keyword", "level", "resource.attributes.level"), true
 	case "file":
 		return structuredField(name, "keyword", "filename", "resource.attributes.filename"), true
@@ -295,7 +295,7 @@ func LookupField(name string) (FieldDefinition, bool) {
 func AllowedFields() []Field {
 	names := []string{
 		"device_id", "cluster_id", "namespace", "workload", "pod", "container", "node",
-		"service_name", "source_id", "severity", "file", "unit", "trace_id", "span_id", "message",
+		"service_name", "source_id", "level", "file", "unit", "trace_id", "span_id", "message",
 	}
 	out := make([]Field, 0, len(names))
 	for _, name := range names {
@@ -364,7 +364,7 @@ func validateScope(scope Scope) error {
 		{"node", scope.Nodes},
 		{"service_name", scope.ServiceNames},
 		{"source_id", scope.SourceIDs},
-		{"severity", scope.Severities},
+		{"level", scope.Levels},
 		{"file", scope.Files},
 		{"unit", scope.Units},
 	} {

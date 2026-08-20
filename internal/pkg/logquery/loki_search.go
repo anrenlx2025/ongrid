@@ -273,7 +273,7 @@ func compileLogQL(req SearchRequest) (string, error) {
 		{"node", req.Scope.Nodes},
 		{"service_name", req.Scope.ServiceNames},
 		{"source_id", req.Scope.SourceIDs},
-		{"severity", req.Scope.Severities},
+		{"level", req.Scope.Levels},
 		{"file", req.Scope.Files},
 		{"unit", req.Scope.Units},
 	} {
@@ -436,11 +436,14 @@ func decodeLokiRecords(result *QueryRangeResult) ([]Record, error) {
 					resources[logical] = v
 				}
 			}
+			if clusterName := labels["cluster_name"]; clusterName != "" {
+				resources["cluster_name"] = clusterName
+			}
 			records = append(records, Record{
 				ID:                 stableLokiRecordID(rawTimestamp, labels, message),
 				Timestamp:          time.Unix(0, nanos).UTC(),
 				Message:            message,
-				SeverityText:       firstNonEmpty(labels["level"], labels["severity"]),
+				SeverityText:       labels["level"],
 				Backend:            lokiBackendName,
 				Attributes:         attrs,
 				ResourceAttributes: resources,
@@ -554,5 +557,18 @@ func logQLDuration(d time.Duration) string {
 	if d%time.Second == 0 {
 		return strconv.FormatInt(int64(d/time.Second), 10) + "s"
 	}
-	return d.String()
+	// Loki range selectors accept integer duration components, but Go's
+	// Duration.String emits fractional seconds for cutover-split buckets
+	// (for example, "1.337s"). Loki rejects that form with
+	// `unknown unit "."`. Product query boundaries are millisecond-aligned;
+	// round any finer caller input up to Loki's minimum supported unit so the
+	// range never becomes shorter than the requested interval.
+	milliseconds := d / time.Millisecond
+	if d%time.Millisecond != 0 {
+		milliseconds++
+	}
+	if milliseconds < 1 {
+		milliseconds = 1
+	}
+	return strconv.FormatInt(int64(milliseconds), 10) + "ms"
 }

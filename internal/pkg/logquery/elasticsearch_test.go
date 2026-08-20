@@ -19,6 +19,9 @@ func TestElasticsearchClient_SearchUsesPITAndOpaqueCursor(t *testing.T) {
 		}
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/_pit"):
+			if got := r.URL.Query().Get("keep_alive"); got != "5m" {
+				t.Fatalf("PIT keep_alive = %q", got)
+			}
 			writeTestJSON(t, w, map[string]any{"id": "pit-1"})
 		case r.Method == http.MethodPost && r.URL.Path == "/_search":
 			searchCalls++
@@ -26,11 +29,14 @@ func TestElasticsearchClient_SearchUsesPITAndOpaqueCursor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadAll() error = %v", err)
 			}
-			if !strings.Contains(string(body), `"resource.attributes.device_id":["42"]`) || !strings.Contains(string(body), `"match_phrase":{"body.text":"timeout"}`) {
+			if !strings.Contains(string(body), `"resource.attributes.device_id":["42"]`) || !strings.Contains(string(body), `"resource.attributes.level":["ERROR"]`) || !strings.Contains(string(body), `"match_phrase":{"body.text":"timeout"}`) {
 				t.Fatalf("search body missing scoped query: %s", body)
 			}
 			if strings.Contains(string(body), "simple_query_string") {
 				t.Fatalf("search body exposed query-string syntax: %s", body)
+			}
+			if !strings.Contains(string(body), `"keep_alive":"5m"`) {
+				t.Fatalf("search body missing PIT renewal: %s", body)
 			}
 			if searchCalls == 2 && !strings.Contains(string(body), `"search_after"`) {
 				t.Fatalf("second search body missing search_after: %s", body)
@@ -60,6 +66,7 @@ func TestElasticsearchClient_SearchUsesPITAndOpaqueCursor(t *testing.T) {
 	req := validSearchRequest()
 	req.Limit = 1
 	req.Scope.DeviceIDs = []uint64{42}
+	req.Scope.Levels = []string{"ERROR"}
 	req.Keywords.Include = []string{"timeout"}
 	first, err := client.Search(t.Context(), req)
 	if err != nil {
@@ -95,6 +102,26 @@ func TestElasticsearchClient_ProbeRequiresSupportedVersion(t *testing.T) {
 	version, err := client.Probe(t.Context())
 	if err != nil || version != "8.16.3" {
 		t.Fatalf("Probe() = %q, %v", version, err)
+	}
+}
+
+func TestDecodeElasticsearchRecordFallsBackToResourceLevel(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"@timestamp": "2026-08-18T12:00:00Z",
+		"body":       map[string]any{"text": "hello"},
+		"resource": map[string]any{"attributes": map[string]any{
+			"device_id": "42", "cluster_id": "7", "cluster_name": "edge-fleet-a", "level": "WARN",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	record, err := decodeElasticsearchRecord("log-1", raw)
+	if err != nil {
+		t.Fatalf("decodeElasticsearchRecord: %v", err)
+	}
+	if record.SeverityText != "WARN" || record.ResourceAttributes["cluster_name"] != "edge-fleet-a" {
+		t.Fatalf("record = %#v", record)
 	}
 }
 

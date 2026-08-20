@@ -19,7 +19,7 @@ export type LogScope = {
   nodes?: string[];
   service_names?: string[];
   source_ids?: string[];
-  severities?: string[];
+  levels?: string[];
   files?: string[];
   units?: string[];
 };
@@ -131,6 +131,8 @@ export type LogBackend = {
   id: number;
   name: string;
   type: 'elasticsearch';
+  current_backend?: 'loki' | 'elasticsearch';
+  current_backend_id?: number;
   status: 'draft' | 'distributing' | 'verifying' | 'active' | 'rolling_back' | 'degraded' | 'rolled_back';
   generation: number;
   write_endpoints: string[];
@@ -154,14 +156,24 @@ export type LogBackend = {
   updated_at: string;
 };
 
+export type LogBackendKind = 'loki' | 'elasticsearch';
+
+export function currentLogBackend(backend: LogBackend | null): LogBackendKind {
+  if (backend?.current_backend) return backend.current_backend;
+  return backend?.cutover_at && !backend.ended_at ? 'elasticsearch' : 'loki';
+}
+
 export type SaveLogBackendInput = {
   name?: string;
   write_endpoints: string[];
   query_endpoint: string;
   dataset: string;
   namespace: string;
-  write_credential_ref: string;
-  query_credential_ref: string;
+  write_credential_ref?: string;
+  query_credential_ref?: string;
+  write_api_key?: string;
+  query_api_key?: string;
+  reuse_write_api_key?: boolean;
   ca_pem?: string;
   preserve_ca?: boolean;
   kibana_url?: string;

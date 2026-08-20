@@ -53,7 +53,7 @@ internal/edgeagent/plugins/logs/ OTel renderer、密钥、健康状态
 
 ## 配置和密钥时序
 
-1. 管理员保存 DRAFT 后端；非敏感配置写 `log_backends`，API Key 写现有 secret vault。
+1. 管理员保存 DRAFT 后端；表单直接接收只写的 encoded API Key。Manager 在同一次请求内将直接 Key 加密写入 secret vault，并仅把托管引用及非敏感配置写入 `log_backends`；读取接口从不返回 Key，空 Key 表示保留已有引用。历史版本保存的外部凭证引用、自定义 CA 和 Kibana URL 继续由后端兼容，但不再暴露在默认设置页。
 2. Manager 使用仅保存在控制面的 query Key（cluster monitor + 产品 data stream 的 read/view_index_metadata）逐个校验 query/write endpoint 版本和查询权限；再通过 `_has_privileges` 校验 Edge write Key 仅具有产品 data stream 的 auto_configure/create_doc。
 3. 管理员选择 canary Edge；Manager 下发候选 generation 和固定 secret slot，Edge 通过认证 tunnel 按 generation 拉取写 Key并校验 SHA-256 后原子落盘。
 4. Edge 渲染临时 OTel 配置，执行配置校验，成功后原子替换并重启。
@@ -71,13 +71,16 @@ internal/edgeagent/plugins/logs/ OTel renderer、密钥、健康状态
 | --- | --- | --- |
 | `device_id` | `device_id` label | `resource.attributes.device_id` |
 | `cluster_id` | `cluster_id` label | `resource.attributes.cluster_id` |
+| `cluster_name` | `cluster_name` label/metadata | `resource.attributes.cluster_name` |
+| `level` | `level` label | `resource.attributes.level` |
 | `service_name` | `service_name` label/metadata | `resource.attributes.service_name` 稳定别名 |
 | `namespace` | `namespace` label/metadata | `resource.attributes.namespace` 稳定别名 |
-| `workload` / `pod` / `container` / `node` | structured metadata | 对应 `resource.attributes.*` 稳定别名 |
+| `pod` / `container` / `node` | structured metadata | Node CRI 路径解析后的 `resource.attributes.*` 稳定别名 |
+| `workload` | structured metadata | 仅在控制面或 Telemetry Gateway 中央元数据补全可用时提供 |
 | `filename` / `unit` | structured metadata | `resource.attributes.filename` / `unit` |
 | `message` | log line | `body.text` |
 
-灰度阶段查询只读当前权威后端；由于 Edge 同时向权威后端和候选写入，不产生查询盲区，也不把候选重复数据返回给用户。全局切换后，迁移 planner 根据各 generation 的 `cutover_at/ended_at` 选择 Loki 和对应的历史 ES。因此 ES 回滚后，回滚前的 ES 日志仍可查，回滚后的新日志回到 Loki。结果统一为带 backend、timestamp、message、severity、scope 和 attributes 的 LogRecord。
+日志中心始终只查询当前权威后端，Loki 与 Elasticsearch 不做联邦归并。灰度阶段 Edge 同时向权威后端和候选写入，因此不会把候选重复数据返回给用户；全部真实写探针通过后，Edge 写入和 Manager 查询在同一全局切换点一起变更。旧后端数据继续保留在原存储中，但不会自动查询或迁移。结果统一为带 timestamp、message、level、scope 和 attributes 的 LogRecord；内部 `backend` 标记仅供查询规划与诊断使用，不作为逐条日志的用户可选字段。
 
 ## 数据存储
 
@@ -94,6 +97,7 @@ internal/edgeagent/plugins/logs/ OTel renderer、密钥、健康状态
 - secret 不进入普通 plugin spec、URL、argv、环境变量、状态 API 或日志。
 - Edge secret handler 只识别 `logs/elasticsearch_api_key` 固定 slot，拒绝路径、符号链接和旧 generation。
 - 查询字段和 data stream pattern 服务端固定，不允许用户指定任意 index。
+- Node logs Collector 不访问 Kubernetes API；CRI parser 提取 namespace、Pod、container 和 node。集群级 Pod/workload RBAC 仅属于 Controller/Telemetry Gateway。
 
 ## 可用性和回滚
 
@@ -116,7 +120,7 @@ internal/edgeagent/plugins/logs/ OTel renderer、密钥、健康状态
 - [x] API proto、兼容版本门禁、权限模型与自动化测试完成。
 - [x] 数据模型和可回滚 migration 完成。
 - [x] 写/读 secret 分离、专用下发通道、SHA-256 校验和轮换语义完成。
-- [x] canary、对称回滚和旧历史查询 planner 的自动化测试完成。
+- [x] canary、对称回滚和单一当前后端 query planner 的自动化测试完成。
 - [ ] 在真实 Linux AMD64/ARM64 上完成 journald、文件日志和 Kubernetes CRI 矩阵。
 - [ ] 完成 Edge→客户 Elasticsearch 的真实网络、TLS、API Key 和抓包验收。
 - [ ] 完成 SLO、告警、Runbook、容量以及 30 分钟断网/队列故障注入。

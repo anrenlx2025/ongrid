@@ -58,21 +58,6 @@ func (r *Repo) ActiveBackend(ctx context.Context) (*model.Backend, error) {
 	return &out, nil
 }
 
-// ListQueryBackends returns every generation that owned the fleet data path
-// for a non-empty interval. Retaining rolled-back rows lets the query planner
-// route historical ranges to the backend that actually received those logs.
-func (r *Repo) ListQueryBackends(ctx context.Context) ([]*model.Backend, error) {
-	var out []*model.Backend
-	err := r.db.WithContext(ctx).
-		Where("cutover_at IS NOT NULL").
-		Where("status IN ?", []model.BackendStatus{
-			model.BackendStatusActive, model.BackendStatusRollingBack, model.BackendStatusRolledBack,
-		}).
-		Order("cutover_at ASC, id ASC").
-		Find(&out).Error
-	return out, err
-}
-
 // BeginRollout atomically moves one tested draft into distribution and
 // replaces its selected Edge set. Previous attempts remain soft-deleted for
 // audit while the active backend (if any) is left untouched.
