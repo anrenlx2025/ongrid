@@ -279,7 +279,7 @@ func (u *Usecase) updateSessionAnalysis(ctx context.Context, publicID string) (*
 	if incomplete {
 		state = model.SessionStateCollecting
 	} else if ready == 0 {
-		if cancelled == len(detail.Captures) {
+		if len(detail.Captures) > 0 && cancelled == len(detail.Captures) {
 			state = model.SessionStateCancelled
 		} else {
 			state = model.SessionStateFailed

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { http, HttpResponse } from 'msw';
@@ -287,7 +287,7 @@ describe('DailyToolsPage', () => {
     expect(panel).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '打开数据包' })).toHaveAttribute('href', '/artifacts/packet-sessions/pcap-session-1');
     expect(screen.getAllByText(/\$ ip netns exec blue tcpdump -U -n -q -i eth0 -s 1514 -w <artifact>\.pcap/).length).toBeGreaterThan(0);
-	  expect(within(panel.closest('section') as HTMLElement).getByRole('button', { name: '取消并丢弃' })).toBeInTheDocument();
+    expect(within(panel.closest('section') as HTMLElement).getByRole('button', { name: '取消并丢弃' })).toBeInTheDocument();
 
     await userEvent.click(within(panel.closest('section') as HTMLElement).getByRole('button', { name: '停止并保存' }));
     await waitFor(() => expect(cancelCalls).toEqual(['session']));
@@ -352,6 +352,53 @@ describe('DailyToolsPage', () => {
     expect(screen.getByText('12')).toBeInTheDocument();
     expect(screen.getByText('2.0 KB')).toBeInTheDocument();
     expect(screen.getAllByText(/capture_id=41 capturing -> ready/).length).toBeGreaterThan(0);
+  });
+
+  it('抓包轮询未完成时不会为同一任务发起重叠刷新', async () => {
+    let refreshCalls = 0;
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    localStorage.setItem('ongrid-daily-tools-runs-v1', JSON.stringify({
+      runs: [],
+      captureRuns: [{
+        id: 'saved-capture-running',
+        sessionID: 'pcap-session-in-flight',
+        status: 'capturing',
+        title: '并发轮询测试',
+        target: 'tcp',
+        edgeLabels: ['#1 edge-001'],
+        startedAt: '2026-08-16T00:00:00Z',
+        captureIDs: [41],
+        link: '/artifacts/packet-sessions/pcap-session-in-flight',
+        members: [{ id: 41, edgeLabel: '#1 edge-001', state: 'capturing' }],
+        logs: [],
+      }],
+    }));
+    server.use(
+      http.post('/api/v1/packet-capture-sessions/pcap-session-in-flight/refresh', async () => {
+        refreshCalls++;
+        await refreshGate;
+        return HttpResponse.json({
+          session: { id: 'pcap-session-in-flight', state: 'ready' },
+          captures: [{ id: 41, edge_id: 1, device_id: 11, state: 'ready', captured_packets: 1, captured_bytes: 64 }],
+        });
+      }),
+    );
+
+    render(<MemoryRouter><DailyToolsPage /></MemoryRouter>);
+
+    expect(await screen.findByText('并发轮询测试')).toBeInTheDocument();
+    await waitFor(() => expect(refreshCalls).toBe(1), { timeout: 2500 });
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 1700));
+    });
+    expect(refreshCalls).toBe(1);
+    await act(async () => {
+      releaseRefresh();
+    });
+    await waitFor(() => expect(screen.getByText('ready')).toBeInTheDocument());
   });
 
   it('抓包会展示成员创建失败原因', async () => {
