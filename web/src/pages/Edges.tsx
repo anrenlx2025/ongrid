@@ -2208,7 +2208,7 @@ function RolesEditorModal({
             type="button"
             onClick={submit}
             disabled={submitting}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
           >
             {submitting ? tr("保存中…", "Saving…") : tr("保存", "Save")}
           </button>
@@ -2681,7 +2681,7 @@ function CreateEdgeModal({
             type="button"
             onClick={() => void go()}
             disabled={pending}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {pending ? tr("创建中…", "Creating…") : tr("创建", "Create")}
           </button>
@@ -2745,7 +2745,7 @@ function SecretRevealModal({
         <button
           type="button"
           onClick={onClose}
-          className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white"
+          className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90"
         >
           {tr("我已保存", "I've saved it")}
         </button>
@@ -3006,7 +3006,7 @@ function BatchEnrollmentModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white"
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90"
           >
             {tr("我已保存命令", "I've saved the command")}
           </button>
@@ -3023,7 +3023,7 @@ function BatchEnrollmentModal({
               type="button"
               onClick={() => void createProfile()}
               disabled={pending}
-              className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+              className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
             >
               {pending
                 ? tr("生成中…", "Generating…")

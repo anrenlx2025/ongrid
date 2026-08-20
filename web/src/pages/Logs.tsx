@@ -667,7 +667,7 @@ export default function LogsPage() {
           <button
             type="submit"
             disabled={loading}
-            className="ml-auto inline-flex h-[34px] shrink-0 items-center gap-1.5 self-end rounded-md bg-zinc-100 px-3 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+            className="ml-auto inline-flex h-[34px] shrink-0 items-center gap-1.5 self-end rounded-md bg-accent px-3 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
           >
             {loading ? <Loader2 size={12} className="animate-spin" /> : <SearchIcon size={12} />}
             {tr('查询', 'Search')}

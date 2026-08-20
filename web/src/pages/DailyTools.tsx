@@ -616,7 +616,7 @@ export default function DailyToolsPage() {
               <button
                 type="submit"
                 disabled={!canRun}
-                className="ml-auto inline-flex h-9 shrink-0 items-center gap-1.5 self-end rounded-md bg-zinc-100 px-3 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+                className="ml-auto inline-flex h-9 shrink-0 items-center gap-1.5 self-end rounded-md bg-accent px-3 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
               >
                 <Play size={12} fill="currentColor" />
                 {active === 'capture' ? tr('开始', 'Start') : tr('执行', 'Run')}

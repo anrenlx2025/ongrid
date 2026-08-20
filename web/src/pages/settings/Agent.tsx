@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Bot, Clock3, Languages, Loader2, Save, ShieldCheck } from 'lucide-react';
 import { listSettings, setSetting } from '@/api/settings';
-import { Button } from '@/components/ui';
+import { Button, Card } from '@/components/ui';
 import { useI18n } from '@/i18n/locale';
 import { cn } from '@/lib/cn';
 
@@ -111,7 +111,7 @@ export default function SettingsAgent() {
   return (
     <div className="space-y-4">
       {err && <div className="text-xs text-red-400">{err}</div>}
-      <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
+      <Card className="p-5">
         <div className="mb-3 flex items-center gap-2">
           <ShieldCheck size={14} className="text-zinc-400" />
           <h2 className="text-sm font-medium text-zinc-100">{tr('写操作权限', 'Write actions')}</h2>
@@ -174,9 +174,9 @@ export default function SettingsAgent() {
             'Note: takes effect immediately on the next chat turn for every user, no restart needed. Tool calls already in flight are unaffected.',
           )}
         </p>
-      </section>
+      </Card>
 
-      <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
+      <Card className="p-5">
         <div className="mb-3 flex items-center gap-2">
           <Languages size={14} className="text-zinc-400" />
           <h2 className="text-sm font-medium text-zinc-100">{tr('Agent 输出语言', 'Agent output language')}</h2>
@@ -192,37 +192,42 @@ export default function SettingsAgent() {
             <Loader2 size={13} className="mr-2 animate-spin" /> {tr('加载中…', 'Loading…')}
           </div>
         ) : (
-          <div className="flex flex-wrap items-end gap-3">
-            <div>
-              <label htmlFor="agent-output-locale" className="mb-1.5 block text-sm text-zinc-300">
+          <>
+            <label className="block max-w-sm" htmlFor="agent-output-locale">
+              <span className="mb-1 block text-xs text-zinc-400">
                 {tr('输出语言', 'Output language')}
-              </label>
+              </span>
               <select
                 id="agent-output-locale"
                 value={outputLocale}
                 onChange={(event) => setOutputLocale(event.target.value as '' | 'zh' | 'en')}
-                className="h-10 w-64 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none transition focus:border-zinc-600"
+                className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none transition focus:border-zinc-600"
               >
                 <option value="">{tr('按任务上下文', 'Use task context')}</option>
                 <option value="zh">中文</option>
                 <option value="en">English</option>
               </select>
+            </label>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <Button variant="primary" disabled={savingLocale} onClick={() => void onSaveLocale()}>
+                <Save size={14} />
+                {savingLocale ? tr('保存中…', 'Saving…') : tr('保存语言', 'Save language')}
+              </Button>
+              <span className="text-xs text-zinc-500">
+                {tr('保存后对新任务立即生效', 'Applies to new work immediately after saving')}
+              </span>
             </div>
-            <Button variant="subtle" disabled={savingLocale} onClick={() => void onSaveLocale()}>
-              <Save size={14} />
-              {savingLocale ? tr('保存中…', 'Saving…') : tr('保存语言', 'Save language')}
-            </Button>
-          </div>
+          </>
         )}
-        <p className="mt-3 text-[11px] text-zinc-600">
+        <p className="mt-4 text-[11px] leading-relaxed text-zinc-600">
           {tr(
             '未配置时，交互任务跟随用户界面语言，自动任务使用部署默认语言。配置保存后对新任务立即生效。',
             'When unset, interactive work follows the UI language and automatic work uses the deployment default. Saved changes apply to new work immediately.',
           )}
         </p>
-      </section>
+      </Card>
 
-      <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
+      <Card className="p-5">
         <div className="mb-3 flex items-center gap-2">
           <Clock3 size={14} className="text-zinc-400" />
           <h2 className="text-sm font-medium text-zinc-100">{tr('LLM 请求超时', 'LLM request timeout')}</h2>
@@ -239,25 +244,27 @@ export default function SettingsAgent() {
           </div>
         ) : (
           <>
-            <label htmlFor="agent-llm-timeout-seconds" className="mb-1.5 block text-sm text-zinc-300">
-              {tr('超时秒数', 'Timeout seconds')}
-            </label>
-            <div className="flex items-center gap-2">
-              <input
-                id="agent-llm-timeout-seconds"
-                type="number"
-                min={MIN_LLM_TIMEOUT_SECONDS}
-                max={MAX_LLM_TIMEOUT_SECONDS}
-                step={1}
-                value={llmTimeoutSeconds}
-                onChange={(event) => setLLMTimeoutSeconds(event.target.value)}
-                className="h-10 w-48 rounded-md border border-zinc-700 bg-zinc-950 px-3 font-mono text-sm text-zinc-100 outline-none transition focus:border-zinc-600"
-              />
-              <span className="text-sm text-zinc-500">{tr('秒', 'seconds')}</span>
+            <div className="max-w-sm">
+              <label className="mb-1 block text-xs text-zinc-400" htmlFor="agent-llm-timeout-seconds">
+                {tr('超时秒数', 'Timeout seconds')}
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="agent-llm-timeout-seconds"
+                  type="number"
+                  min={MIN_LLM_TIMEOUT_SECONDS}
+                  max={MAX_LLM_TIMEOUT_SECONDS}
+                  step={1}
+                  value={llmTimeoutSeconds}
+                  onChange={(event) => setLLMTimeoutSeconds(event.target.value)}
+                  className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 font-mono text-xs text-zinc-100 outline-none transition focus:border-zinc-600"
+                />
+                <span className="shrink-0 text-xs text-zinc-500">{tr('秒', 'seconds')}</span>
+              </div>
             </div>
             <div className="mt-4 flex items-center gap-3">
               <Button
-                variant="subtle"
+                variant="primary"
                 disabled={savingTimeout}
                 onClick={() => void onSaveTimeout()}
               >
@@ -270,13 +277,13 @@ export default function SettingsAgent() {
             </div>
           </>
         )}
-        <p className="mt-3 text-[11px] text-zinc-600">
+        <p className="mt-4 text-[11px] leading-relaxed text-zinc-600">
           {tr(
             `允许范围 ${MIN_LLM_TIMEOUT_SECONDS}–${MAX_LLM_TIMEOUT_SECONDS} 秒；保存后对新任务立即生效。`,
             `Allowed range: ${MIN_LLM_TIMEOUT_SECONDS}–${MAX_LLM_TIMEOUT_SECONDS} seconds; applies to new work immediately after saving.`,
           )}
         </p>
-      </section>
+      </Card>
     </div>
   );
 }

@@ -2036,7 +2036,7 @@ function PluginSpecEditor({
           type="button"
           onClick={() => void submit()}
           disabled={saving}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
         >
           {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
           <span>{saving ? tr('保存中…', 'Saving…') : tr('保存', 'Save')}</span>

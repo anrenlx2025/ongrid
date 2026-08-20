@@ -625,7 +625,7 @@ function InstallCard({
             onClick={submit}
             disabled={!canSubmit || !isAdmin}
             title={!isAdmin ? tr('需要 admin 权限', 'Admin permission required') : undefined}
-            variant="subtle"
+            variant="primary"
           >
             {installing ? (
               <Loader2 size={13} className="animate-spin" />
@@ -702,7 +702,7 @@ function ConfirmModal({
               <Trash2 size={12} />
               {tr('回滚卸载', 'Roll back')}
             </Button>
-            <Button onClick={onClose} variant="subtle">
+            <Button onClick={onClose} variant="primary">
               {tr('完成', 'Done')}
             </Button>
           </>

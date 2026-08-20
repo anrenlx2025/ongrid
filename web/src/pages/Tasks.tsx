@@ -115,13 +115,12 @@ function TaskList() {
           </div>
           {canMutate && (
             <div className="relative">
-              <button
-                type="button"
+              <Button
+                variant="primary"
                 onClick={() => setMenuOpen((v) => !v)}
-                className="inline-flex items-center gap-1.5 rounded-md border border-indigo-600 bg-indigo-600/20 px-2.5 py-1.5 text-xs text-indigo-200 hover:bg-indigo-600/30"
               >
                 <Plus size={12} /> {tr('新建任务', 'New task')} <ChevronDown size={12} className="opacity-70" />
-              </button>
+              </Button>
               {menuOpen && (
                 <>
                   <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} aria-hidden />

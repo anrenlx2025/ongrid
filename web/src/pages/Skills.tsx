@@ -641,7 +641,7 @@ function SkillDetailModal({ skill, onClose }: { skill: SkillSummary; onClose(): 
           ) : (
             <Link
               to={`/skills/${encodeURIComponent(skill.key)}`}
-              className="inline-flex items-center gap-1.5 rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white"
+              className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90"
             >
               <Play size={11} /> {tr('执行', 'Run')}
             </Link>

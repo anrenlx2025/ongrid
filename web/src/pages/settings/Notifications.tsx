@@ -480,7 +480,7 @@ function ChannelEditorModal({
           <Button onClick={onClose} variant="ghost">
             {tr('取消', 'Cancel')}
           </Button>
-          <Button onClick={submit} disabled={submitting} variant="subtle">
+          <Button onClick={submit} disabled={submitting} variant="primary">
             {submitting ? tr('保存中…', 'Saving…') : tr('保存', 'Save')}
           </Button>
         </>

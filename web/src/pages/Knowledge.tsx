@@ -360,7 +360,7 @@ export default function KnowledgePage() {
             type="button"
             onClick={() => void runSearch()}
             disabled={searching || !query.trim()}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
           >
             {searching ? tr('检索中…', 'Searching…') : tr('检索', 'Search')}
           </button>
@@ -1030,7 +1030,7 @@ function DocEditor({
                   ? tr('内置文档随同步更新、不可直接修改；复制一份到组织知识库后即可编辑', 'Built-in docs are refreshed on sync and not directly editable; copy into the org knowledge base to edit')
                   : tr('repo 文档随同步更新、不可直接修改；复制一份到组织知识库后即可编辑', 'Repo docs are refreshed on sync and not directly editable; copy into the org knowledge base to edit')
               }
-              className="flex items-center gap-1.5 rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
             >
               <Copy size={11} />
               {tr('复制为组织文档', 'Copy as org doc')}
@@ -1112,7 +1112,7 @@ function DocEditor({
             type="button"
             onClick={() => void submit()}
             disabled={submitting || title.trim() === '' || content.trim() === ''}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
           >
             {submitting ? tr('保存中…', 'Saving…') : tr('保存', 'Save')}
           </button>

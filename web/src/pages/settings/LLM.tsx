@@ -564,7 +564,7 @@ function LLMProviderCard({ meta }: { meta: LLMProviderMeta }) {
           {probe.kind === 'testing' ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />}
           <span>{probe.kind === 'testing' ? tr('检测中…', 'Testing…') : tr('测试配置', 'Test configuration')}</span>
         </Button>
-        <Button onClick={submit} disabled={!dirty || saving || probe.kind === 'testing'} variant="subtle">
+        <Button onClick={submit} disabled={!dirty || saving || probe.kind === 'testing'} variant="primary">
           {savedOk && !dirty ? <Check size={14} /> : <Save size={14} />}
           <span>{saving
             ? probe.kind === 'testing' ? tr('校验中…', 'Validating…') : tr('保存中…', 'Saving…')
