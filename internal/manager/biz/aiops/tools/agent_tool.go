@@ -200,11 +200,12 @@ type agentToolArgs struct {
 // Info returns the tool metadata.
 func (t *AgentTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 	return &basetool.ToolInfo{
-		Name:        AgentToolName,
-		Description: "Spawn a specialized sub-agent worker for a delegable task.",
-		WhenToUse:   agentToolWhenToUse,
-		Parameters:  json.RawMessage(agentToolSchema),
-		Class:       "write",
+		Name:         AgentToolName,
+		Description:  "Spawn a specialized sub-agent worker for a delegable task.",
+		WhenToUse:    agentToolWhenToUse,
+		Parameters:   json.RawMessage(agentToolSchema),
+		Class:        "write",
+		Confirmation: basetool.ConfirmationNotRequired,
 	}, nil
 }
 

@@ -27,16 +27,20 @@ type scriptedChatModel struct {
 	replies []*schema.Message
 	idx     int
 	calls   atomic.Int32
+	inputs  [][]*schema.Message
 }
 
 func newScriptedChatModel(replies ...*schema.Message) *scriptedChatModel {
 	return &scriptedChatModel{replies: replies}
 }
 
-func (s *scriptedChatModel) Generate(_ context.Context, _ []*schema.Message, _ ...einomodel.Option) (*schema.Message, error) {
+func (s *scriptedChatModel) Generate(_ context.Context, input []*schema.Message, _ ...einomodel.Option) (*schema.Message, error) {
 	s.calls.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	inputCopy := make([]*schema.Message, len(input))
+	copy(inputCopy, input)
+	s.inputs = append(s.inputs, inputCopy)
 	if len(s.replies) == 0 {
 		return &schema.Message{Role: schema.Assistant, Content: "ok"}, nil
 	}
@@ -314,6 +318,64 @@ func TestRuntime_Handle_HappyPath_FinalReply(t *testing.T) {
 	if events[len(events)-1].Type != EventDone {
 		t.Errorf("last event type = %q, want done", events[len(events)-1].Type)
 	}
+}
+
+func TestRuntime_Handle_HostFollowUpFromHistory_ReachesModel(t *testing.T) {
+	tests := []struct {
+		name     string
+		question string
+		answer   string
+	}{
+		{name: "chinese", question: "哪个磁盘占比比较大？", answer: "设备 1 的根分区占用最高"},
+		{name: "english", question: "Which disk is using the most space on this device?", answer: "The root filesystem on device 1 has the highest usage."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess := &model.Session{ID: "s-follow-up-" + tt.name, UserID: 7}
+			store := newMemSessions(sess)
+			callID := "call_previous_" + tt.name
+			store.messages = append(store.messages,
+				&model.Message{ID: "u-prev-" + tt.name, SessionID: sess.ID, Role: model.RoleUser, Content: strPtr("device_id = 1")},
+				&model.Message{ID: "a-tool-" + tt.name, SessionID: sess.ID, Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{
+					ToolName: "host_bash", ArgumentsJSON: `{"device_ids":[1],"cmd":"df -h"}`,
+					Status: model.StatusSuccess, LLMCallID: &callID,
+				}}},
+				&model.Message{ID: "t-prev-" + tt.name, SessionID: sess.ID, Role: model.RoleTool, Content: strPtr(`{"success_count":1}`), ToolName: strPtr("host_bash"), ToolCallID: &callID},
+				&model.Message{ID: "a-prev-" + tt.name, SessionID: sess.ID, Role: model.RoleAssistant, Content: strPtr("device 1 root filesystem usage is 77%")},
+			)
+			scripted := newScriptedChatModel(&schema.Message{Role: schema.Assistant, Content: tt.answer})
+			rt, err := NewRuntime(Config{Sessions: store, ChatModel: scripted, GraphCfg: graph.Config{MaxIterations: 5}})
+			if err != nil {
+				t.Fatalf("NewRuntime: %v", err)
+			}
+
+			reply, err := rt.Handle(context.Background(), &Request{SessionID: sess.ID, UserID: sess.UserID, Role: "admin", UserText: tt.question})
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if scripted.calls.Load() != 1 {
+				t.Fatalf("LLM calls = %d, want 1; request was likely intercepted before history replay", scripted.calls.Load())
+			}
+			if reply == nil || reply.Message == nil || reply.Message.Content == nil || *reply.Message.Content != tt.answer {
+				t.Fatalf("reply = %+v, want %q", reply, tt.answer)
+			}
+			scripted.mu.Lock()
+			inputs := append([][]*schema.Message(nil), scripted.inputs...)
+			scripted.mu.Unlock()
+			if len(inputs) != 1 || !schemaMessagesContain(inputs[0], "device_id = 1") || !schemaMessagesContain(inputs[0], tt.question) {
+				t.Fatalf("model input did not contain prior target and current question: %+v", inputs)
+			}
+		})
+	}
+}
+
+func schemaMessagesContain(messages []*schema.Message, needle string) bool {
+	for _, msg := range messages {
+		if msg != nil && contains(msg.Content, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRuntime_Handle_ConfirmedConfigDraft_AppliesWithoutLLM(t *testing.T) {

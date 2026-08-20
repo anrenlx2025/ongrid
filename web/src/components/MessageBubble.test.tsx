@@ -6,6 +6,8 @@ import { MessageBubble, type ConfigDraftResult } from './MessageBubble';
 import type { ChatMessage } from '@/api/chat';
 import { executeOperationAction, getOperation } from '@/api/operations';
 import { getPacketCaptureSession } from '@/api/packetCaptures';
+import { getApproval } from '@/api/approvals';
+import { setLocale } from '@/i18n/locale';
 
 vi.mock('@/api/operations', () => ({
   executeOperationAction: vi.fn(),
@@ -14,10 +16,62 @@ vi.mock('@/api/operations', () => ({
 vi.mock('@/api/packetCaptures', () => ({
   getPacketCaptureSession: vi.fn(),
 }));
+vi.mock('@/api/approvals', () => ({
+  getApproval: vi.fn(),
+  approveApproval: vi.fn(),
+  rejectApproval: vi.fn(),
+}));
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  setLocale('zh-CN');
+});
+
+describe('MessageBubble shared approval card', () => {
+  it.each([
+    ['zh-CN', '需要你确认才能执行 capture_pcap'],
+    ['en-US', 'Needs your approval to run capture_pcap'],
+  ] as const)('renders a generic tool proposal in %s', async (locale, heading) => {
+    setLocale(locale);
+    vi.mocked(getApproval).mockResolvedValue({
+      id: 'approval-1',
+      kind: 'agent_tool',
+      title: 'capture_pcap confirmation',
+      summary: 'capture_pcap {"device_id":1,"interface":"eth0"}',
+      payload: JSON.stringify({
+        tool_name: 'capture_pcap',
+        summary: 'capture_pcap {"device_id":1,"interface":"eth0"}',
+      }),
+      source: 'agent',
+      session_id: 'session-1',
+      status: 'pending',
+      proposed_by: 1,
+      created_at: new Date().toISOString(),
+    });
+
+    render(<MessageBubble message={{
+      id: 'tool-card-approval',
+      role: 'tool',
+      kind: 'tool_card',
+      tool_call: {
+        id: 'call-1',
+        name: 'capture_pcap',
+        status: 'pending',
+        result: {
+          status: 'pending_approval',
+          approval_id: 'approval-1',
+          kind: 'agent_tool',
+          tool_name: 'capture_pcap',
+          command: 'capture_pcap {"device_id":1,"interface":"eth0"}',
+        },
+      },
+    }} />);
+
+    expect(await screen.findByText(heading)).toBeInTheDocument();
+    expect(screen.getByText(/capture_pcap \{"device_id":1/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: locale === 'zh-CN' ? '批准并执行' : 'Approve & run' })).toBeInTheDocument();
+  });
 });
 
 const supportedKinds = [

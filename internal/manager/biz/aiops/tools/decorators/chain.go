@@ -40,6 +40,12 @@ type Deps struct {
 	// ReviewSink writes chat_mutating_proposals rows. Nil-safe.
 	ReviewSink MutatingProposalSink
 
+	// HumanApproval queues every tool whose metadata requires confirmation
+	// into the durable approval/card flow. Nil means the gate is not installed;
+	// chat composition roots MUST wire it, while pre-authorized workflow nodes
+	// deliberately omit it.
+	HumanApproval HumanApprovalProposer
+
 	// ReviewerAgent overrides DefaultReviewerAgent. Empty falls back.
 	ReviewerAgent string
 
@@ -49,7 +55,7 @@ type Deps struct {
 
 // Wrap returns inner wrapped by the standard decorator stack:
 //
-//	tenant_bind → review_gate → timeout → audit → ratelimit → metric
+//	tenant_bind → review_gate → human_approval → timeout → audit → ratelimit → metric
 //
 // Reading top-down (ASCII flow + SOP gating):
 // a request hits tenant_bind first (it's the outermost wrapper),
@@ -110,6 +116,9 @@ func Wrap(inner basetool.BaseTool, deps Deps) basetool.BaseTool {
 	tool = WithRateLimit(tool, limiter)
 	tool = WithAudit(tool, deps.Audit) // nil-safe: pass-through
 	tool = WithTimeout(tool, deps.Timeout)
+	if deps.HumanApproval != nil {
+		tool = WithHumanApprovalGate(tool, deps.HumanApproval)
+	}
 	if deps.ReviewSpawner != nil {
 		tool = WithReviewGate(tool, deps.ReviewSpawner, ReviewGateConfig{
 			ReviewerAgent: deps.ReviewerAgent,

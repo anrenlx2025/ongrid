@@ -84,11 +84,12 @@ const cloudBashWhenToUse = "在云端(manager)运行命令——terraform / 云�
 // it always carries the highest gate (and routes through human approval).
 func (t *CloudBashTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 	return &basetool.ToolInfo{
-		Name:        ToolNameCloudBash,
-		Description: "Run a command in the cloud (manager) sandbox with an injected credential; queued for human approval before it executes.",
-		WhenToUse:   cloudBashWhenToUse,
-		Parameters:  CloudBashSchema,
-		Class:       "destructive",
+		Name:         ToolNameCloudBash,
+		Description:  "Run a command in the cloud (manager) sandbox with an injected credential; queued for human approval before it executes.",
+		WhenToUse:    cloudBashWhenToUse,
+		Parameters:   CloudBashSchema,
+		Class:        "destructive",
+		Confirmation: basetool.ConfirmationSelfManaged,
 	}, nil
 }
 

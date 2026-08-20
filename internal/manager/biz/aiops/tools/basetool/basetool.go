@@ -91,6 +91,14 @@ type ToolInfo struct {
 	//   - "destructive" — mutates external state (e.g. restart a service)
 	Class string
 
+	// Confirmation controls the shared human-confirmation gate.
+	// Empty uses the class default (write/destructive require approval),
+	// "required" also gates read-class sensitive actions, "not-required"
+	// explicitly exempts benign internal writes, and
+	// "self-managed" is reserved for tools already backed by the same durable
+	// approval protocol internally (for example conditional host_bash writes).
+	Confirmation string
+
 	// Origin records where the tool came from, so policy can treat
 	// runtime-discovered tools differently from compiled-in builtins
 	// WITHOUT string-matching wire names (which doesn't scale as dynamic
@@ -101,6 +109,12 @@ type ToolInfo struct {
 	// specialist instead of wielding a sprawling, ever-growing set itself.
 	Origin string
 }
+
+const (
+	ConfirmationRequired    = "required"
+	ConfirmationNotRequired = "not-required"
+	ConfirmationSelfManaged = "self-managed"
+)
 
 // Tool origin codes. Empty (OriginBuiltin) is the default for compiled-in
 // BaseTools; every runtime-discovered source stamps its own code.
@@ -158,6 +172,7 @@ type invokeConfig struct {
 	// user turn. They are execution evidence, unlike a device discovered by
 	// a preceding tool call or inferred by the model.
 	ConfirmedDeviceIDs []uint64
+	HumanApproved      bool
 }
 
 // WithTenant sets the tenant identifier on the invoke config.
@@ -197,6 +212,12 @@ func WithHostWritePermission(allowed bool) InvokeOption {
 	return func(c *invokeConfig) { c.HostWriteAllowed = allowed }
 }
 
+// WithHumanApproval is an internal execution capability stamped only by the
+// shared approval gate after the durable proposal has been approved.
+func WithHumanApproval(approved bool) InvokeOption {
+	return func(c *invokeConfig) { c.HumanApproved = approved }
+}
+
 // ResolveOptions applies opts to a fresh invokeConfig and returns it.
 // Exposed for the decorator package — tool implementations don't need
 // it (they receive the resolved values via decorators or skip them).
@@ -219,6 +240,7 @@ func ResolveOptions(opts []InvokeOption) Resolved {
 		UserText:           c.UserText,
 		HostWriteAllowed:   c.HostWriteAllowed,
 		ConfirmedDeviceIDs: append([]uint64(nil), c.ConfirmedDeviceIDs...),
+		HumanApproved:      c.HumanApproved,
 	}
 }
 
@@ -232,4 +254,5 @@ type Resolved struct {
 	UserText           string
 	HostWriteAllowed   bool
 	ConfirmedDeviceIDs []uint64
+	HumanApproved      bool
 }

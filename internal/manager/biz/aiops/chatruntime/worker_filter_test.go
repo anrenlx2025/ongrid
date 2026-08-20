@@ -9,10 +9,21 @@ import (
 
 // originTool is a minimal BaseTool whose Info carries a configurable Origin /
 // Class, for exercising the role filter.
-type originTool struct{ name, class, origin string }
+type originTool struct{ name, class, origin, confirmation string }
 
 func (o *originTool) Info(context.Context) (*basetool.ToolInfo, error) {
-	return &basetool.ToolInfo{Name: o.name, Description: "x", Class: o.class, Origin: o.origin}, nil
+	return &basetool.ToolInfo{Name: o.name, Description: "x", Class: o.class, Origin: o.origin, Confirmation: o.confirmation}, nil
+}
+
+func TestFilterToolsForAgentRole_ViewerDropsSensitiveReadTool(t *testing.T) {
+	bag := []basetool.BaseTool{
+		&originTool{name: "query_devices", class: "read"},
+		&originTool{name: "capture_pcap", class: "read", confirmation: basetool.ConfirmationRequired},
+	}
+	view := filterToolsForAgentRole(bag, nil, true, true)
+	if !toolbagHas(view, "query_devices") || toolbagHas(view, "capture_pcap") {
+		t.Fatalf("viewer tools = %+v; sensitive read tool must be removed", view)
+	}
 }
 func (o *originTool) InvokableRun(context.Context, string, ...basetool.InvokeOption) (string, error) {
 	return "{}", nil

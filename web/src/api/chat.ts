@@ -220,8 +220,8 @@ export type ToolStreamEvent = {
   result_raw?: string;
 };
 
-// ApprovalPendingStreamEvent (HLD-021): a synchronous-blocking tool
-// (cloud_bash) has queued a human-approval proposal and is now blocking on
+// ApprovalPendingStreamEvent (HLD-021): a synchronous-blocking tool has
+// queued a human-approval proposal and is now blocking on
 // the decision. The frontend renders the inline approve/reject card live
 // from this frame — the tool no longer returns a pending_approval result
 // blob (it blocks, then returns the real command output). tool_call_id ties
@@ -230,6 +230,7 @@ export type ApprovalPendingStreamEvent = {
   approval_id: string;
   tool_call_id?: string;
   kind?: string;
+  tool_name?: string;
   command?: string;
   credentials?: string[];
 };
