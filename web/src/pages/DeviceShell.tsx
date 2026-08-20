@@ -552,7 +552,7 @@ function ConnectModal({
           <Button variant="ghost" onClick={onCancel}>
             {tr('取消', 'Cancel')}
           </Button>
-          <Button variant="subtle" onClick={submit}>
+          <Button variant="primary" onClick={submit}>
             {tr('连接', 'Connect')}
           </Button>
         </>
@@ -704,4 +704,3 @@ function safeParse(s: string): Record<string, unknown> | null {
     return null;
   }
 }
-

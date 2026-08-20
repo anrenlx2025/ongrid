@@ -323,13 +323,11 @@ func (s *Service) AcknowledgeIncident(ctx context.Context, caller Caller, id uin
 	return toServiceIncident(row), nil
 }
 
-// ResolveIncident transitions an incident to resolved.
+// ResolveIncident transitions an incident to resolved. Note is optional and,
+// when present, is stored in the TEXT-backed incident timeline event.
 func (s *Service) ResolveIncident(ctx context.Context, caller Caller, id uint64, in IncidentMutationInput) (*Incident, error) {
 	if id == 0 {
 		return nil, fmt.Errorf("%w: incident id required", errs.ErrInvalid)
-	}
-	if strings.TrimSpace(in.Note) == "" {
-		return nil, fmt.Errorf("%w: resolve note required", errs.ErrInvalid)
 	}
 	if s.uc == nil {
 		return nil, errs.ErrNotWiredYet

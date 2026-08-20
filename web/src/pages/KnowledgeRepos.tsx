@@ -353,7 +353,7 @@ function RepoCreator({ onClose, onCreated }: { onClose: () => void; onCreated: (
             type="button"
             onClick={() => void submit()}
             disabled={submitting || url.trim() === ''}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
           >
             {submitting ? tr('保存中…', 'Saving…') : tr('保存（保存后再点同步）', 'Save (then click Sync)')}
           </button>
@@ -678,7 +678,7 @@ function AddSSHIdentityModal({
           <button
             type="button"
             onClick={closeAndRefresh}
-            className="inline-flex items-center rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white"
+            className="inline-flex items-center rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90"
           >
             {tr('我已复制', 'Copied — done')}
           </button>
@@ -732,7 +732,7 @@ function AddSSHIdentityModal({
             type="button"
             disabled={!canSubmit}
             onClick={() => void submit()}
-            className="inline-flex items-center gap-1 rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-40"
+            className="inline-flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-40"
           >
             {busy
               ? tr('处理中…', 'Working…')

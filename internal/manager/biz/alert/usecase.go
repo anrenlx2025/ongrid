@@ -82,6 +82,8 @@ type Usecase struct {
 	workflowDispatcher WorkflowDispatcher
 }
 
+const maxSilenceNameRunes = 256
+
 func NewUsecase(repo Repo, log *slog.Logger) *Usecase {
 	if log == nil {
 		log = slog.Default()
@@ -186,7 +188,7 @@ func (u *Usecase) SilenceIncident(ctx context.Context, id, operatorUserID uint64
 	}
 	reasonCopy := reason
 	if err := u.repo.CreateSilence(ctx, &model.Silence{
-		Name:         incident.Title,
+		Name:         buildSilenceName(incident),
 		ScopeType:    incident.ScopeType,
 		Status:       model.SilenceStatusActive,
 		MatchersJSON: matchers,
@@ -208,6 +210,24 @@ func (u *Usecase) SilenceIncident(ctx context.Context, id, operatorUserID uint64
 		ActorID:     &operatorUserID,
 		OccurredAt:  now,
 	}, incident.Rule)
+}
+
+func buildSilenceName(incident *model.Incident) string {
+	if incident == nil {
+		return ""
+	}
+	name := strings.TrimSpace(incident.Title)
+	if name == "" {
+		name = strings.TrimSpace(incident.RuleName)
+	}
+	if name == "" {
+		name = strings.TrimSpace(incident.Rule)
+	}
+	runes := []rune(name)
+	if len(runes) <= maxSilenceNameRunes {
+		return name
+	}
+	return string(runes[:maxSilenceNameRunes-1]) + "…"
 }
 
 func (u *Usecase) ListEvents(ctx context.Context, incidentID uint64, limit int) ([]*model.Event, error) {

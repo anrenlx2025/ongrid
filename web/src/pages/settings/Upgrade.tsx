@@ -247,7 +247,7 @@ function CommandList({
                 <div className="mt-1 font-mono text-[11px] text-zinc-500">{item.arch}</div>
               </div>
               <Button
-                variant={copied === item.id ? 'subtle' : 'ghost'}
+                variant="ghost"
                 onClick={() => onCopy(item)}
                 className="w-full justify-center sm:w-auto"
               >

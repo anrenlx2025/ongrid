@@ -6,7 +6,7 @@ import { cn } from '@/lib/cn';
 //   - ghost:   border border-zinc-700 bg-zinc-900, used for refresh / secondary
 //   - danger:  red destructive (delete confirm dialogs)
 // Size is fixed (text-xs / px-2.5 py-1.5) so adjacent buttons don't drift.
-type Variant = 'primary' | 'ghost' | 'danger' | 'subtle';
+type Variant = 'primary' | 'ghost' | 'danger';
 
 type Props = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: Variant;
@@ -19,8 +19,6 @@ const VARIANT_CLASS: Record<Variant, string> = {
     'border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40',
   danger:
     'bg-red-500 text-white hover:bg-red-600 disabled:opacity-50',
-  subtle:
-    'bg-zinc-100 text-zinc-900 hover:bg-white disabled:opacity-50',
 };
 
 export const Button = forwardRef<HTMLButtonElement, Props>(function Button(

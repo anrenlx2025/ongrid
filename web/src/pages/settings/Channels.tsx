@@ -347,7 +347,7 @@ function IMAppEditor({
             type="button"
             onClick={save}
             disabled={busy}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90 disabled:opacity-50"
           >
             {busy ? tr('保存中…', 'Saving…') : tr('保存', 'Save')}
           </button>

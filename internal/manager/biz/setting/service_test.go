@@ -215,6 +215,24 @@ func TestServiceSetBatchValidatesAgentLLMTimeout(t *testing.T) {
 	}
 }
 
+func TestAgentOutputLocale(t *testing.T) {
+	ctx := context.Background()
+	svc := New(newFakeRepo(), nil)
+
+	if got, found, err := svc.AgentOutputLocale(ctx); err != nil || found || got != "" {
+		t.Fatalf("unset AgentOutputLocale() = (%q, %v, %v), want empty, false, nil", got, found, err)
+	}
+	if err := svc.Set(ctx, model.CategoryAgent, model.KeyAgentOutputLocale, "ZH", false); err != nil {
+		t.Fatalf("Set(zh): %v", err)
+	}
+	if got, found, err := svc.AgentOutputLocale(ctx); err != nil || !found || got != "zh" {
+		t.Fatalf("AgentOutputLocale() = (%q, %v, %v), want zh, true, nil", got, found, err)
+	}
+	if err := svc.Set(ctx, model.CategoryAgent, model.KeyAgentOutputLocale, "ja", false); !errors.Is(err, errs.ErrInvalid) {
+		t.Fatalf("Set(ja) error = %v, want errs.ErrInvalid", err)
+	}
+}
+
 func TestServiceSetInvalidatesCache(t *testing.T) {
 	repo := newFakeRepo()
 	if _, err := repo.Set(context.Background(), "llm", "openai_model", "gpt-4o", false); err != nil {

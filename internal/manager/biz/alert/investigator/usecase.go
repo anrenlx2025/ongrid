@@ -92,6 +92,13 @@ type MessageReader interface {
 	ListMessages(ctx context.Context, sessionID string, limit int) ([]*aiopsmodel.Message, error)
 }
 
+// LocaleResolver supplies the live system-wide Agent output language. It is
+// defined by the consumer so the alert domain does not depend on the settings
+// implementation. Empty/not-found preserves the request/deployment fallback.
+type LocaleResolver interface {
+	AgentOutputLocale(ctx context.Context) (locale string, found bool, err error)
+}
+
 // RelatedAlertQuerier finds incidents that fired close in time to the
 // target incident — used to populate the report's related_alerts
 // section so operators see co-occurring symptoms (e.g. swap_high +
@@ -168,6 +175,7 @@ type Usecase struct {
 	summarizer LLMSummarizer
 	related    RelatedAlertQuerier
 	messages   MessageReader
+	locales    LocaleResolver
 	cfg        Config
 	log        *slog.Logger
 
@@ -249,6 +257,13 @@ func (uc *Usecase) WithMessageReader(m MessageReader) *Usecase {
 	return uc
 }
 
+// WithLocaleResolver wires runtime Agent language settings. Resolution happens
+// for every newly enqueued investigation, so admin changes require no restart.
+func (uc *Usecase) WithLocaleResolver(r LocaleResolver) *Usecase {
+	uc.locales = r
+	return uc
+}
+
 // tryAcquireSem is the non-blocking permit grab. Returns true when a
 // slot was taken (caller MUST releaseSem on completion), false when
 // the cap is full. Nil sem (uncapped) always returns true.
@@ -311,11 +326,10 @@ func (uc *Usecase) InvestigateAsync(incident *alertmodel.Incident) {
 // back to Config defaults. Right now only Locale is plumbed, but the type
 // is here so callers grow it without breaking existing call sites.
 type EnqueueOpts struct {
-	// Locale overrides Config.DefaultLocale for this run only ("en", "zh").
-	// Empty → use Config.DefaultLocale. HTTP handler sets it from
-	// Accept-Language so a manual trigger's report comes back in the
-	// operator's current UI language; auto-fire / backfill leaves it
-	// empty and gets the site default.
+	// Locale is the request-context fallback for this run ("en", "zh").
+	// A configured Agent output locale takes precedence. When the Agent
+	// setting is absent, HTTP manual triggers use Accept-Language while
+	// auto-fire / backfill falls back to Config.DefaultLocale.
 	Locale string
 }
 
@@ -327,8 +341,8 @@ func (uc *Usecase) Enqueue(ctx context.Context, incident *alertmodel.Incident) {
 	uc.EnqueueWith(ctx, incident, EnqueueOpts{})
 }
 
-// EnqueueWith is Enqueue with per-call overrides. Today only Locale flows
-// through to the worker + extractor prompts. Empty opts ↔ Enqueue exactly.
+// EnqueueWith is Enqueue with request context. Locale resolution is:
+// live Agent setting → request locale → deployment default.
 func (uc *Usecase) EnqueueWith(ctx context.Context, incident *alertmodel.Incident, opts EnqueueOpts) {
 	if uc == nil || !uc.cfg.Enabled {
 		return
@@ -420,11 +434,23 @@ func (uc *Usecase) EnqueueWith(ctx context.Context, incident *alertmodel.Inciden
 	// is minutes-scale. Spawn the goroutine and return immediately.
 	// run() defers releaseSem so the slot frees on any termination
 	// path (success / error / panic / timeout).
-	locale := opts.Locale
-	if locale == "" {
-		locale = uc.cfg.DefaultLocale
-	}
+	locale := uc.resolveLocale(ctx, opts.Locale)
 	go uc.run(rep.ID, *incident, key, locale)
+}
+
+func (uc *Usecase) resolveLocale(ctx context.Context, requested string) string {
+	if uc.locales != nil {
+		locale, found, err := uc.locales.AgentOutputLocale(ctx)
+		if err != nil {
+			uc.logger().Warn("resolve Agent output locale failed; using fallback", slog.Any("err", err))
+		} else if found && strings.TrimSpace(locale) != "" {
+			return locale
+		}
+	}
+	if strings.TrimSpace(requested) != "" {
+		return requested
+	}
+	return uc.cfg.DefaultLocale
 }
 
 // ForceEnqueue is the manual-trigger path called from POST

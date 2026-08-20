@@ -51,6 +51,16 @@ func TestServiceAcknowledgeIncidentAllowsEmptyNote(t *testing.T) {
 	}
 }
 
+func TestServiceResolveIncidentAllowsEmptyNote(t *testing.T) {
+	t.Parallel()
+
+	svc := NewStub()
+	_, err := svc.ResolveIncident(context.Background(), Caller{}, 9, IncidentMutationInput{})
+	if !errors.Is(err, errs.ErrNotWiredYet) {
+		t.Fatalf("ResolveIncident(empty note) err = %v, want not-wired-yet", err)
+	}
+}
+
 func TestServiceCreateChannelValidatesInput(t *testing.T) {
 	t.Parallel()
 

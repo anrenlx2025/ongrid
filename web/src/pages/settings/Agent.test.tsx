@@ -79,3 +79,50 @@ describe('SettingsAgent LLM timeout', () => {
     expect(calls).toBe(0);
   });
 });
+
+describe('SettingsAgent output language', () => {
+  it('loads and persists the Agent output locale', async () => {
+    let saved: Record<string, unknown> | null = null;
+    server.use(
+      http.get('/api/v1/system-settings', () => HttpResponse.json({
+        items: [{
+          category: 'agent',
+          key: 'output_locale',
+          value: 'en',
+          sensitive: false,
+          updated_at: '2026-08-19T00:00:00Z',
+        }],
+        total: 1,
+      })),
+      http.put('/api/v1/system-settings/agent/output_locale', async ({ request }) => {
+        saved = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          category: 'agent',
+          key: 'output_locale',
+          value: 'zh',
+          sensitive: false,
+          updated_at: '2026-08-19T00:00:00Z',
+        });
+      }),
+    );
+
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <SettingsAgent />
+        </MemoryRouter>,
+      );
+    });
+
+    const select = await screen.findByRole('combobox', { name: 'Output language' });
+    expect(select).toHaveValue('en');
+
+    const user = userEvent.setup();
+    await act(async () => {
+      await user.selectOptions(select, 'zh');
+      await user.click(screen.getByRole('button', { name: 'Save language' }));
+    });
+
+    await waitFor(() => expect(saved).toEqual({ value: 'zh', sensitive: false }));
+  });
+});

@@ -277,7 +277,7 @@ function PrometheusCard() {
       )}
 
       <div className="mt-5 flex flex-wrap items-center gap-3">
-        <Button onClick={submit} disabled={!dirty || saving} variant="subtle">
+        <Button onClick={submit} disabled={!dirty || saving} variant="primary">
           {savedOk && !dirty ? <Check size={14} /> : <Save size={14} />}
           <span>{saving ? tr('保存中…', 'Saving…') : savedOk && !dirty ? tr('已保存', 'Saved') : tr('保存', 'Save')}</span>
         </Button>
@@ -565,7 +565,7 @@ function GrafanaCard() {
       )}
 
       <div className="mt-5 flex flex-wrap items-center gap-3">
-        <Button onClick={save} disabled={!dirty || saving} variant="subtle">
+        <Button onClick={save} disabled={!dirty || saving} variant="primary">
           {savedOk && !dirty ? <Check size={14} /> : <Save size={14} />}
           <span>{saving ? tr('保存中…', 'Saving…') : savedOk && !dirty ? tr('已保存', 'Saved') : tr('保存', 'Save')}</span>
         </Button>
@@ -989,7 +989,7 @@ function LokiCard() {
       )}
 
       <div className="mt-5 flex flex-wrap items-center gap-3">
-        <Button onClick={submit} disabled={!dirty || saving} variant="subtle">
+        <Button onClick={submit} disabled={!dirty || saving} variant="primary">
           {savedOk && !dirty ? <Check size={14} /> : <Save size={14} />}
           <span>{saving ? tr('保存中…', 'Saving…') : savedOk && !dirty ? tr('已保存', 'Saved') : tr('保存', 'Save')}</span>
         </Button>
@@ -1184,7 +1184,7 @@ function TempoCard() {
       )}
 
       <div className="mt-5 flex flex-wrap items-center gap-3">
-        <Button onClick={submit} disabled={!dirty || saving} variant="subtle">
+        <Button onClick={submit} disabled={!dirty || saving} variant="primary">
           {savedOk && !dirty ? <Check size={14} /> : <Save size={14} />}
           <span>{saving ? tr('保存中…', 'Saving…') : savedOk && !dirty ? tr('已保存', 'Saved') : tr('保存', 'Save')}</span>
         </Button>
@@ -1515,7 +1515,7 @@ function WebSearchCard() {
       )}
 
       <div className="mt-5 flex flex-wrap items-center gap-3">
-        <Button onClick={submit} disabled={!dirty || saving} variant="subtle">
+        <Button onClick={submit} disabled={!dirty || saving} variant="primary">
           {savedOk && !dirty ? <Check size={14} /> : <Save size={14} />}
           <span>{saving ? tr('保存中…', 'Saving…') : savedOk && !dirty ? tr('已保存', 'Saved') : tr('保存', 'Save')}</span>
         </Button>

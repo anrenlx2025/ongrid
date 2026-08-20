@@ -94,7 +94,7 @@ export function ClusterEnrollmentModal({
       size="lg"
       footer={
         created ? (
-          <Button variant="subtle" onClick={onClose}>
+          <Button variant="primary" onClick={onClose}>
             {tr("我已保存命令", "I've saved the command")}
           </Button>
         ) : (

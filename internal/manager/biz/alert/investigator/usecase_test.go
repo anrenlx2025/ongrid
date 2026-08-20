@@ -79,11 +79,21 @@ func (r *fakeRepo) ListIncidentsWithoutReport(_ context.Context, _ time.Time, _ 
 }
 
 type fakeSpawner struct {
-	mu      sync.Mutex
-	calls   []chatruntime.SpawnRequest
-	worker  *chatruntime.Worker
-	err     error
-	wait    time.Duration
+	mu     sync.Mutex
+	calls  []chatruntime.SpawnRequest
+	worker *chatruntime.Worker
+	err    error
+	wait   time.Duration
+}
+
+type fakeLocaleResolver struct {
+	locale string
+	found  bool
+	err    error
+}
+
+func (r fakeLocaleResolver) AgentOutputLocale(context.Context) (string, bool, error) {
+	return r.locale, r.found, r.err
 }
 
 func (s *fakeSpawner) SpawnWorker(ctx context.Context, req chatruntime.SpawnRequest) (*chatruntime.Worker, error) {
@@ -112,6 +122,25 @@ func TestEnqueue_DisabledByDefault(t *testing.T) {
 	uc.Enqueue(context.Background(), &alertmodel.Incident{ID: 1, Severity: "critical"})
 	if len(repo.created) != 0 {
 		t.Errorf("disabled UC created %d rows, want 0", len(repo.created))
+	}
+}
+
+func TestResolveLocalePrefersAgentSetting(t *testing.T) {
+	uc := NewUsecase(&fakeRepo{}, &fakeSpawner{}, nil, Config{DefaultLocale: "en"}, nil).
+		WithLocaleResolver(fakeLocaleResolver{locale: "zh", found: true})
+	if got := uc.resolveLocale(context.Background(), "en"); got != "zh" {
+		t.Fatalf("resolveLocale() = %q, want zh", got)
+	}
+}
+
+func TestResolveLocaleFallsBackToRequestThenDeploymentDefault(t *testing.T) {
+	uc := NewUsecase(&fakeRepo{}, &fakeSpawner{}, nil, Config{DefaultLocale: "en"}, nil).
+		WithLocaleResolver(fakeLocaleResolver{})
+	if got := uc.resolveLocale(context.Background(), "zh"); got != "zh" {
+		t.Fatalf("request fallback = %q, want zh", got)
+	}
+	if got := uc.resolveLocale(context.Background(), ""); got != "en" {
+		t.Fatalf("deployment fallback = %q, want en", got)
 	}
 }
 

@@ -63,6 +63,11 @@ const (
 	// generation in seconds. The typed setting accessor owns its default and
 	// range validation so callers cannot accidentally accept an unbounded value.
 	KeyAgentLLMTimeoutSeconds = "llm_timeout_seconds"
+	// KeyAgentOutputLocale controls the language used by headless Agent work
+	// that has no browser locale, starting with automatic RCA investigations.
+	// Empty/unset keeps the caller-specific fallback; supported values are
+	// "zh" and "en".
+	KeyAgentOutputLocale = "output_locale"
 )
 
 // (CategoryGit + KeyGitGitHubToken removed HTTPS git
