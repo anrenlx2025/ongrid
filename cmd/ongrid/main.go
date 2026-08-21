@@ -1103,7 +1103,7 @@ func main() {
 	logsBackendSvc := managerbizlogs.NewService(logsBackendRepo, secretUC, lokiLogClient, log.With(slog.String("comp", "logs-backend")))
 	logsBackendSvc.SetHostDeviceResolver(edgeDeviceRepo)
 	logsBackendSvc.SetRolloutEdgeInventory(logsRolloutEdgeInventory{edges: edgeUC, configs: pluginConfigUC})
-	logsBackendSvc.SetActivationGuard(func(ctx context.Context) error {
+	logsBackendSvc.SetApplyGuard(func(ctx context.Context) error {
 		rules, err := alertRepo.ListAllEnabledRules(ctx)
 		if err != nil {
 			return fmt.Errorf("inspect enabled log alert rules: %w", err)

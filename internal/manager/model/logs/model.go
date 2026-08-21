@@ -17,7 +17,7 @@ const (
 type BackendStatus string
 
 const (
-	BackendStatusDraft        BackendStatus = "draft"
+	BackendStatusSaved        BackendStatus = "saved"
 	BackendStatusDistributing BackendStatus = "distributing"
 	BackendStatusVerifying    BackendStatus = "verifying"
 	BackendStatusActive       BackendStatus = "active"
@@ -30,31 +30,30 @@ const (
 // are stored in the generic encrypted secret vault; only credential names are
 // persisted here.
 type Backend struct {
-	ID                  uint64                `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
-	Name                string                `gorm:"column:name;type:varchar(128);not null;default:'';uniqueIndex:uk_log_backend_name,priority:1" json:"name"`
-	Type                BackendType           `gorm:"column:type;type:varchar(32);not null;default:'elasticsearch'" json:"type"`
-	Status              BackendStatus         `gorm:"column:status;type:varchar(24);not null;default:'draft';index:idx_log_backends_status" json:"status"`
-	Generation          uint64                `gorm:"column:generation;not null;default:1;uniqueIndex:uk_log_backend_name,priority:2" json:"generation"`
-	WriteEndpointsJSON  string                `gorm:"column:write_endpoints_json;type:text;not null" json:"-"`
-	QueryEndpoint       string                `gorm:"column:query_endpoint;type:varchar(2048);not null;default:''" json:"query_endpoint"`
-	Dataset             string                `gorm:"column:dataset;type:varchar(100);not null;default:'ongrid.generic'" json:"dataset"`
-	Namespace           string                `gorm:"column:namespace;type:varchar(100);not null;default:'default'" json:"namespace"`
-	IndexPattern        string                `gorm:"column:index_pattern;type:varchar(255);not null;default:'logs-ongrid.*.otel-*'" json:"index_pattern"`
-	WriteCredentialRef  string                `gorm:"column:write_credential_ref;type:varchar(128);not null;default:''" json:"write_credential_ref"`
-	QueryCredentialRef  string                `gorm:"column:query_credential_ref;type:varchar(128);not null;default:''" json:"query_credential_ref"`
-	CAPEM               string                `gorm:"column:ca_pem;type:text;not null" json:"-"`
-	KibanaURL           string                `gorm:"column:kibana_url;type:varchar(2048);not null;default:''" json:"kibana_url,omitempty"`
-	TLSInsecure         bool                  `gorm:"column:tls_insecure;not null;default:false" json:"tls_insecure"`
-	RolloutAutoActivate bool                  `gorm:"column:rollout_auto_activate;not null;default:false" json:"rollout_auto_activate"`
-	DetectedVersion     string                `gorm:"column:detected_version;type:varchar(32);not null;default:''" json:"detected_version,omitempty"`
-	CutoverAt           *time.Time            `gorm:"column:cutover_at" json:"cutover_at,omitempty"`
-	EndedAt             *time.Time            `gorm:"column:ended_at;index:idx_log_backends_ended_at" json:"ended_at,omitempty"`
-	LastTestAt          *time.Time            `gorm:"column:last_test_at" json:"last_test_at,omitempty"`
-	LastError           string                `gorm:"column:last_error;type:varchar(1024);not null;default:''" json:"last_error,omitempty"`
-	CreatedAt           time.Time             `gorm:"column:created_at;autoCreateTime" json:"created_at"`
-	UpdatedAt           time.Time             `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
-	DeletedAt           *time.Time            `gorm:"column:deleted_at;index" json:"-"`
-	DeleteMarker        soft_delete.DeletedAt `gorm:"column:delete_marker;not null;default:0;softDelete:milli,DeletedAtField:DeletedAt;uniqueIndex:uk_log_backend_name,priority:3" json:"-"`
+	ID                 uint64                `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
+	Name               string                `gorm:"column:name;type:varchar(128);not null;default:'';uniqueIndex:uk_log_backend_name,priority:1" json:"name"`
+	Type               BackendType           `gorm:"column:type;type:varchar(32);not null;default:'elasticsearch'" json:"type"`
+	Status             BackendStatus         `gorm:"column:status;type:varchar(24);not null;default:'saved';index:idx_log_backends_status" json:"status"`
+	Generation         uint64                `gorm:"column:generation;not null;default:1;uniqueIndex:uk_log_backend_name,priority:2" json:"generation"`
+	WriteEndpointsJSON string                `gorm:"column:write_endpoints_json;type:text;not null" json:"-"`
+	QueryEndpoint      string                `gorm:"column:query_endpoint;type:varchar(2048);not null;default:''" json:"query_endpoint"`
+	Dataset            string                `gorm:"column:dataset;type:varchar(100);not null;default:'ongrid.generic'" json:"dataset"`
+	Namespace          string                `gorm:"column:namespace;type:varchar(100);not null;default:'default'" json:"namespace"`
+	IndexPattern       string                `gorm:"column:index_pattern;type:varchar(255);not null;default:'logs-ongrid.*.otel-*'" json:"index_pattern"`
+	WriteCredentialRef string                `gorm:"column:write_credential_ref;type:varchar(128);not null;default:''" json:"write_credential_ref"`
+	QueryCredentialRef string                `gorm:"column:query_credential_ref;type:varchar(128);not null;default:''" json:"query_credential_ref"`
+	CAPEM              string                `gorm:"column:ca_pem;type:text;not null" json:"-"`
+	KibanaURL          string                `gorm:"column:kibana_url;type:varchar(2048);not null;default:''" json:"kibana_url,omitempty"`
+	TLSInsecure        bool                  `gorm:"column:tls_insecure;not null;default:false" json:"tls_insecure"`
+	DetectedVersion    string                `gorm:"column:detected_version;type:varchar(32);not null;default:''" json:"detected_version,omitempty"`
+	CutoverAt          *time.Time            `gorm:"column:cutover_at" json:"cutover_at,omitempty"`
+	EndedAt            *time.Time            `gorm:"column:ended_at;index:idx_log_backends_ended_at" json:"ended_at,omitempty"`
+	LastTestAt         *time.Time            `gorm:"column:last_test_at" json:"last_test_at,omitempty"`
+	LastError          string                `gorm:"column:last_error;type:varchar(1024);not null;default:''" json:"last_error,omitempty"`
+	CreatedAt          time.Time             `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt          time.Time             `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	DeletedAt          *time.Time            `gorm:"column:deleted_at;index" json:"-"`
+	DeleteMarker       soft_delete.DeletedAt `gorm:"column:delete_marker;not null;default:0;softDelete:milli,DeletedAtField:DeletedAt;uniqueIndex:uk_log_backend_name,priority:3" json:"-"`
 }
 
 func (Backend) TableName() string { return "log_backends" }

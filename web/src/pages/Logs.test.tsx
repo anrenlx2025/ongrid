@@ -273,6 +273,34 @@ describe('LogsPage', () => {
     await waitFor(() => expect(within(aside!).queryByText('读取前后文…')).not.toBeInTheDocument());
   });
 
+  it('keeps the newest log context when an older request finishes later', async () => {
+    const user = userEvent.setup();
+    let releaseFirst!: () => void;
+    const firstResponse = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    server.use(http.post('/api/v1/logs/context', async ({ request }) => {
+      const input = await request.json() as { timestamp: string };
+      if (input.timestamp === records[0].timestamp) {
+        await firstResponse;
+        return HttpResponse.json({ code: 0, message: '', data: [{ ...records[0], id: 'context-first', message: 'older context result' }] });
+      }
+      return HttpResponse.json({ code: 0, message: '', data: [{ ...records[1], id: 'context-second', message: 'newest context result' }] });
+    }));
+
+    render(<MemoryRouter><LogsPage /></MemoryRouter>);
+    await waitForInitialLogs();
+
+    await user.click(screen.getByText('payment request completed').closest('button')!);
+    await user.click(screen.getByText('upstream timeout while calling inventory').closest('button')!);
+    const aside = (await screen.findByText('上下文日志')).closest('aside');
+    expect(aside).not.toBeNull();
+    await within(aside!).findByText('newest context result');
+
+    releaseFirst();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(within(aside!).queryByText('older context result')).not.toBeInTheDocument();
+    expect(within(aside!).getByText('newest context result')).toBeInTheDocument();
+  });
+
   it('keeps unwrapped raw and table logs horizontally scrollable', async () => {
     const user = userEvent.setup();
     render(<MemoryRouter><LogsPage /></MemoryRouter>);

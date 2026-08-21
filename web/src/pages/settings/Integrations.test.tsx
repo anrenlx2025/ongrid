@@ -1,10 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import SettingsIntegrations from './Integrations';
-import { activateLogBackend, getLogBackend, rollbackLogBackend, saveLogBackend, testLogBackend, type LogBackend } from '@/api/logs';
+import { applyLogBackend, getLogBackend, rollbackLogBackend, saveLogBackend, type LogBackend } from '@/api/logs';
 
 vi.mock('@/api/settings', () => ({
   listSettings: vi.fn(async () => ({ items: [], total: 0 })),
@@ -22,11 +22,10 @@ vi.mock('@/api/logs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/logs')>();
   return {
     ...actual,
-    activateLogBackend: vi.fn(async () => ({})),
+    applyLogBackend: vi.fn(async () => ({})),
     getLogBackend: vi.fn(),
     rollbackLogBackend: vi.fn(),
     saveLogBackend: vi.fn(async () => ({})),
-    testLogBackend: vi.fn(async () => ({})),
   };
 });
 
@@ -56,7 +55,6 @@ function backend(status: LogBackend['status'], lastError = '', currentBackend: L
     query_credential_ref: 'query-key',
     has_custom_ca: false,
     tls_insecure: false,
-    rollout_auto_activate: true,
     last_error: lastError,
     assignments: status === 'rolling_back' ? [{ id: 1, backend_id: 7, edge_id: 64, desired_generation: 1, applied_generation: 1, status: 'failed', last_error: lastError }] : [],
     created_at: '2026-08-20T00:00:00Z',
@@ -118,13 +116,13 @@ describe('SettingsIntegrations log backend presentation', () => {
     expect(screen.getByRole('textbox', { name: /环境标识/ })).toHaveValue('prod');
   });
 
-  it('creates a new draft generation before switching a rolled-back Elasticsearch backend on again', async () => {
+  it('requires saving a rolled-back Elasticsearch configuration before applying it again', async () => {
     const rolledBack = backend('rolled_back', '', 'loki');
-    const nextDraft = { ...backend('draft', '', 'loki'), id: 8, generation: 2 };
-    const activating = { ...nextDraft, status: 'distributing' as const };
+    const saved = { ...backend('saved', '', 'loki'), id: 8, generation: 2 };
+    const applying = { ...saved, status: 'distributing' as const };
     vi.mocked(getLogBackend).mockResolvedValue(rolledBack);
-    vi.mocked(saveLogBackend).mockResolvedValue(nextDraft);
-    vi.mocked(activateLogBackend).mockResolvedValue(activating);
+    vi.mocked(saveLogBackend).mockResolvedValue(saved);
+    vi.mocked(applyLogBackend).mockResolvedValue(applying);
 
     render(
       <MemoryRouter initialEntries={['/settings/integrations?focus=logs']}>
@@ -135,9 +133,11 @@ describe('SettingsIntegrations log backend presentation', () => {
     const user = userEvent.setup();
     await act(async () => user.click(await screen.findByRole('tab', { name: /Elasticsearch/ })));
     await screen.findByRole('heading', { name: 'Elasticsearch 配置' });
+    const elasticsearch = screen.getByRole('region', { name: 'Elasticsearch 日志后端配置' });
     expect(screen.queryByRole('combobox', { name: '真实写探针 Edge' })).not.toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: '仅灰度，不自动全量' })).not.toBeInTheDocument();
-    await act(async () => user.click(screen.getByRole('button', { name: '验证并切换到 Elasticsearch' })));
+    expect(within(elasticsearch).getByRole('button', { name: '应用' })).toBeDisabled();
+    await act(async () => user.click(within(elasticsearch).getByRole('button', { name: '保存' })));
 
     await waitFor(() => expect(saveLogBackend).toHaveBeenCalledOnce());
     expect(saveLogBackend).toHaveBeenCalledWith(expect.objectContaining({
@@ -149,8 +149,9 @@ describe('SettingsIntegrations log backend presentation', () => {
       query_credential_ref: 'query-key',
       tls_insecure: false,
     }));
-    await waitFor(() => expect(activateLogBackend).toHaveBeenCalledWith(8, { edge_ids: [], canary: false }));
-    expect(activateLogBackend).not.toHaveBeenCalledWith(7, expect.anything());
+    await act(async () => user.click(within(elasticsearch).getByRole('button', { name: '应用' })));
+    await waitFor(() => expect(applyLogBackend).toHaveBeenCalledWith(8));
+    expect(applyLogBackend).not.toHaveBeenCalledWith(7);
   });
 
   it('replaces the switching message after polling observes Elasticsearch is active', async () => {
@@ -160,10 +161,10 @@ describe('SettingsIntegrations log backend presentation', () => {
       return pollCallbacks.length;
     }) as typeof window.setInterval);
     const rolledBack = backend('rolled_back', '', 'loki');
-    const nextDraft = { ...backend('draft', '', 'loki'), id: 8, generation: 2 };
-    const activating = { ...nextDraft, status: 'distributing' as const };
+    const saved = { ...backend('saved', '', 'loki'), id: 8, generation: 2 };
+    const applying = { ...saved, status: 'distributing' as const };
     const active = {
-      ...nextDraft,
+      ...saved,
       status: 'active' as const,
       current_backend: 'elasticsearch' as const,
       current_backend_id: 8,
@@ -171,10 +172,10 @@ describe('SettingsIntegrations log backend presentation', () => {
     };
     let currentBackend = rolledBack;
     vi.mocked(getLogBackend).mockImplementation(async () => currentBackend);
-    vi.mocked(saveLogBackend).mockResolvedValue(nextDraft);
-    vi.mocked(activateLogBackend).mockImplementation(async () => {
+    vi.mocked(saveLogBackend).mockResolvedValue(saved);
+    vi.mocked(applyLogBackend).mockImplementation(async () => {
       currentBackend = active;
-      return activating;
+      return applying;
     });
 
     render(
@@ -185,7 +186,9 @@ describe('SettingsIntegrations log backend presentation', () => {
 
     const user = userEvent.setup();
     await act(async () => user.click(await screen.findByRole('tab', { name: /Elasticsearch/ })));
-    await act(async () => user.click(await screen.findByRole('button', { name: '验证并切换到 Elasticsearch' })));
+    const elasticsearch = await screen.findByRole('region', { name: 'Elasticsearch 日志后端配置' });
+    await act(async () => user.click(within(elasticsearch).getByRole('button', { name: '保存' })));
+    await act(async () => user.click(within(elasticsearch).getByRole('button', { name: '应用' })));
     expect(screen.getByText(/正在验证 Elasticsearch 和全部日志采集 Edge/)).toBeVisible();
     await waitFor(() => expect(pollCallbacks.length).toBeGreaterThan(0));
 
@@ -198,12 +201,8 @@ describe('SettingsIntegrations log backend presentation', () => {
     expect(screen.queryByText(/正在验证 Elasticsearch 和全部日志采集 Edge/)).not.toBeInTheDocument();
   });
 
-  it('creates a new draft before testing a rolled-back Elasticsearch configuration', async () => {
-    const rolledBack = backend('rolled_back', '', 'loki');
-    const nextDraft = { ...backend('draft', '', 'loki'), id: 8, generation: 2 };
-    vi.mocked(getLogBackend).mockResolvedValue(rolledBack);
-    vi.mocked(saveLogBackend).mockResolvedValue(nextDraft);
-    vi.mocked(testLogBackend).mockResolvedValue(nextDraft);
+  it('exposes only save and apply for Elasticsearch configuration changes', async () => {
+    vi.mocked(getLogBackend).mockResolvedValue(backend('saved', '', 'loki'));
 
     render(
       <MemoryRouter initialEntries={['/settings/integrations?focus=logs']}>
@@ -213,10 +212,10 @@ describe('SettingsIntegrations log backend presentation', () => {
 
     const user = userEvent.setup();
     await act(async () => user.click(await screen.findByRole('tab', { name: /Elasticsearch/ })));
-    await act(async () => user.click(await screen.findByRole('button', { name: '测试端点与认证' })));
-
-    await waitFor(() => expect(saveLogBackend).toHaveBeenCalledOnce());
-    expect(testLogBackend).toHaveBeenCalledWith(8);
-    expect(testLogBackend).not.toHaveBeenCalledWith(7);
+    const elasticsearch = await screen.findByRole('region', { name: 'Elasticsearch 日志后端配置' });
+    expect(within(elasticsearch).getByRole('button', { name: '保存' })).toBeInTheDocument();
+    expect(within(elasticsearch).getByRole('button', { name: '应用' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '测试端点与认证' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/草稿/)).not.toBeInTheDocument();
   });
 });

@@ -235,7 +235,7 @@ func (n *countingNotifier) count() int {
 	return n.calls
 }
 
-func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
+func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	db := openTestDB(t)
 	repo := logsstore.NewRepo(db)
 
@@ -292,7 +292,7 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 	notifier := &countingNotifier{}
 	svc.SetRolloutNotifier(notifier)
 
-	first, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	first, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints:     []string{es.URL},
 		QueryEndpoint:      es.URL,
 		Dataset:            "ongrid.system",
@@ -302,15 +302,15 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 		TLSInsecure:        true,
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(first): %v", err)
+		t.Fatalf("Save(first): %v", err)
 	}
-	if first.Generation != 1 || first.Status != logsmodel.BackendStatusDraft {
-		t.Fatalf("first draft = generation %d status %q", first.Generation, first.Status)
+	if first.Generation != 1 || first.Status != logsmodel.BackendStatusSaved {
+		t.Fatalf("first saved configuration = generation %d status %q", first.Generation, first.Status)
 	}
 
-	distributing, err := svc.Activate(context.Background(), first.ID, bizlogs.ActivationInput{EdgeIDs: []uint64{42}, Canary: true})
+	distributing, err := svc.Apply(context.Background(), first.ID)
 	if err != nil {
-		t.Fatalf("Activate: %v", err)
+		t.Fatalf("Apply: %v", err)
 	}
 	if distributing.Status != logsmodel.BackendStatusDistributing || distributing.DetectedVersion != "8.16.3" || distributing.CutoverAt != nil {
 		t.Fatalf("distributing view = %+v", distributing)
@@ -323,8 +323,15 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 		t.Fatalf("probe auth headers = %#v", seenAuth)
 	}
 	authMu.Unlock()
-	if len(distributing.Assignments) != 1 || distributing.Assignments[0].ProbeID == "" {
+	if len(distributing.Assignments) != 2 {
 		t.Fatalf("rollout assignments = %+v", distributing.Assignments)
+	}
+	probeIDs := map[uint64]string{}
+	for _, item := range distributing.Assignments {
+		if item.ProbeID == "" {
+			t.Fatalf("rollout assignment has no probe ID: %+v", item)
+		}
+		probeIDs[item.EdgeID] = item.ProbeID
 	}
 	overlay, err := svc.PluginRuntimeOverlay(context.Background(), 42, "logs")
 	if err != nil {
@@ -333,8 +340,6 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 	if overlay["rollout_shadow"] != true || overlay["baseline_backend"] != "builtin_loki" {
 		t.Fatalf("initial rollout overlay = %#v", overlay)
 	}
-	probeID := distributing.Assignments[0].ProbeID
-
 	secret, err := svc.PluginSecretForEdge(context.Background(), 42, "logs", bizlogs.SecretSlotESAPIKey, 1)
 	if err != nil {
 		t.Fatalf("PluginSecretForEdge: %v", err)
@@ -343,50 +348,27 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 	if secret.Content != "write-key" || secret.SHA256 != hex.EncodeToString(wantHash[:]) {
 		t.Fatalf("plugin secret metadata = %+v", secret)
 	}
-	if err := svc.MarkApplied(context.Background(), 42, 1, probeID, ""); err != nil {
+	if err := svc.MarkApplied(context.Background(), 42, 1, probeIDs[42], ""); err != nil {
 		t.Fatalf("MarkApplied: %v", err)
 	}
-	canary, err := svc.Get(context.Background())
+	verifying, err := svc.Get(context.Background())
 	if err != nil {
-		t.Fatalf("Get(canary): %v", err)
+		t.Fatalf("Get(verifying): %v", err)
 	}
-	if canary.Status != logsmodel.BackendStatusVerifying || canary.CutoverAt != nil || notifier.count() != 1 {
-		t.Fatalf("canary after real probe = %+v notifications=%d", canary, notifier.count())
-	}
-
-	// Fleet promotion first expands the shadow rollout to every currently
-	// online Edge. The global cutover remains unset until the second real-path
-	// probe succeeds; the already-verified canary assignment is preserved.
-	fleet, err := svc.Activate(context.Background(), first.ID, bizlogs.ActivationInput{})
-	if err != nil {
-		t.Fatalf("Activate(fleet): %v", err)
-	}
-	if fleet.Status != logsmodel.BackendStatusDistributing || fleet.CutoverAt != nil || !fleet.RolloutAutoActivate || len(fleet.Assignments) != 2 || notifier.count() != 2 {
-		t.Fatalf("fleet pre-cutover = %+v notifications=%d", fleet, notifier.count())
-	}
-	var secondProbeID string
-	for _, item := range fleet.Assignments {
-		if item.EdgeID == 42 && (item.Status != logsmodel.AssignmentStatusVerified || item.LastWriteSuccessAt == nil) {
-			t.Fatalf("verified canary was not preserved: %+v", item)
-		}
-		if item.EdgeID == 43 {
-			secondProbeID = item.ProbeID
-		}
-	}
-	if secondProbeID == "" {
-		t.Fatalf("fleet assignments missing Edge 43: %+v", fleet.Assignments)
+	if verifying.Status != logsmodel.BackendStatusVerifying || verifying.CutoverAt != nil || notifier.count() != 1 {
+		t.Fatalf("backend after first real probe = %+v notifications=%d", verifying, notifier.count())
 	}
 	if _, err := svc.PluginSecretForEdge(context.Background(), 43, "logs", bizlogs.SecretSlotESAPIKey, 1); err != nil {
-		t.Fatalf("PluginSecretForEdge(fleet): %v", err)
+		t.Fatalf("PluginSecretForEdge(edge 43): %v", err)
 	}
-	if err := svc.MarkApplied(context.Background(), 43, 1, secondProbeID, ""); err != nil {
-		t.Fatalf("MarkApplied(fleet): %v", err)
+	if err := svc.MarkApplied(context.Background(), 43, 1, probeIDs[43], ""); err != nil {
+		t.Fatalf("MarkApplied(edge 43): %v", err)
 	}
 	active, err := svc.Get(context.Background())
 	if err != nil {
 		t.Fatalf("Get(active): %v", err)
 	}
-	if active.Status != logsmodel.BackendStatusActive || active.CutoverAt == nil || notifier.count() != 3 {
+	if active.Status != logsmodel.BackendStatusActive || active.CutoverAt == nil || notifier.count() != 2 {
 		t.Fatalf("active after fleet real probes = %+v notifications=%d", active, notifier.count())
 	}
 	if err := repo.SetRolloutBackendState(context.Background(), first.ID, logsmodel.BackendStatusDegraded, "8.16.3", "late probe", time.Now().UTC()); !errors.Is(err, errs.ErrConflict) {
@@ -397,7 +379,7 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 		t.Fatalf("late acknowledgement changed active backend: %+v, %v", stillActive, err)
 	}
 
-	second, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	second, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints:     []string{es.URL},
 		QueryEndpoint:      es.URL,
 		Dataset:            "ongrid.application",
@@ -407,17 +389,17 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 		TLSInsecure:        true,
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(second): %v", err)
+		t.Fatalf("Save(second): %v", err)
 	}
-	if second.ID == first.ID || second.Generation != 2 || second.Status != logsmodel.BackendStatusDraft {
-		t.Fatalf("second draft = id %d generation %d status %q; first id=%d", second.ID, second.Generation, second.Status, first.ID)
+	if second.ID == first.ID || second.Generation != 2 || second.Status != logsmodel.BackendStatusSaved {
+		t.Fatalf("second saved configuration = id %d generation %d status %q; first id=%d", second.ID, second.Generation, second.Status, first.ID)
 	}
 	runtime, err := svc.ActiveRuntime(context.Background())
 	if err != nil {
 		t.Fatalf("ActiveRuntime while editing next revision: %v", err)
 	}
 	if runtime == nil || runtime.BackendID != first.ID || runtime.Generation != 1 || runtime.Dataset != "ongrid.system" {
-		t.Fatalf("active runtime was overwritten by draft: %+v", runtime)
+		t.Fatalf("active runtime was overwritten by saved configuration: %+v", runtime)
 	}
 
 	// Re-fetching after a restart must not regress an already-applied row.
@@ -439,7 +421,7 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
-	if rollingBack.Status != logsmodel.BackendStatusRollingBack || rollingBack.EndedAt != nil || len(rollingBack.Assignments) != 2 || notifier.count() != 4 {
+	if rollingBack.Status != logsmodel.BackendStatusRollingBack || rollingBack.EndedAt != nil || len(rollingBack.Assignments) != 2 || notifier.count() != 3 {
 		t.Fatalf("rollback prewarm = %+v notifications %d", rollingBack, notifier.count())
 	}
 	rollbackOverlay, err := svc.PluginRuntimeOverlay(context.Background(), 42, "logs")
@@ -487,7 +469,7 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBackend(rolled back): %v", err)
 	}
-	if rolledBack.Status != logsmodel.BackendStatusRolledBack || rolledBack.EndedAt == nil || notifier.count() != 5 {
+	if rolledBack.Status != logsmodel.BackendStatusRolledBack || rolledBack.EndedAt == nil || notifier.count() != 4 {
 		t.Fatalf("completed rollback = status %q notifications %d", rolledBack.Status, notifier.count())
 	}
 	runtime, err = svc.ActiveRuntime(context.Background())
@@ -501,7 +483,7 @@ func TestServiceRevisionActivationSecretAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Rollback(already rolled back): %v", err)
 	}
-	if idempotent.Status != logsmodel.BackendStatusRolledBack || notifier.count() != 5 {
+	if idempotent.Status != logsmodel.BackendStatusRolledBack || notifier.count() != 4 {
 		t.Fatalf("idempotent rollback = %+v notifications=%d", idempotent, notifier.count())
 	}
 }
@@ -570,13 +552,14 @@ func TestServiceReplacementRolloutShadowsPreviousElasticsearch(t *testing.T) {
 		"query-v2": {"api_key": "query-key-v2"},
 	}, nil)
 	svc.SetHostDeviceResolver(mapHostDevices{42: 9001})
-	first, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	svc.SetRolloutEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}})
+	first, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{es.URL}, QueryEndpoint: es.URL,
 		Dataset: "ongrid.host", Namespace: "old",
 		WriteCredentialRef: "write-v1", QueryCredentialRef: "query-v1", TLSInsecure: true,
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(first): %v", err)
+		t.Fatalf("Save(first): %v", err)
 	}
 	if err := repo.SetBackendState(context.Background(), first.ID, logsmodel.BackendStatusVerifying, "8.16.3", "", time.Now().UTC()); err != nil {
 		t.Fatalf("SetBackendState(first): %v", err)
@@ -584,16 +567,16 @@ func TestServiceReplacementRolloutShadowsPreviousElasticsearch(t *testing.T) {
 	if err := repo.ActivateBackend(context.Background(), first.ID, "8.16.3", time.Now().UTC().Add(-time.Minute)); err != nil {
 		t.Fatalf("ActivateBackend(first): %v", err)
 	}
-	second, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	second, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{es.URL}, QueryEndpoint: es.URL,
 		Dataset: "ongrid.host", Namespace: "new",
 		WriteCredentialRef: "write-v2", QueryCredentialRef: "query-v2", TLSInsecure: true,
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(second): %v", err)
+		t.Fatalf("Save(second): %v", err)
 	}
-	if _, err := svc.Activate(context.Background(), second.ID, bizlogs.ActivationInput{EdgeIDs: []uint64{42}, Canary: true}); err != nil {
-		t.Fatalf("Activate(second canary): %v", err)
+	if _, err := svc.Apply(context.Background(), second.ID); err != nil {
+		t.Fatalf("Apply(second): %v", err)
 	}
 	overlay, err := svc.PluginRuntimeOverlay(context.Background(), 42, "logs")
 	if err != nil {
@@ -609,14 +592,14 @@ func TestServiceReplacementRolloutShadowsPreviousElasticsearch(t *testing.T) {
 		t.Fatalf("replacement routing = %#v", overlay)
 	}
 	if _, err := svc.PluginSecretForEdge(context.Background(), 42, "logs", bizlogs.SecretSlotESAPIKey, 2); err != nil {
-		t.Fatalf("candidate secret: %v", err)
+		t.Fatalf("applying backend secret: %v", err)
 	}
 	if _, err := svc.PluginSecretForEdge(context.Background(), 42, "logs", bizlogs.SecretSlotESAPIKey, 1); err != nil {
 		t.Fatalf("authoritative baseline secret: %v", err)
 	}
 }
 
-func TestServiceTestChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testing.T) {
+func TestServiceApplyChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testing.T) {
 	var requestMu sync.Mutex
 	newEndpoint := func(requests *[]string) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -644,20 +627,22 @@ func TestServiceTestChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testing
 		"write": {"api_key": "write-key"},
 		"query": {"api_key": "query-key"},
 	}, nil)
-	backend, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	svc.SetHostDeviceResolver(mapHostDevices{42: 9001})
+	svc.SetRolloutEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}})
+	backend, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{firstEndpoint.URL, secondEndpoint.URL}, QueryEndpoint: firstEndpoint.URL,
 		Dataset: "ongrid.host", Namespace: "prod",
 		WriteCredentialRef: "write", QueryCredentialRef: "query", TLSInsecure: true,
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft: %v", err)
+		t.Fatalf("Save: %v", err)
 	}
-	tested, err := svc.Test(context.Background(), backend.ID)
+	applied, err := svc.Apply(context.Background(), backend.ID)
 	if err != nil {
-		t.Fatalf("Test: %v", err)
+		t.Fatalf("Apply: %v", err)
 	}
-	if tested.Status != logsmodel.BackendStatusDraft || tested.DetectedVersion != "8.16.3" {
-		t.Fatalf("tested backend = %+v", tested)
+	if applied.Status != logsmodel.BackendStatusDistributing || applied.DetectedVersion != "8.16.3" {
+		t.Fatalf("applied backend = %+v", applied)
 	}
 
 	requestMu.Lock()
@@ -683,13 +668,13 @@ func TestServiceStoresDirectAPIKeysAsManagedWriteOnlyCredentials(t *testing.T) {
 	secrets := newManagedSecrets()
 	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
 
-	first, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	first, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", Namespace: "prod",
 		WriteAPIKey: "ApiKey encoded-write-v1", QueryAPIKey: "encoded-query-v1",
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(direct keys): %v", err)
+		t.Fatalf("Save(direct keys): %v", err)
 	}
 	if first.WriteCredentialRef == first.QueryCredentialRef ||
 		!strings.HasPrefix(first.WriteCredentialRef, "ongrid-managed-logs-es-write-") ||
@@ -710,12 +695,12 @@ func TestServiceStoresDirectAPIKeysAsManagedWriteOnlyCredentials(t *testing.T) {
 		t.Fatalf("backend response leaked direct API key: %s", encoded)
 	}
 
-	unchanged, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	unchanged, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.application", Namespace: "prod",
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(blank write-only fields): %v", err)
+		t.Fatalf("Save(blank write-only fields): %v", err)
 	}
 	if unchanged.WriteCredentialRef != first.WriteCredentialRef || unchanged.QueryCredentialRef != first.QueryCredentialRef {
 		t.Fatalf("blank write-only fields replaced refs: first=%+v unchanged=%+v", first, unchanged)
@@ -724,15 +709,15 @@ func TestServiceStoresDirectAPIKeysAsManagedWriteOnlyCredentials(t *testing.T) {
 		t.Fatalf("blank write-only fields performed %d creates, want 2 total", secrets.createCount())
 	}
 
-	rotated, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	rotated, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.application", Namespace: "prod", WriteAPIKey: "encoded-write-v2",
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(rotate write key): %v", err)
+		t.Fatalf("Save(rotate write key): %v", err)
 	}
 	if rotated.WriteCredentialRef == first.WriteCredentialRef || rotated.QueryCredentialRef != first.QueryCredentialRef {
-		t.Fatalf("draft rotation did not isolate the new write ref: first=%+v rotated=%+v", first, rotated)
+		t.Fatalf("saved credential rotation did not isolate the new write ref: first=%+v rotated=%+v", first, rotated)
 	}
 	if got := secrets.apiKey(rotated.WriteCredentialRef); got != "encoded-write-v2" {
 		t.Fatalf("rotated write key = %q", got)
@@ -745,28 +730,28 @@ func TestServiceStoresDirectAPIKeysAsManagedWriteOnlyCredentials(t *testing.T) {
 	}
 }
 
-func TestServiceDraftReplacementDoesNotDeleteExternalCredentialRefs(t *testing.T) {
+func TestServiceSavedConfigurationReplacementDoesNotDeleteExternalCredentialRefs(t *testing.T) {
 	secrets := newManagedSecrets()
 	secrets.values["external-write"] = map[string]string{"api_key": "write-v1"}
 	secrets.values["external-query"] = map[string]string{"api_key": "query-v1"}
 	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
 
-	first, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+	first, err := svc.Save(t.Context(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteCredentialRef: "external-write", QueryCredentialRef: "external-query",
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(external refs): %v", err)
+		t.Fatalf("Save(external refs): %v", err)
 	}
-	rotated, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+	rotated, err := svc.Save(t.Context(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteAPIKey: "write-v2", QueryAPIKey: "query-v2",
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(managed rotation): %v", err)
+		t.Fatalf("Save(managed rotation): %v", err)
 	}
 	if rotated.ID != first.ID {
-		t.Fatalf("draft ID changed from %d to %d", first.ID, rotated.ID)
+		t.Fatalf("saved configuration ID changed from %d to %d", first.ID, rotated.ID)
 	}
 	if secrets.apiKey("external-write") != "write-v1" || secrets.apiKey("external-query") != "query-v1" {
 		t.Fatal("external credential refs were deleted during managed rotation")
@@ -781,28 +766,28 @@ func TestServiceNewGenerationRetainsManagedCredentialsNeededByActiveBackend(t *t
 	repo := logsstore.NewRepo(openTestDB(t))
 	svc := bizlogs.NewService(repo, secrets, nil)
 
-	first, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+	first, err := svc.Save(t.Context(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteAPIKey: "write-v1", QueryAPIKey: "query-v1",
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(first): %v", err)
+		t.Fatalf("Save(first): %v", err)
 	}
 	if err := repo.SetBackendState(t.Context(), first.ID, logsmodel.BackendStatusActive, "8.16.3", "", time.Now().UTC()); err != nil {
 		t.Fatalf("activate first backend state: %v", err)
 	}
-	second, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+	second, err := svc.Save(t.Context(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://next-es.example.com"}, QueryEndpoint: "https://next-es.example.com",
 		Dataset: "ongrid.system", WriteAPIKey: "write-v2", QueryAPIKey: "query-v2",
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(second generation): %v", err)
+		t.Fatalf("Save(second generation): %v", err)
 	}
 	if second.Generation != first.Generation+1 {
 		t.Fatalf("second generation = %d, want %d", second.Generation, first.Generation+1)
 	}
 	if secrets.apiKey(first.WriteCredentialRef) != "write-v1" || secrets.apiKey(first.QueryCredentialRef) != "query-v1" {
-		t.Fatal("active generation credentials were deleted while creating the next draft")
+		t.Fatal("active generation credentials were deleted while creating the next saved configuration")
 	}
 	if secrets.storedCount() != 4 || secrets.deleteCount() != 0 {
 		t.Fatalf("managed credentials across generations: stored=%d deleted=%d, want 4/0", secrets.storedCount(), secrets.deleteCount())
@@ -813,12 +798,12 @@ func TestServiceCanReuseWriteAPIKeyWithoutSharingCredentialReference(t *testing.
 	secrets := newManagedSecrets()
 	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
 
-	backend, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	backend, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteAPIKey: "encoded-shared", ReuseWriteAPIKey: true,
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(reuse write key): %v", err)
+		t.Fatalf("Save(reuse write key): %v", err)
 	}
 	if backend.WriteCredentialRef == backend.QueryCredentialRef {
 		t.Fatalf("reuse mode shared a credential reference: %+v", backend)
@@ -832,12 +817,12 @@ func TestServiceRejectsSharedDirectKeyBeforeWritingManagedCredentials(t *testing
 	secrets := newManagedSecrets()
 	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
 
-	_, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	_, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteAPIKey: "encoded-shared", QueryAPIKey: "encoded-shared",
 	})
 	if err == nil || !strings.Contains(err.Error(), "reuse_write_api_key") {
-		t.Fatalf("SaveDraft error = %v, want explicit reuse-mode validation", err)
+		t.Fatalf("Save error = %v, want explicit reuse-mode validation", err)
 	}
 	if secrets.createCount() != 0 {
 		t.Fatalf("rejected request created %d managed credentials", secrets.createCount())
@@ -846,43 +831,43 @@ func TestServiceRejectsSharedDirectKeyBeforeWritingManagedCredentials(t *testing
 
 func TestServiceDirectAPIKeyRequiresEncryptedManagedStore(t *testing.T) {
 	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), mapSecrets{}, nil)
-	_, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	_, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteAPIKey: "encoded-write", QueryAPIKey: "encoded-query",
 	})
 	if err == nil || !strings.Contains(err.Error(), "credential storage is unavailable") {
-		t.Fatalf("SaveDraft error = %v, want managed storage failure", err)
+		t.Fatalf("Save error = %v, want managed storage failure", err)
 	}
 }
 
-func TestServiceSaveDraftCleansManagedCredentialsWhenCreateFails(t *testing.T) {
+func TestServiceSaveCleansManagedCredentialsWhenCreateFails(t *testing.T) {
 	secrets := newManagedSecrets()
 	secrets.failCreateAt = 2
 	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
 
-	_, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+	_, err := svc.Save(t.Context(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteAPIKey: "encoded-write", QueryAPIKey: "encoded-query",
 	})
 	if err == nil || !strings.Contains(err.Error(), "injected managed credential create failure") {
-		t.Fatalf("SaveDraft error = %v, want injected create failure", err)
+		t.Fatalf("Save error = %v, want injected create failure", err)
 	}
 	if secrets.storedCount() != 0 || secrets.deleteCount() != 1 {
 		t.Fatalf("managed credentials after failed create: stored=%d deleted=%d", secrets.storedCount(), secrets.deleteCount())
 	}
 }
 
-func TestServiceSaveDraftCleansManagedCredentialsWhenBackendSaveFails(t *testing.T) {
+func TestServiceSaveCleansManagedCredentialsWhenBackendSaveFails(t *testing.T) {
 	secrets := newManagedSecrets()
 	repo := failingSaveRepo{Repo: logsstore.NewRepo(openTestDB(t))}
 	svc := bizlogs.NewService(repo, secrets, nil)
 
-	_, err := svc.SaveDraft(t.Context(), bizlogs.SaveInput{
+	_, err := svc.Save(t.Context(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteAPIKey: "encoded-write", QueryAPIKey: "encoded-query",
 	})
 	if err == nil || !strings.Contains(err.Error(), "injected backend save failure") {
-		t.Fatalf("SaveDraft error = %v, want injected save failure", err)
+		t.Fatalf("Save error = %v, want injected save failure", err)
 	}
 	if secrets.storedCount() != 0 || secrets.deleteCount() != 2 {
 		t.Fatalf("managed credentials after failed save: stored=%d deleted=%d", secrets.storedCount(), secrets.deleteCount())
@@ -928,36 +913,98 @@ func TestServiceRejectsUnsafeBackendInput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := svc.SaveDraft(context.Background(), tt.in); err == nil {
-				t.Fatal("SaveDraft succeeded, want validation error")
+			if _, err := svc.Save(context.Background(), tt.in); err == nil {
+				t.Fatal("Save succeeded, want validation error")
 			}
 		})
 	}
 }
 
-func TestServiceActivationGuardBlocksFullCutover(t *testing.T) {
+func TestServiceApplyGuardBlocksFullCutover(t *testing.T) {
 	db := openTestDB(t)
 	svc := bizlogs.NewService(logsstore.NewRepo(db), mapSecrets{
 		"write": {"api_key": "write-key"},
 		"query": {"api_key": "query-key"},
 	}, nil)
-	backend, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	backend, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteCredentialRef: "write", QueryCredentialRef: "query",
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft: %v", err)
+		t.Fatalf("Save: %v", err)
 	}
-	svc.SetActivationGuard(func(context.Context) error { return errors.New("legacy-log-rule") })
-	if _, err := svc.Activate(context.Background(), backend.ID, bizlogs.ActivationInput{EdgeIDs: []uint64{42}}); !errors.Is(err, errs.ErrConflict) {
-		t.Fatalf("Activate error = %v, want conflict", err)
+	svc.SetApplyGuard(func(context.Context) error { return errors.New("legacy-log-rule") })
+	if _, err := svc.Apply(context.Background(), backend.ID); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("Apply error = %v, want conflict", err)
 	}
 	latest, err := svc.Get(context.Background())
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if latest.Status != logsmodel.BackendStatusDraft {
-		t.Fatalf("status = %q, want draft", latest.Status)
+	if latest.Status != logsmodel.BackendStatusSaved {
+		t.Fatalf("status = %q, want saved", latest.Status)
+	}
+}
+
+func TestServiceSaveRejectsWhileApplyIsInProgress(t *testing.T) {
+	repo := logsstore.NewRepo(openTestDB(t))
+	svc := bizlogs.NewService(repo, mapSecrets{
+		"write": {"api_key": "write-key"},
+		"query": {"api_key": "query-key"},
+	}, nil)
+	input := bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", WriteCredentialRef: "write", QueryCredentialRef: "query",
+	}
+	backend, err := svc.Save(t.Context(), input)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	for _, status := range []logsmodel.BackendStatus{logsmodel.BackendStatusDistributing, logsmodel.BackendStatusVerifying} {
+		if err := repo.SetBackendState(t.Context(), backend.ID, status, "8.16.3", "", time.Now().UTC()); err != nil {
+			t.Fatalf("SetBackendState(%s): %v", status, err)
+		}
+		if _, err := svc.Save(t.Context(), input); !errors.Is(err, errs.ErrConflict) {
+			t.Fatalf("Save while %s error = %v, want conflict", status, err)
+		}
+	}
+}
+
+func TestServiceSaveAndApplyRejectWhileLokiApplyIsInProgress(t *testing.T) {
+	repo := logsstore.NewRepo(openTestDB(t))
+	svc := bizlogs.NewService(repo, mapSecrets{
+		"write": {"api_key": "write-key"},
+		"query": {"api_key": "query-key"},
+	}, &echoProbeSearcher{})
+	svc.SetHostDeviceResolver(mapHostDevices{42: 9001})
+	svc.SetRolloutEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}})
+	input := bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", Namespace: "old", WriteCredentialRef: "write", QueryCredentialRef: "query",
+	}
+	active, err := svc.Save(t.Context(), input)
+	if err != nil {
+		t.Fatalf("Save(active): %v", err)
+	}
+	if err := repo.SetBackendState(t.Context(), active.ID, logsmodel.BackendStatusVerifying, "8.16.3", "", time.Now().UTC()); err != nil {
+		t.Fatalf("SetBackendState(active): %v", err)
+	}
+	if err := repo.ActivateBackend(t.Context(), active.ID, "8.16.3", time.Now().UTC()); err != nil {
+		t.Fatalf("ActivateBackend: %v", err)
+	}
+	input.Namespace = "new"
+	saved, err := svc.Save(t.Context(), input)
+	if err != nil {
+		t.Fatalf("Save(next): %v", err)
+	}
+	if _, err := svc.Rollback(t.Context(), active.ID); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if _, err := svc.Save(t.Context(), input); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("Save during Loki apply error = %v, want conflict", err)
+	}
+	if _, err := svc.Apply(t.Context(), saved.ID); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("Apply during Loki apply error = %v, want conflict", err)
 	}
 }
 
@@ -971,34 +1018,34 @@ func TestServiceFleetCutoverRejectsOfflineLogEnabledEdge(t *testing.T) {
 		{EdgeID: 42, Online: true},
 		{EdgeID: 43, Online: false},
 	})
-	backend, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	backend, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteCredentialRef: "write", QueryCredentialRef: "query",
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft: %v", err)
+		t.Fatalf("Save: %v", err)
 	}
-	if _, err := svc.Activate(context.Background(), backend.ID, bizlogs.ActivationInput{}); !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), "43") {
-		t.Fatalf("Activate error = %v, want offline Edge conflict", err)
+	if _, err := svc.Apply(context.Background(), backend.ID); !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), "43") {
+		t.Fatalf("Apply error = %v, want offline Edge conflict", err)
 	}
 	latest, err := repo.GetBackend(context.Background(), backend.ID)
-	if err != nil || latest.Status != logsmodel.BackendStatusDraft {
+	if err != nil || latest.Status != logsmodel.BackendStatusSaved {
 		t.Fatalf("offline fleet check mutated backend: %+v, %v", latest, err)
 	}
 }
 
-func TestServiceCancelledDraftDoesNotHideActiveBackend(t *testing.T) {
+func TestServiceCancelledSavedConfigurationDoesNotHideActiveBackend(t *testing.T) {
 	repo := logsstore.NewRepo(openTestDB(t))
 	svc := bizlogs.NewService(repo, mapSecrets{
 		"write": {"api_key": "write-key"},
 		"query": {"api_key": "query-key"},
 	}, nil)
-	first, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	first, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", Namespace: "old", WriteCredentialRef: "write", QueryCredentialRef: "query",
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(first): %v", err)
+		t.Fatalf("Save(first): %v", err)
 	}
 	if err := repo.SetBackendState(context.Background(), first.ID, logsmodel.BackendStatusVerifying, "8.16.3", "", time.Now().UTC()); err != nil {
 		t.Fatalf("SetBackendState(first): %v", err)
@@ -1006,22 +1053,22 @@ func TestServiceCancelledDraftDoesNotHideActiveBackend(t *testing.T) {
 	if err := repo.ActivateBackend(context.Background(), first.ID, "8.16.3", time.Now().UTC()); err != nil {
 		t.Fatalf("ActivateBackend(first): %v", err)
 	}
-	second, err := svc.SaveDraft(context.Background(), bizlogs.SaveInput{
+	second, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", Namespace: "new", WriteCredentialRef: "write", QueryCredentialRef: "query",
 	})
 	if err != nil {
-		t.Fatalf("SaveDraft(second): %v", err)
+		t.Fatalf("Save(second): %v", err)
 	}
 	if second.CurrentBackend != "elasticsearch" || second.CurrentBackendID != first.ID {
-		t.Fatalf("SaveDraft(second) current backend = %q #%d, want elasticsearch #%d", second.CurrentBackend, second.CurrentBackendID, first.ID)
+		t.Fatalf("Save(second) current backend = %q #%d, want elasticsearch #%d", second.CurrentBackend, second.CurrentBackendID, first.ID)
 	}
 	if _, err := svc.Rollback(context.Background(), second.ID); err != nil {
-		t.Fatalf("Rollback(cancel draft): %v", err)
+		t.Fatalf("Rollback(cancel saved configuration): %v", err)
 	}
 	visible, err := svc.Get(context.Background())
 	if err != nil || visible.ID != first.ID || visible.Status != logsmodel.BackendStatusActive || visible.CurrentBackend != "elasticsearch" || visible.CurrentBackendID != first.ID {
-		t.Fatalf("Get after draft cancellation = %+v, %v", visible, err)
+		t.Fatalf("Get after saved configuration cancellation = %+v, %v", visible, err)
 	}
 }
 

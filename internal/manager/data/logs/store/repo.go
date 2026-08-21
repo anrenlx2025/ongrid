@@ -58,7 +58,7 @@ func (r *Repo) ActiveBackend(ctx context.Context) (*model.Backend, error) {
 	return &out, nil
 }
 
-// BeginRollout atomically moves one tested draft into distribution and
+// BeginRollout atomically moves one saved configuration into distribution and
 // replaces its selected Edge set. Previous attempts remain soft-deleted for
 // audit while the active backend (if any) is left untouched.
 func (r *Repo) BeginRollout(ctx context.Context, backend *model.Backend, assignments []*model.BackendAssignment) error {
@@ -67,11 +67,10 @@ func (r *Repo) BeginRollout(ctx context.Context, backend *model.Backend, assignm
 	}
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&model.Backend{}).Where("id = ?", backend.ID).Updates(map[string]any{
-			"status":                model.BackendStatusDistributing,
-			"detected_version":      backend.DetectedVersion,
-			"rollout_auto_activate": backend.RolloutAutoActivate,
-			"last_test_at":          backend.LastTestAt,
-			"last_error":            "",
+			"status":           model.BackendStatusDistributing,
+			"detected_version": backend.DetectedVersion,
+			"last_test_at":     backend.LastTestAt,
+			"last_error":       "",
 		})
 		if result.Error != nil {
 			return result.Error
@@ -106,9 +105,8 @@ func (r *Repo) BeginRollback(ctx context.Context, backend *model.Backend, assign
 			Where("id = ? AND status IN ?", backend.ID, []model.BackendStatus{
 				model.BackendStatusActive, model.BackendStatusRollingBack,
 			}).Updates(map[string]any{
-			"status":                model.BackendStatusRollingBack,
-			"rollout_auto_activate": true,
-			"last_error":            "",
+			"status":     model.BackendStatusRollingBack,
+			"last_error": "",
 		})
 		if result.Error != nil {
 			return result.Error
@@ -187,13 +185,12 @@ func (r *Repo) CancelBackend(ctx context.Context, id uint64) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&model.Backend{}).
 			Where("id = ? AND cutover_at IS NULL AND status IN ?", id, []model.BackendStatus{
-				model.BackendStatusDraft, model.BackendStatusDistributing,
+				model.BackendStatusSaved, model.BackendStatusDistributing,
 				model.BackendStatusVerifying, model.BackendStatusDegraded,
 			}).Updates(map[string]any{
-			"status":                model.BackendStatusRolledBack,
-			"rollout_auto_activate": false,
-			"ended_at":              nil,
-			"last_error":            "",
+			"status":     model.BackendStatusRolledBack,
+			"ended_at":   nil,
+			"last_error": "",
 		})
 		if result.Error != nil {
 			return result.Error

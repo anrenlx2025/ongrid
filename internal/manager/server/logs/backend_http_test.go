@@ -15,25 +15,21 @@ import (
 )
 
 type stubBackendService struct {
-	saved      *bizlogs.SaveInput
-	activation *bizlogs.ActivationInput
+	saved   *bizlogs.SaveInput
+	applied bool
 }
 
 func (s *stubBackendService) Get(context.Context) (*bizlogs.BackendView, error) {
-	return &bizlogs.BackendView{ID: 7, Type: logsmodel.BackendTypeElasticsearch, Status: logsmodel.BackendStatusDraft}, nil
+	return &bizlogs.BackendView{ID: 7, Type: logsmodel.BackendTypeElasticsearch, Status: logsmodel.BackendStatusSaved}, nil
 }
 
-func (s *stubBackendService) SaveDraft(_ context.Context, input bizlogs.SaveInput) (*bizlogs.BackendView, error) {
+func (s *stubBackendService) Save(_ context.Context, input bizlogs.SaveInput) (*bizlogs.BackendView, error) {
 	s.saved = &input
-	return &bizlogs.BackendView{ID: 7, Dataset: input.Dataset, Status: logsmodel.BackendStatusDraft}, nil
+	return &bizlogs.BackendView{ID: 7, Dataset: input.Dataset, Status: logsmodel.BackendStatusSaved}, nil
 }
 
-func (s *stubBackendService) Test(context.Context, uint64) (*bizlogs.BackendView, error) {
-	return &bizlogs.BackendView{ID: 7, Status: logsmodel.BackendStatusDraft}, nil
-}
-
-func (s *stubBackendService) Activate(_ context.Context, _ uint64, input bizlogs.ActivationInput) (*bizlogs.BackendView, error) {
-	s.activation = &input
+func (s *stubBackendService) Apply(context.Context, uint64) (*bizlogs.BackendView, error) {
+	s.applied = true
 	return &bizlogs.BackendView{ID: 7, Status: logsmodel.BackendStatusDistributing}, nil
 }
 
@@ -101,7 +97,7 @@ func TestPutBackendUsesStrictJSONAndCallsService(t *testing.T) {
 
 func TestBackendActionRejectsInvalidID(t *testing.T) {
 	router := backendTestRouter(NewHandlerWithServices(nil, nil, &stubBackendService{}))
-	req := adminBackendRequest(http.MethodPost, "/v1/logs/backend/not-a-number/activate", nil)
+	req := adminBackendRequest(http.MethodPost, "/v1/logs/backend/not-a-number/apply", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -109,17 +105,17 @@ func TestBackendActionRejectsInvalidID(t *testing.T) {
 	}
 }
 
-func TestActivateBackendPassesCanaryEdgeSelection(t *testing.T) {
+func TestApplyBackendCallsService(t *testing.T) {
 	svc := &stubBackendService{}
 	router := backendTestRouter(NewHandlerWithServices(nil, nil, svc))
-	req := adminBackendRequest(http.MethodPost, "/v1/logs/backend/7/activate", []byte(`{"edge_ids":[42,43],"canary":true}`))
+	req := adminBackendRequest(http.MethodPost, "/v1/logs/backend/7/apply", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if svc.activation == nil || !svc.activation.Canary || len(svc.activation.EdgeIDs) != 2 || svc.activation.EdgeIDs[0] != 42 {
-		t.Fatalf("activation input = %+v", svc.activation)
+	if !svc.applied {
+		t.Fatal("Apply was not called")
 	}
 }
 

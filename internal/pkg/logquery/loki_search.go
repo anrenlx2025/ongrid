@@ -18,6 +18,8 @@ import (
 
 const lokiBackendName = "loki"
 
+const maxLokiFieldValueScanRecords = 10_000
+
 type lokiCursor struct {
 	Backend   string        `json:"backend"`
 	Timestamp int64         `json:"timestamp"`
@@ -190,20 +192,78 @@ func (c *Client) FieldValues(ctx context.Context, req FieldValuesRequest) ([]str
 	if def.LokiName == "" {
 		return []string{}, nil
 	}
-	if !def.LokiIndexed {
-		// Loki's label-values endpoint only enumerates indexed labels. These
-		// fields remain searchable as structured metadata but do not pretend
-		// to support label autocomplete.
-		return []string{}, nil
+	if def.LokiIndexed && scopeIsEmpty(req.Scope) {
+		values, err := c.LabelValues(ctx, def.LokiName, req.Start, req.End)
+		if err != nil {
+			return nil, err
+		}
+		if len(values) > req.Limit {
+			values = values[:req.Limit]
+		}
+		return values, nil
 	}
-	values, err := c.LabelValues(ctx, def.LokiName, req.Start, req.End)
-	if err != nil {
-		return nil, err
+
+	values := make(map[string]struct{})
+	search := SearchRequest{
+		Start: req.Start, End: req.End, Scope: req.Scope,
+		Limit: MaxSearchLimit, Direction: SortBackward,
 	}
-	if len(values) > req.Limit {
-		values = values[:req.Limit]
+	scanned := 0
+	for scanned < maxLokiFieldValueScanRecords {
+		result, err := c.Search(ctx, search)
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range result.Records {
+			if scanned >= maxLokiFieldValueScanRecords {
+				break
+			}
+			scanned++
+			if value := lokiRecordFieldValue(record, req.Field, def); value != "" {
+				values[value] = struct{}{}
+			}
+		}
+		if result.NextCursor == "" || result.NextCursor == search.Cursor {
+			break
+		}
+		search.Cursor = result.NextCursor
 	}
-	return values, nil
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	if len(out) > req.Limit {
+		out = out[:req.Limit]
+	}
+	return out, nil
+}
+
+func scopeIsEmpty(scope Scope) bool {
+	return len(scope.DeviceIDs) == 0 && len(scope.ClusterIDs) == 0 && len(scope.Namespaces) == 0 &&
+		len(scope.Workloads) == 0 && len(scope.Pods) == 0 && len(scope.Containers) == 0 &&
+		len(scope.Nodes) == 0 && len(scope.ServiceNames) == 0 && len(scope.SourceIDs) == 0 &&
+		len(scope.Levels) == 0 && len(scope.Files) == 0 && len(scope.Units) == 0
+}
+
+func lokiRecordFieldValue(record Record, logical string, def FieldDefinition) string {
+	switch logical {
+	case "trace_id":
+		return strings.TrimSpace(record.TraceID)
+	case "span_id":
+		return strings.TrimSpace(record.SpanID)
+	case "level":
+		if value := strings.TrimSpace(record.SeverityText); value != "" {
+			return value
+		}
+	}
+	if value := strings.TrimSpace(record.ResourceAttributes[logical]); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(record.Attributes[def.LokiName]); value != "" {
+		return value
+	}
+	return strings.TrimSpace(record.Attributes[logical])
 }
 
 func (c *Client) Histogram(ctx context.Context, req SearchRequest, interval time.Duration) ([]HistogramBucket, error) {

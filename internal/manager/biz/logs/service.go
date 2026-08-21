@@ -114,42 +114,32 @@ type SaveInput struct {
 	TLSInsecure        bool     `json:"tls_insecure"`
 }
 
-// ActivationInput selects the real Edge hosts used for the write-path probe.
-// Canary keeps the verified generation limited to those hosts; a subsequent
-// non-canary activation ignores the caller subset, inventories every
-// log-enabled Edge, and promotes only after all are online and verified.
-type ActivationInput struct {
-	EdgeIDs []uint64 `json:"edge_ids"`
-	Canary  bool     `json:"canary"`
-}
-
 type BackendView struct {
-	ID                  uint64                     `json:"id"`
-	Name                string                     `json:"name"`
-	Type                model.BackendType          `json:"type"`
-	CurrentBackend      string                     `json:"current_backend"`
-	CurrentBackendID    uint64                     `json:"current_backend_id,omitempty"`
-	Status              model.BackendStatus        `json:"status"`
-	Generation          uint64                     `json:"generation"`
-	WriteEndpoints      []string                   `json:"write_endpoints"`
-	QueryEndpoint       string                     `json:"query_endpoint"`
-	Dataset             string                     `json:"dataset"`
-	Namespace           string                     `json:"namespace"`
-	IndexPattern        string                     `json:"index_pattern"`
-	WriteCredentialRef  string                     `json:"write_credential_ref"`
-	QueryCredentialRef  string                     `json:"query_credential_ref"`
-	HasCustomCA         bool                       `json:"has_custom_ca"`
-	KibanaURL           string                     `json:"kibana_url,omitempty"`
-	TLSInsecure         bool                       `json:"tls_insecure"`
-	RolloutAutoActivate bool                       `json:"rollout_auto_activate"`
-	DetectedVersion     string                     `json:"detected_version,omitempty"`
-	CutoverAt           *time.Time                 `json:"cutover_at,omitempty"`
-	EndedAt             *time.Time                 `json:"ended_at,omitempty"`
-	LastTestAt          *time.Time                 `json:"last_test_at,omitempty"`
-	LastError           string                     `json:"last_error,omitempty"`
-	Assignments         []*model.BackendAssignment `json:"assignments,omitempty"`
-	CreatedAt           time.Time                  `json:"created_at"`
-	UpdatedAt           time.Time                  `json:"updated_at"`
+	ID                 uint64                     `json:"id"`
+	Name               string                     `json:"name"`
+	Type               model.BackendType          `json:"type"`
+	CurrentBackend     string                     `json:"current_backend"`
+	CurrentBackendID   uint64                     `json:"current_backend_id,omitempty"`
+	Status             model.BackendStatus        `json:"status"`
+	Generation         uint64                     `json:"generation"`
+	WriteEndpoints     []string                   `json:"write_endpoints"`
+	QueryEndpoint      string                     `json:"query_endpoint"`
+	Dataset            string                     `json:"dataset"`
+	Namespace          string                     `json:"namespace"`
+	IndexPattern       string                     `json:"index_pattern"`
+	WriteCredentialRef string                     `json:"write_credential_ref"`
+	QueryCredentialRef string                     `json:"query_credential_ref"`
+	HasCustomCA        bool                       `json:"has_custom_ca"`
+	KibanaURL          string                     `json:"kibana_url,omitempty"`
+	TLSInsecure        bool                       `json:"tls_insecure"`
+	DetectedVersion    string                     `json:"detected_version,omitempty"`
+	CutoverAt          *time.Time                 `json:"cutover_at,omitempty"`
+	EndedAt            *time.Time                 `json:"ended_at,omitempty"`
+	LastTestAt         *time.Time                 `json:"last_test_at,omitempty"`
+	LastError          string                     `json:"last_error,omitempty"`
+	Assignments        []*model.BackendAssignment `json:"assignments,omitempty"`
+	CreatedAt          time.Time                  `json:"created_at"`
+	UpdatedAt          time.Time                  `json:"updated_at"`
 }
 
 // RuntimeConfig is the non-sensitive overlay merged into the Edge logs plugin
@@ -177,13 +167,14 @@ type Service struct {
 	loki    logquery.Searcher
 	log     *slog.Logger
 
-	mu              sync.RWMutex
-	notifier        RolloutNotifier
-	devices         HostDeviceResolver
-	inventory       RolloutEdgeInventory
-	activationGuard func(context.Context) error
-	cacheKey        string
-	cachedES        *logquery.ElasticsearchClient
+	lifecycleMu sync.Mutex
+	mu          sync.RWMutex
+	notifier    RolloutNotifier
+	devices     HostDeviceResolver
+	inventory   RolloutEdgeInventory
+	applyGuard  func(context.Context) error
+	cacheKey    string
+	cachedES    *logquery.ElasticsearchClient
 }
 
 func NewService(repo Repo, secrets SecretResolver, loki logquery.Searcher, loggers ...*slog.Logger) *Service {
@@ -212,17 +203,18 @@ func (s *Service) SetRolloutEdgeInventory(inventory RolloutEdgeInventory) {
 	s.inventory = inventory
 }
 
-// SetActivationGuard installs a product-level compatibility check for a
-// fleet cutover. Canary distribution remains available so operators can
-// migrate blockers safely; the guard runs immediately before any full
-// activation or automatic promotion.
-func (s *Service) SetActivationGuard(guard func(context.Context) error) {
+// SetApplyGuard installs product-level preconditions that must pass before
+// applying a saved backend configuration to the full Edge fleet.
+func (s *Service) SetApplyGuard(guard func(context.Context) error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.activationGuard = guard
+	s.applyGuard = guard
 }
 
-func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (view *BackendView, retErr error) {
+func (s *Service) Save(ctx context.Context, input SaveInput) (view *BackendView, retErr error) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
 	createdManagedRefs := make([]string, 0, 2)
 	backendPersisted := false
 	defer func() {
@@ -244,16 +236,25 @@ func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (view *Backend
 	if loadErr != nil && !errors.Is(loadErr, errs.ErrNotFound) {
 		return nil, loadErr
 	}
+	if loadErr == nil && (previous.Status == model.BackendStatusDistributing || previous.Status == model.BackendStatusVerifying) {
+		return nil, fmt.Errorf("%w: wait for the current Elasticsearch apply operation to finish", errs.ErrConflict)
+	}
+	active, activeErr := s.repo.ActiveBackend(ctx)
+	if activeErr != nil && !errors.Is(activeErr, errs.ErrNotFound) {
+		return nil, activeErr
+	}
+	if activeErr == nil && active.Status == model.BackendStatusRollingBack {
+		return nil, fmt.Errorf("%w: wait for the Loki apply operation to finish", errs.ErrConflict)
+	}
 
 	generation := uint64(1)
 	editableInPlace := false
 	if loadErr == nil {
 		generation = previous.Generation
 		switch previous.Status {
-		case model.BackendStatusDraft, model.BackendStatusDistributing,
-			model.BackendStatusVerifying, model.BackendStatusDegraded:
-			// A not-yet-active revision remains editable in place. The active
-			// revision (if any) keeps serving queries and Edge configs.
+		case model.BackendStatusSaved, model.BackendStatusDegraded:
+			// A saved configuration that has not been applied remains editable
+			// in place. The active revision keeps serving reads and writes.
 			editableInPlace = true
 		default:
 			generation++
@@ -297,7 +298,7 @@ func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (view *Backend
 	}
 	// Resolve and compare every effective key before mutating a managed vault
 	// row. A rejected request must not rotate a credential still referenced by
-	// the current draft.
+	// the currently saved configuration.
 	if !normalized.ReuseWriteAPIKey && subtle.ConstantTimeCompare([]byte(writeKey), []byte(queryKey)) == 1 {
 		return nil, fmt.Errorf("%w: write and query API keys must differ unless reuse_write_api_key is enabled", errs.ErrInvalid)
 	}
@@ -327,7 +328,7 @@ func (s *Service) SaveDraft(ctx context.Context, input SaveInput) (view *Backend
 	backend := &model.Backend{
 		Name:               normalized.Name,
 		Type:               model.BackendTypeElasticsearch,
-		Status:             model.BackendStatusDraft,
+		Status:             model.BackendStatusSaved,
 		Generation:         generation,
 		WriteEndpointsJSON: string(endpointsJSON),
 		QueryEndpoint:      normalized.QueryEndpoint,
@@ -369,8 +370,8 @@ func (s *Service) Get(ctx context.Context) (*BackendView, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A cancelled draft must not hide the still-authoritative generation in
-	// the single-backend settings API. Prefer any live rollout/draft; otherwise
+	// A cancelled configuration must not hide the still-authoritative generation
+	// in the single-backend settings API. Prefer a live apply or saved config; otherwise
 	// surface the active (or rolling-back) backend before historical rows.
 	if backend.Status == model.BackendStatusRolledBack {
 		active, activeErr := s.repo.ActiveBackend(ctx)
@@ -383,34 +384,10 @@ func (s *Service) Get(ctx context.Context) (*BackendView, error) {
 	return s.view(ctx, backend)
 }
 
-func (s *Service) Test(ctx context.Context, id uint64) (*BackendView, error) {
-	backend, err := s.repo.GetBackend(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if backend.Status != model.BackendStatusDraft && backend.Status != model.BackendStatusDegraded {
-		return nil, fmt.Errorf("%w: only a draft or degraded backend can be tested", errs.ErrConflict)
-	}
-	version, err := s.probeBackend(ctx, backend)
-	now := time.Now().UTC()
-	if err != nil {
-		stateErr := s.repo.SetBackendState(ctx, backend.ID, model.BackendStatusDegraded, "", safeProbeError(err), now)
-		if stateErr != nil {
-			return nil, errors.Join(err, stateErr)
-		}
-		return nil, err
-	}
-	if err := s.repo.SetBackendState(ctx, backend.ID, model.BackendStatusDraft, version, "", now); err != nil {
-		return nil, err
-	}
-	backend, err = s.repo.GetBackend(ctx, backend.ID)
-	if err != nil {
-		return nil, err
-	}
-	return s.view(ctx, backend)
-}
+func (s *Service) Apply(ctx context.Context, id uint64) (*BackendView, error) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 
-func (s *Service) Activate(ctx context.Context, id uint64, input ActivationInput) (*BackendView, error) {
 	backend, err := s.repo.GetBackend(ctx, id)
 	if err != nil {
 		return nil, err
@@ -419,19 +396,22 @@ func (s *Service) Activate(ctx context.Context, id uint64, input ActivationInput
 		return s.view(ctx, backend)
 	}
 	if backend.Status == model.BackendStatusRolledBack {
-		return nil, fmt.Errorf("%w: rolled-back generation is immutable; save a new draft", errs.ErrConflict)
+		return nil, fmt.Errorf("%w: save the Elasticsearch configuration before applying it", errs.ErrConflict)
 	}
-	if !input.Canary {
-		if err := s.checkActivationGuard(ctx); err != nil {
-			return nil, err
-		}
+	if backend.Status != model.BackendStatusSaved && backend.Status != model.BackendStatusDegraded {
+		return nil, fmt.Errorf("%w: only a saved Elasticsearch configuration can be applied", errs.ErrConflict)
 	}
-	var edgeIDs []uint64
-	if input.Canary {
-		edgeIDs, err = normalizeEdgeIDs(input.EdgeIDs)
-	} else {
-		edgeIDs, err = s.fleetRolloutEdgeIDs(ctx)
+	active, activeErr := s.repo.ActiveBackend(ctx)
+	if activeErr != nil && !errors.Is(activeErr, errs.ErrNotFound) {
+		return nil, activeErr
 	}
+	if activeErr == nil && active.Status == model.BackendStatusRollingBack {
+		return nil, fmt.Errorf("%w: wait for the Loki apply operation to finish", errs.ErrConflict)
+	}
+	if err := s.checkApplyGuard(ctx); err != nil {
+		return nil, err
+	}
+	edgeIDs, err := s.fleetRolloutEdgeIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -448,25 +428,8 @@ func (s *Service) Activate(ctx context.Context, id uint64, input ActivationInput
 		return nil, err
 	}
 	now := time.Now().UTC()
-	existing := map[uint64]*model.BackendAssignment{}
-	if !input.Canary && (backend.Status == model.BackendStatusDistributing || backend.Status == model.BackendStatusVerifying) {
-		rows, listErr := s.repo.ListAssignments(ctx, backend.ID)
-		if listErr != nil {
-			return nil, listErr
-		}
-		for _, row := range rows {
-			if row != nil {
-				existing[row.EdgeID] = row
-			}
-		}
-	}
 	assignments := make([]*model.BackendAssignment, 0, len(edgeIDs))
 	for _, edgeID := range edgeIDs {
-		if prior := existing[edgeID]; prior != nil && prior.DesiredGeneration == backend.Generation &&
-			prior.Status == model.AssignmentStatusVerified && prior.LastWriteSuccessAt != nil {
-			assignments = append(assignments, cloneAssignmentForRollout(prior))
-			continue
-		}
 		probeID, err := newProbeID()
 		if err != nil {
 			return nil, err
@@ -478,22 +441,10 @@ func (s *Service) Activate(ctx context.Context, id uint64, input ActivationInput
 	}
 	backend.DetectedVersion = version
 	backend.LastTestAt = &now
-	backend.RolloutAutoActivate = !input.Canary
-	allVerified := !input.Canary && assignmentsVerified(assignments, backend.Generation)
 	if err := s.repo.BeginRollout(ctx, backend, assignments); err != nil {
 		return nil, err
 	}
 	s.invalidateCache()
-	if allVerified {
-		if err := s.promoteVerifiedRollout(ctx, backend); err != nil {
-			return nil, err
-		}
-		backend, err = s.repo.GetBackend(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		return s.view(ctx, backend)
-	}
 	if err := s.notify(ctx); err != nil {
 		return nil, fmt.Errorf("distribute backend notification: %w", err)
 	}
@@ -505,6 +456,9 @@ func (s *Service) Activate(ctx context.Context, id uint64, input ActivationInput
 }
 
 func (s *Service) Rollback(ctx context.Context, id uint64) (*BackendView, error) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
 	backend, err := s.repo.GetBackend(ctx, id)
 	if err != nil {
 		return nil, err
@@ -564,7 +518,6 @@ func (s *Service) Rollback(ctx context.Context, id uint64) (*BackendView, error)
 			Status: model.AssignmentStatusPending, ProbeID: probeID,
 		})
 	}
-	backend.RolloutAutoActivate = true
 	if err := s.repo.BeginRollback(ctx, backend, assignments); err != nil {
 		return nil, err
 	}
@@ -629,11 +582,11 @@ func (s *Service) PluginRuntimeOverlay(ctx context.Context, edgeID uint64, plugi
 		overlay["log_probe_id"] = assignment.ProbeID
 	}
 	if assignment != nil {
-		// Canary/rollout traffic is a bounded shadow write. The currently
-		// authoritative backend keeps receiving every log until fleet cutover,
-		// while the candidate receives the same records for a real Edge-path
-		// probe. This avoids an observability blind spot without putting log
-		// bytes through Manager or requiring overlapping-backend pagination.
+		// Apply verification uses a bounded shadow write. The current backend
+		// keeps receiving every log until all Edge probes pass, while the saved
+		// configuration receives the same records for real Edge-path checks.
+		// This avoids an observability blind spot without routing log bytes
+		// through Manager or querying two backends at once.
 		overlay["rollout_shadow"] = true
 		active, activeErr := s.repo.ActiveBackend(ctx)
 		if errors.Is(activeErr, errs.ErrNotFound) {
@@ -660,7 +613,7 @@ func (s *Service) PluginRuntimeOverlay(ctx context.Context, edgeID uint64, plugi
 }
 
 // PluginSecretForEdge is called only from the authenticated tunnel handler.
-// During rollout, only explicitly assigned Edges may obtain the draft
+// During apply, only explicitly assigned Edges may obtain the saved
 // generation. Once active, every authenticated Edge may obtain that active
 // generation. The request can never select an arbitrary vault entry.
 func (s *Service) PluginSecretForEdge(ctx context.Context, edgeID uint64, plugin, slot string, generation uint64) (*PluginSecret, error) {
@@ -775,11 +728,11 @@ func (s *Service) MarkApplied(ctx context.Context, edgeID, generation uint64, pr
 	if err := s.repo.UpsertAssignment(ctx, assignment); err != nil {
 		return err
 	}
-	if backend.RolloutAutoActivate && isRollback {
+	if isRollback {
 		if err := s.completeVerifiedRollback(ctx, backend); err != nil && !errors.Is(err, errs.ErrConflict) {
 			return err
 		}
-	} else if backend.RolloutAutoActivate {
+	} else {
 		if err := s.promoteVerifiedRollout(ctx, backend); err != nil {
 			// Other selected Edges may still be pending; that is a normal
 			// partial convergence, not a failed RPC.
@@ -1349,7 +1302,7 @@ func (s *Service) view(ctx context.Context, backend *model.Backend) (*BackendVie
 		Dataset: backend.Dataset, Namespace: backend.Namespace, IndexPattern: backend.IndexPattern,
 		WriteCredentialRef: backend.WriteCredentialRef, QueryCredentialRef: backend.QueryCredentialRef,
 		HasCustomCA: strings.TrimSpace(backend.CAPEM) != "", KibanaURL: backend.KibanaURL,
-		TLSInsecure: backend.TLSInsecure, RolloutAutoActivate: backend.RolloutAutoActivate,
+		TLSInsecure:     backend.TLSInsecure,
 		DetectedVersion: backend.DetectedVersion,
 		CutoverAt:       backend.CutoverAt, EndedAt: backend.EndedAt,
 		LastTestAt: backend.LastTestAt, LastError: backend.LastError,
@@ -1367,9 +1320,9 @@ func (s *Service) notify(ctx context.Context) error {
 	return notifier.NotifyLogsBackendChanged(ctx)
 }
 
-func (s *Service) checkActivationGuard(ctx context.Context) error {
+func (s *Service) checkApplyGuard(ctx context.Context) error {
 	s.mu.RLock()
-	guard := s.activationGuard
+	guard := s.applyGuard
 	s.mu.RUnlock()
 	if guard == nil {
 		return nil

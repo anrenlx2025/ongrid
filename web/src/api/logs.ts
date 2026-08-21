@@ -110,8 +110,8 @@ export function getLogContext(input: {
   scope?: LogScope;
   before?: number;
   after?: number;
-}) {
-  return request<APIEnvelope<LogRecord[]>>('POST', '/logs/context', input).then((r) => r.data);
+}, signal?: AbortSignal) {
+  return request<APIEnvelope<LogRecord[]>>('POST', '/logs/context', input, { signal }).then((r) => r.data);
 }
 
 export type LogBackendAssignment = {
@@ -133,7 +133,7 @@ export type LogBackend = {
   type: 'elasticsearch';
   current_backend?: 'loki' | 'elasticsearch';
   current_backend_id?: number;
-  status: 'draft' | 'distributing' | 'verifying' | 'active' | 'rolling_back' | 'degraded' | 'rolled_back';
+  status: 'saved' | 'distributing' | 'verifying' | 'active' | 'rolling_back' | 'degraded' | 'rolled_back';
   generation: number;
   write_endpoints: string[];
   query_endpoint: string;
@@ -145,7 +145,6 @@ export type LogBackend = {
   has_custom_ca: boolean;
   kibana_url?: string;
   tls_insecure: boolean;
-  rollout_auto_activate: boolean;
   detected_version?: string;
   cutover_at?: string;
   ended_at?: string;
@@ -159,8 +158,7 @@ export type LogBackend = {
 export type LogBackendKind = 'loki' | 'elasticsearch';
 
 export function currentLogBackend(backend: LogBackend | null): LogBackendKind {
-  if (backend?.current_backend) return backend.current_backend;
-  return backend?.cutover_at && !backend.ended_at ? 'elasticsearch' : 'loki';
+  return backend?.current_backend ?? 'loki';
 }
 
 export type SaveLogBackendInput = {
@@ -188,12 +186,8 @@ export function saveLogBackend(input: SaveLogBackendInput) {
   return request<APIEnvelope<LogBackend>>('PUT', '/logs/backend', input).then((r) => r.data);
 }
 
-export function testLogBackend(id: number) {
-  return request<APIEnvelope<LogBackend>>('POST', `/logs/backend/${id}/test`).then((r) => r.data);
-}
-
-export function activateLogBackend(id: number, input: { edge_ids: number[]; canary: boolean }) {
-  return request<APIEnvelope<LogBackend>>('POST', `/logs/backend/${id}/activate`, input).then((r) => r.data);
+export function applyLogBackend(id: number) {
+  return request<APIEnvelope<LogBackend>>('POST', `/logs/backend/${id}/apply`).then((r) => r.data);
 }
 
 export function rollbackLogBackend(id: number) {

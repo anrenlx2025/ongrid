@@ -120,6 +120,62 @@ func TestLokiHistogramCountsSingleBucketWithoutRangeQuery(t *testing.T) {
 	}
 }
 
+func TestLokiFieldValuesUsesScopeAndKeepsGlobalIndexedFastPath(t *testing.T) {
+	window := validSearchRequest()
+	queryRangeCalls := 0
+	labelValueCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/loki/api/v1/query_range":
+			queryRangeCalls++
+			if query := r.URL.Query().Get("query"); !strings.Contains(query, `device_id="42"`) {
+				t.Fatalf("scoped field-values query = %q", query)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "success",
+				"data": map[string]any{"resultType": "streams", "result": []any{
+					map[string]any{"stream": map[string]string{"device_id": "42", "cluster_id": "7"}, "values": []any{[]any{strconv.FormatInt(window.End.Add(-time.Minute).UnixNano(), 10), "first"}}},
+					map[string]any{"stream": map[string]string{"device_id": "42", "cluster_id": "12"}, "values": []any{[]any{strconv.FormatInt(window.End.Add(-2*time.Minute).UnixNano(), 10), "second"}}},
+				}},
+			})
+		case "/loki/api/v1/label/cluster_id/values":
+			labelValueCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": []string{"global-a", "global-b"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := NewWithHTTPClient(server.URL, server.Client(), nil)
+
+	scoped, err := client.FieldValues(t.Context(), FieldValuesRequest{
+		Field: "cluster_id", Start: window.Start, End: window.End,
+		Scope: Scope{DeviceIDs: []uint64{42}}, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("FieldValues(scoped): %v", err)
+	}
+	if want := []string{"12", "7"}; !reflect.DeepEqual(scoped, want) {
+		t.Fatalf("FieldValues(scoped) = %#v, want %#v", scoped, want)
+	}
+	if queryRangeCalls != 1 || labelValueCalls != 0 {
+		t.Fatalf("scoped calls: query_range=%d label_values=%d", queryRangeCalls, labelValueCalls)
+	}
+
+	global, err := client.FieldValues(t.Context(), FieldValuesRequest{
+		Field: "cluster_id", Start: window.Start, End: window.End, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("FieldValues(global): %v", err)
+	}
+	if want := []string{"global-a", "global-b"}; !reflect.DeepEqual(global, want) {
+		t.Fatalf("FieldValues(global) = %#v, want %#v", global, want)
+	}
+	if queryRangeCalls != 1 || labelValueCalls != 1 {
+		t.Fatalf("global calls: query_range=%d label_values=%d", queryRangeCalls, labelValueCalls)
+	}
+}
+
 func TestCompileLogQL_MapsScopeAndKeywords(t *testing.T) {
 	req := validSearchRequest()
 	req.Scope = Scope{

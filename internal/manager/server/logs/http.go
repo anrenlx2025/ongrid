@@ -52,9 +52,8 @@ type Handler struct {
 
 type BackendService interface {
 	Get(ctx context.Context) (*bizlogs.BackendView, error)
-	SaveDraft(ctx context.Context, input bizlogs.SaveInput) (*bizlogs.BackendView, error)
-	Test(ctx context.Context, id uint64) (*bizlogs.BackendView, error)
-	Activate(ctx context.Context, id uint64, input bizlogs.ActivationInput) (*bizlogs.BackendView, error)
+	Save(ctx context.Context, input bizlogs.SaveInput) (*bizlogs.BackendView, error)
+	Apply(ctx context.Context, id uint64) (*bizlogs.BackendView, error)
 	Rollback(ctx context.Context, id uint64) (*bizlogs.BackendView, error)
 }
 
@@ -97,8 +96,7 @@ func (h *Handler) Register(r chi.Router) {
 	r.Post("/v1/logs/context", h.contextLogs)
 	r.Get("/v1/logs/backend", h.getBackend)
 	r.Put("/v1/logs/backend", h.putBackend)
-	r.Post("/v1/logs/backend/{id}/test", h.testBackend)
-	r.Post("/v1/logs/backend/{id}/activate", h.activateBackend)
+	r.Post("/v1/logs/backend/{id}/apply", h.applyBackend)
 	r.Post("/v1/logs/backend/{id}/rollback", h.rollbackBackend)
 	r.Get("/v1/logs/query_range", h.queryRange)
 	r.Get("/v1/logs/labels", h.labels)
@@ -126,7 +124,7 @@ func (h *Handler) getBackend(w http.ResponseWriter, r *http.Request) {
 }
 
 // putBackend godoc
-// @Summary Create or update an Elasticsearch log backend draft
+// @Summary Save an Elasticsearch log backend configuration
 // @Router /api/v1/logs/backend [put]
 // @Success 200 {object} apiEnvelope
 func (h *Handler) putBackend(w http.ResponseWriter, r *http.Request) {
@@ -142,7 +140,7 @@ func (h *Handler) putBackend(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusBadRequest, "LOG_BACKEND_INVALID", "invalid log backend request")
 		return
 	}
-	out, err := h.backend.SaveDraft(r.Context(), input)
+	out, err := h.backend.Save(r.Context(), input)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -150,24 +148,16 @@ func (h *Handler) putBackend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success", Data: out})
 }
 
-// testBackend godoc
-// @Summary Test Elasticsearch read and write endpoint credentials
-// @Router /api/v1/logs/backend/{id}/test [post]
+// applyBackend godoc
+// @Summary Validate and apply a saved Elasticsearch log backend configuration
+// @Router /api/v1/logs/backend/{id}/apply [post]
 // @Success 200 {object} apiEnvelope
-func (h *Handler) testBackend(w http.ResponseWriter, r *http.Request) {
-	h.backendAction(w, r, "test")
-}
-
-// activateBackend godoc
-// @Summary Activate an Elasticsearch log backend generation
-// @Router /api/v1/logs/backend/{id}/activate [post]
-// @Success 200 {object} apiEnvelope
-func (h *Handler) activateBackend(w http.ResponseWriter, r *http.Request) {
-	h.backendAction(w, r, "activate")
+func (h *Handler) applyBackend(w http.ResponseWriter, r *http.Request) {
+	h.backendAction(w, r, "apply")
 }
 
 // rollbackBackend godoc
-// @Summary Cancel a candidate rollout or roll an active backend back to Loki
+// @Summary Cancel an in-progress apply or roll an active backend back to Loki
 // @Router /api/v1/logs/backend/{id}/rollback [post]
 // @Success 200 {object} apiEnvelope
 func (h *Handler) rollbackBackend(w http.ResponseWriter, r *http.Request) {
@@ -189,15 +179,8 @@ func (h *Handler) backendAction(w http.ResponseWriter, r *http.Request, action s
 	}
 	var out *bizlogs.BackendView
 	switch action {
-	case "test":
-		out, err = h.backend.Test(r.Context(), id)
-	case "activate":
-		var input bizlogs.ActivationInput
-		if decodeErr := decodeOptionalJSONBody(r, &input); decodeErr != nil {
-			err = fmt.Errorf("%w: invalid activation request", errs.ErrInvalid)
-		} else {
-			out, err = h.backend.Activate(r.Context(), id, input)
-		}
+	case "apply":
+		out, err = h.backend.Apply(r.Context(), id)
 	case "rollback":
 		out, err = h.backend.Rollback(r.Context(), id)
 	default:
@@ -244,9 +227,7 @@ func (h *Handler) searchLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if !h.acquireSearchSlot() {
-		w.Header().Set("Retry-After", "1")
-		writeAPIErr(w, http.StatusTooManyRequests, "LOG_QUERY_BUSY", "too many concurrent log searches")
+	if !h.acquireSearchSlotOrReject(w) {
 		return
 	}
 	defer h.releaseSearchSlot()
@@ -268,6 +249,15 @@ func (h *Handler) acquireSearchSlot() bool {
 	default:
 		return false
 	}
+}
+
+func (h *Handler) acquireSearchSlotOrReject(w http.ResponseWriter) bool {
+	if h.acquireSearchSlot() {
+		return true
+	}
+	w.Header().Set("Retry-After", "1")
+	writeAPIErr(w, http.StatusTooManyRequests, "LOG_QUERY_BUSY", "too many concurrent log searches")
+	return false
 }
 
 func (h *Handler) releaseSearchSlot() {
@@ -292,6 +282,10 @@ func (h *Handler) fields(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+	if !h.acquireSearchSlotOrReject(w) {
+		return
+	}
+	defer h.releaseSearchSlot()
 	out, err := h.search.Fields(ctx, start, end, logquery.Scope{})
 	if err != nil {
 		writeSearchError(w, err)
@@ -316,6 +310,10 @@ func (h *Handler) fieldValues(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+	if !h.acquireSearchSlotOrReject(w) {
+		return
+	}
+	defer h.releaseSearchSlot()
 	out, err := h.search.FieldValues(ctx, in)
 	if err != nil {
 		writeSearchError(w, err)
@@ -345,6 +343,10 @@ func (h *Handler) histogram(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	if !h.acquireSearchSlotOrReject(w) {
+		return
+	}
+	defer h.releaseSearchSlot()
 	out, err := h.search.Histogram(ctx, in.Search, interval)
 	if err != nil {
 		writeSearchError(w, err)
@@ -379,6 +381,10 @@ func (h *Handler) contextLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	if !h.acquireSearchSlotOrReject(w) {
+		return
+	}
+	defer h.releaseSearchSlot()
 	before, err := h.search.Search(ctx, logquery.SearchRequest{
 		Start: in.Timestamp.Add(-15 * time.Minute), End: in.Timestamp,
 		Scope: in.Scope, Limit: max(in.Before, 1), Direction: logquery.SortBackward,
@@ -553,25 +559,6 @@ func decodeJSONBody(r *http.Request, dst any) error {
 	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
-		return err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("multiple JSON values")
-		}
-		return err
-	}
-	return nil
-}
-
-func decodeOptionalJSONBody(r *http.Request, dst any) error {
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(dst); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
 		return err
 	}
 	var extra any

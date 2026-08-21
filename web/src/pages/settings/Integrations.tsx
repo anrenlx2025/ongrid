@@ -40,12 +40,11 @@ import {
   type GrafanaSyncResult,
 } from '@/api/settings';
 import {
-  activateLogBackend,
+  applyLogBackend,
   currentLogBackend,
   getLogBackend,
   rollbackLogBackend,
   saveLogBackend,
-  testLogBackend,
   type LogBackend,
   type LogBackendKind,
   type SaveLogBackendInput,
@@ -944,7 +943,7 @@ function LogsIntegrationCard() {
               </span>}
             </div>
             <p className="mt-2 max-w-4xl text-[11px] leading-5 text-zinc-500">
-              {tr('Loki 与 Elasticsearch 互斥运行。保存和测试配置不会改变现有链路；只有完成真实写入验证并设为当前后端后，Edge 写入与日志中心查询才会一起切换。旧后端数据不会自动合并查询或迁移。', 'Loki and Elasticsearch are mutually exclusive at runtime. Saving or testing does not change the live path; Edge writes and Log Center queries switch together only after real-write verification and activation. Data in the previous backend is neither merged nor migrated automatically.')}
+              {tr('Loki 与 Elasticsearch 互斥运行。保存配置不会改变现有链路；应用配置后，系统会验证 Elasticsearch 和全部日志采集 Edge，全部通过后同步切换写入与查询。旧后端数据不会自动合并查询或迁移。', 'Loki and Elasticsearch are mutually exclusive at runtime. Saving does not change the live path. Applying validates Elasticsearch and every log-enabled edge, then switches writes and queries together after all checks pass. Data in the previous backend is neither merged nor migrated automatically.')}
             </p>
           </div>
           {loading && <span className="inline-flex items-center gap-2 text-xs text-zinc-500"><Loader2 size={13} className="animate-spin" />{tr('读取当前后端…', 'Reading active backend…')}</span>}
@@ -1051,7 +1050,7 @@ function ElasticsearchLogsCard({ current, onBackendChange }: { current: boolean;
     setForm((current) => ({ ...current, [key]: value }));
   };
 
-  const draftInput = (): SaveLogBackendInput | null => {
+  const saveInput = (): SaveLogBackendInput | null => {
     const endpoints = form.writeEndpoints.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean);
     const writeAPIKey = form.writeAPIKey.trim();
     const queryAPIKey = form.queryAPIKey.trim();
@@ -1085,7 +1084,7 @@ function ElasticsearchLogsCard({ current, onBackendChange }: { current: boolean;
   };
 
   const save = async () => {
-    const input = draftInput();
+    const input = saveInput();
     if (!input) return;
     setBusy('save');
     setMessage(null);
@@ -1095,7 +1094,7 @@ function ElasticsearchLogsCard({ current, onBackendChange }: { current: boolean;
       setForm(backendToForm(value));
       setDirty(false);
       setRevealedKeys({ write: false, query: false });
-      setMessage({ ok: true, text: tr('已保存为草稿；日志链路尚未切换。', 'Saved as a draft; log traffic has not switched.') });
+      setMessage({ ok: true, text: tr('配置已保存；点击“应用”后才会切换日志链路。', 'Configuration saved. Apply it to switch the log pipeline.') });
     } catch (error) {
       setMessage({ ok: false, text: integrationError(error) });
     } finally {
@@ -1103,47 +1102,12 @@ function ElasticsearchLogsCard({ current, onBackendChange }: { current: boolean;
     }
   };
 
-  const saveCandidate = async () => {
-    const input = draftInput();
-    if (!input) return null;
-    const value = await saveLogBackend(input);
-    setBackend(value);
-    setForm(backendToForm(value));
-    setDirty(false);
-    setRevealedKeys({ write: false, query: false });
-    return value;
-  };
-
-  const candidateForAction = async () => {
-    if (!backend || dirty || backend.status === 'rolled_back') {
-      return saveCandidate();
-    }
-    return backend;
-  };
-
-  const test = async () => {
-    setBusy('test');
+  const applyElasticsearch = async () => {
+    if (!backend || dirty || !['saved', 'degraded'].includes(backend.status)) return;
+    setBusy('apply');
     setMessage(null);
     try {
-      const candidate = await candidateForAction();
-      if (!candidate) return;
-      const value = await testLogBackend(candidate.id);
-      setBackend(value);
-      setMessage({ ok: true, text: tr(`端点、认证和版本探测通过（Elasticsearch ${value.detected_version ?? ''}）；读写权限将在 Edge 真实探针阶段验证。`, `Endpoint, authentication, and version probe passed (Elasticsearch ${value.detected_version ?? ''}); read/write permissions are verified by the real Edge probe.`) });
-    } catch (error) {
-      setMessage({ ok: false, text: integrationError(error) });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const switchToElasticsearch = async () => {
-    setBusy('activate');
-    setMessage(null);
-    try {
-      const candidate = await candidateForAction();
-      if (!candidate) return;
-      const value = await activateLogBackend(candidate.id, { edge_ids: [], canary: false });
+      const value = await applyLogBackend(backend.id);
       setBackend(value);
       setMessage(value.status === 'active'
         ? {
@@ -1162,32 +1126,11 @@ function ElasticsearchLogsCard({ current, onBackendChange }: { current: boolean;
     }
   };
 
-  const rollback = async () => {
-    if (!backend) return;
-    const cancelsCandidate = backend.status !== 'active' && !backend.cutover_at;
-    setBusy('rollback');
-    setMessage(null);
-    try {
-      const value = await rollbackLogBackend(backend.id);
-      setBackend(value);
-      setMessage({ ok: true, text: cancelsCandidate
-        ? tr('已取消候选后端；Edge 已恢复当前权威后端。', 'Candidate rollout cancelled; edges are back on the current authoritative backend.')
-        : value.status === 'rolling_back'
-          ? tr('已开始回滚预热；所有启用 logs 的 Edge 均在线且 Loki 实写探针成功后，才会结束 ES 时间线并切换查询。', 'Rollback pre-warming started; the ES timeline closes only after every log-enabled edge is online and has a verified real write in Loki.')
-          : tr('已回滚到内置 Loki；Edge 仍使用同一套 OTel Collector 与 checkpoint。', 'Rolled back to built-in Loki with the same OTel Collector and checkpoints.') });
-    } catch (error) {
-      setMessage({ ok: false, text: integrationError(error) });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const canEdit = !backend || ['draft', 'active', 'degraded', 'rolling_back', 'rolled_back'].includes(backend.status);
-  const editingCurrent = current && (backend?.status === 'active' || backend?.status === 'rolling_back');
-  const fleetConverging = backend != null && backend.rollout_auto_activate && (backend.status === 'distributing' || backend.status === 'verifying');
-  const rollbackConverging = backend?.status === 'rolling_back';
-  const canTest = !backend || dirty || ['draft', 'degraded', 'rolled_back'].includes(backend.status);
-  const showSwitchAction = !rollbackConverging && !fleetConverging && (!current || dirty || backend?.status !== 'active');
+  const canEdit = !backend || ['saved', 'active', 'degraded', 'rolled_back'].includes(backend.status);
+  const editingCurrent = current && backend?.status === 'active';
+  const fleetConverging = backend != null && (backend.status === 'distributing' || backend.status === 'verifying');
+  const canSave = canEdit && (dirty || backend?.status === 'rolled_back');
+  const canApply = backend != null && !dirty && ['saved', 'degraded'].includes(backend.status) && !fleetConverging;
 
   return (
     <section aria-label={tr('Elasticsearch 日志后端配置', 'Elasticsearch log backend configuration')}>
@@ -1199,7 +1142,7 @@ function ElasticsearchLogsCard({ current, onBackendChange }: { current: boolean;
             {current && <span className="text-[10px] text-emerald-400">{tr('当前读写后端', 'Active read/write backend')}</span>}
           </div>
           <p className="mt-2 max-w-4xl text-[11px] leading-5 text-zinc-500">
-            {tr('Edge 上的 otelcol-contrib 直接写入这些 endpoint，日志正文不经过 Manager。设为当前后端后，日志中心只查询 Elasticsearch；Loki 数据不会同时展示。', 'otelcol-contrib on each edge writes directly to these endpoints; log bytes never pass through Manager. Once activated, Log Center queries Elasticsearch only and does not display Loki data alongside it.')}
+            {tr('Edge 上的 otelcol-contrib 直接写入这些 endpoint，日志正文不经过 Manager。应用为当前后端后，日志中心只查询 Elasticsearch；Loki 数据不会同时展示。', 'otelcol-contrib on each edge writes directly to these endpoints; log bytes never pass through Manager. Once applied, Log Center queries Elasticsearch only and does not display Loki data alongside it.')}
           </p>
         </div>
       </div>
@@ -1260,21 +1203,14 @@ function ElasticsearchLogsCard({ current, onBackendChange }: { current: boolean;
             </details>
           </fieldset>
 
-          {editingCurrent && <p className="mt-3 text-[11px] leading-5 text-zinc-500">{backend?.status === 'rolling_back'
-            ? tr('Elasticsearch 仍是当前读写后端，但 Loki 回滚验证仍在进行；保存会创建新的 ES 草稿，不会取消正在进行的回滚。', 'Elasticsearch is still the active read/write backend while Loki rollback verification continues. Saving creates a new ES draft and does not cancel the rollback in progress.')
-            : tr('当前 generation 继续承担读写；保存修改会创建下一代草稿，不会立即改变 Edge 写入或日志中心查询。', 'The current generation keeps serving reads and writes. Saving changes creates the next draft generation without immediately changing Edge writes or Log Center queries.')}</p>}
+          {editingCurrent && <p className="mt-3 text-[11px] leading-5 text-zinc-500">{tr('保存不会影响当前日志链路；点击“应用”后才会验证并切换全部 Edge。', 'Saving does not affect the current log pipeline. Applying validates and switches every edge.')}</p>}
 
           <div className="mt-2 text-[11px] leading-5 text-zinc-500">{tr('API Key 是只写字段：Manager 接收后立即放入加密凭证库，读取后端配置时不会回显；Edge 只通过专用密钥通道取得写 Key。', 'API keys are write-only: Manager immediately stores them in the encrypted credential vault and never echoes them when reading backend configuration; Edge receives only the write key through the dedicated secret channel.')}</div>
 
           <div className="mt-5 flex flex-wrap items-end gap-3 border-t border-zinc-800/70 pt-4">
-            <Button onClick={() => void save()} disabled={!canEdit || !dirty || busy !== null} variant="primary">{busy === 'save' ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}<span>{editingCurrent ? tr('保存为新草稿', 'Save as new draft') : tr('保存草稿', 'Save draft')}</span></Button>
-            <Button onClick={() => void test()} disabled={!canTest || busy !== null || rollbackConverging} variant="ghost">{busy === 'test' ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />}<span>{tr('测试端点与认证', 'Test endpoints & auth')}</span></Button>
-            {fleetConverging ? (
-              <span className="inline-flex h-8 items-center gap-2 rounded-md border border-sky-500/20 bg-sky-500/5 px-3 text-xs text-sky-300"><Loader2 size={13} className="animate-spin" />{tr('正在验证并切换到 Elasticsearch', 'Validating and switching to Elasticsearch')}</span>
-            ) : showSwitchAction && (
-              <Button onClick={() => void switchToElasticsearch()} disabled={busy !== null} variant="primary">{busy === 'activate' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}<span>{current ? tr('验证并应用新配置', 'Validate and apply changes') : tr('验证并切换到 Elasticsearch', 'Validate and switch to Elasticsearch')}</span></Button>
-            )}
-            {backend && !backend.cutover_at && ['distributing', 'verifying'].includes(backend.status) && <Button onClick={() => void rollback()} disabled={busy !== null} variant="ghost"><RefreshCw size={14} /><span>{tr('取消候选切换', 'Cancel candidate rollout')}</span></Button>}
+            <Button onClick={() => void save()} disabled={!canSave || busy !== null} variant="primary">{busy === 'save' ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}<span>{tr('保存', 'Save')}</span></Button>
+            <Button onClick={() => void applyElasticsearch()} disabled={!canApply || busy !== null} variant="primary">{busy === 'apply' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}<span>{tr('应用', 'Apply')}</span></Button>
+            {fleetConverging && <span className="inline-flex h-8 items-center gap-2 rounded-md border border-sky-500/20 bg-sky-500/5 px-3 text-xs text-sky-300"><Loader2 size={13} className="animate-spin" />{tr('正在验证并应用 Elasticsearch 配置', 'Validating and applying the Elasticsearch configuration')}</span>}
           </div>
 
           {message && <p className={cn('mt-3 break-all text-xs', message.ok ? 'text-emerald-400' : 'text-red-400')}>{message.ok ? '✓ ' : '✗ '}{message.text}</p>}
@@ -1436,7 +1372,7 @@ function LokiCard({ current, backend, onBackendChange }: { current: boolean; bac
         {current && <span className="text-[10px] text-emerald-400">{tr('当前读写后端', 'Active read/write backend')}</span>}
       </div>
       <p className="mb-4 text-[11px] text-zinc-500">
-        {tr('可使用内置 Loki，也可以填写外部 Loki / VictoriaLogs URL。设为当前后端后，Edge 只写入 Loki，日志中心也只查询 Loki；Elasticsearch 中的数据不会同时展示。', 'Use the built-in Loki or configure an external Loki / VictoriaLogs URL. Once activated, Edge writes only to Loki and Log Center queries only Loki; Elasticsearch data is not displayed alongside it.')}
+        {tr('可使用内置 Loki，也可以填写外部 Loki / VictoriaLogs URL。应用为当前后端后，Edge 只写入 Loki，日志中心也只查询 Loki；Elasticsearch 中的数据不会同时展示。', 'Use the built-in Loki or configure an external Loki / VictoriaLogs URL. Once applied, Edge writes only to Loki and Log Center queries only Loki; Elasticsearch data is not displayed alongside it.')}
       </p>
 
       {loading ? (

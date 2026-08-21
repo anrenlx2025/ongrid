@@ -363,10 +363,12 @@ export default function LogsPage() {
   const [contextRows, setContextRows] = useState<LogRecord[]>([]);
   const [contextLoading, setContextLoading] = useState(false);
   const requestSeq = useRef(0);
+  const contextRequestSeq = useRef(0);
   const paginationGeneration = useRef(0);
   const pageRequestRef = useRef<LogSearchRequest | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
   const pageAbortRef = useRef<AbortController | null>(null);
+  const contextAbortRef = useRef<AbortController | null>(null);
   const resultScrollRef = useRef<HTMLElement>(null);
   const histogramRef = useRef<HTMLDivElement>(null);
   const histogramPointerID = useRef<number | null>(null);
@@ -536,6 +538,7 @@ export default function LogsPage() {
   useEffect(() => () => {
     searchAbortRef.current?.abort();
     pageAbortRef.current?.abort();
+    contextAbortRef.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -595,6 +598,10 @@ export default function LogsPage() {
   }, [resolveWindow, refreshKey]);
 
   const openContext = async (record: LogRecord) => {
+    const seq = ++contextRequestSeq.current;
+    contextAbortRef.current?.abort();
+    const controller = new AbortController();
+    contextAbortRef.current = controller;
     setSelected(record);
     setContextLoading(true);
     setContextRows([]);
@@ -622,12 +629,23 @@ export default function LogsPage() {
       if (source) scope.source_ids = [source];
       if (file) scope.files = [file];
       if (unit) scope.units = [unit];
-      setContextRows(await getLogContext({ timestamp: record.timestamp, scope, before: 30, after: 30 }));
+      const rows = await getLogContext({ timestamp: record.timestamp, scope, before: 30, after: 30 }, controller.signal);
+      if (seq === contextRequestSeq.current) setContextRows(rows);
     } catch (err) {
-      setError(errorMessage(err));
+      if (seq === contextRequestSeq.current && (err as Error).name !== 'AbortError') setError(errorMessage(err));
     } finally {
-      setContextLoading(false);
+      if (contextAbortRef.current === controller) contextAbortRef.current = null;
+      if (seq === contextRequestSeq.current) setContextLoading(false);
     }
+  };
+
+  const closeContext = () => {
+    ++contextRequestSeq.current;
+    contextAbortRef.current?.abort();
+    contextAbortRef.current = null;
+    setSelected(null);
+    setContextRows([]);
+    setContextLoading(false);
   };
 
   const exportJSONL = () => {
@@ -974,7 +992,7 @@ export default function LogsPage() {
           <aside className="w-[410px] shrink-0 overflow-y-auto border-l border-zinc-800 bg-zinc-950/80">
             <div className="sticky top-0 z-10 flex items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4 py-3">
               <div><p className="text-xs font-medium text-zinc-200">{tr('上下文日志', 'Log context')}</p><p className="mt-0.5 text-[10px] text-zinc-600">{new Date(selected.timestamp).toLocaleString()}</p></div>
-              <button type="button" aria-label={tr('关闭上下文', 'Close context')} onClick={() => { setSelected(null); setContextRows([]); }} className="rounded p-1 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"><X size={14} /></button>
+              <button type="button" aria-label={tr('关闭上下文', 'Close context')} onClick={closeContext} className="rounded p-1 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"><X size={14} /></button>
             </div>
             <div className="p-3">
               {contextLoading ? <div className="flex h-24 items-center justify-center text-xs text-zinc-500"><Loader2 size={14} className="mr-2 animate-spin" />{tr('读取前后文…', 'Loading context…')}</div> : (

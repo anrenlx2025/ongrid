@@ -33,7 +33,7 @@ func (idleStructuredSearcher) Histogram(context.Context, logquery.SearchRequest,
 	return nil, nil
 }
 
-func TestSearchLogsRejectsRequestsAboveConcurrencyLimit(t *testing.T) {
+func TestStructuredLogEndpointsShareConcurrencyLimit(t *testing.T) {
 	handler := NewHandlerWithSearcher(nil, idleStructuredSearcher{})
 	for range maxConcurrentStructuredSearches {
 		if !handler.acquireSearchSlot() {
@@ -47,15 +47,31 @@ func TestSearchLogsRejectsRequestsAboveConcurrencyLimit(t *testing.T) {
 	})
 
 	end := time.Now().UTC()
-	body := `{"start":"` + end.Add(-time.Hour).Format(time.RFC3339Nano) + `","end":"` + end.Format(time.RFC3339Nano) + `"}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/logs/search", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	backendTestRouter(handler).ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	search := `{"start":"` + end.Add(-time.Hour).Format(time.RFC3339Nano) + `","end":"` + end.Format(time.RFC3339Nano) + `"}`
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "search", method: http.MethodPost, path: "/v1/logs/search", body: search},
+		{name: "fields", method: http.MethodGet, path: "/v1/logs/fields"},
+		{name: "field values", method: http.MethodPost, path: "/v1/logs/field-values", body: `{}`},
+		{name: "histogram", method: http.MethodPost, path: "/v1/logs/histogram", body: `{"search":` + search + `,"interval":"1m"}`},
+		{name: "context", method: http.MethodPost, path: "/v1/logs/context", body: `{"timestamp":"` + end.Format(time.RFC3339Nano) + `"}`},
 	}
-	if rec.Header().Get("Retry-After") != "1" || !strings.Contains(rec.Body.String(), "LOG_QUERY_BUSY") {
-		t.Fatalf("headers=%v body=%s", rec.Header(), rec.Body.String())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			backendTestRouter(handler).ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+			}
+			if rec.Header().Get("Retry-After") != "1" || !strings.Contains(rec.Body.String(), "LOG_QUERY_BUSY") {
+				t.Fatalf("headers=%v body=%s", rec.Header(), rec.Body.String())
+			}
+		})
 	}
 }
