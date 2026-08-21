@@ -156,9 +156,7 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 		`truncate_all(log.attributes, 4096)`,
 		`set(log.attributes["systemd.unit"], log.attributes["_SYSTEMD_UNIT"]) where log.attributes["_SYSTEMD_UNIT"] != nil`,
 	)
-	// Preserve stable product dimensions for Loki. Keeping the aliases on ES
-	// records as well makes a bounded rollout fan-out deterministic and gives
-	// both adapters the same document vocabulary.
+	// Preserve stable product dimensions for both supported backends.
 	guardStatements = append(guardStatements,
 		`set(log.attributes["level"], log.severity_text)`,
 		`set(resource.attributes["filename"], log.attributes["log.file.path"]) where log.attributes["log.file.path"] != nil`,
@@ -193,69 +191,21 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 
 	exporters := make(map[string]interface{}, 2)
 	pipelines := make(map[string]interface{}, 2)
-	shadow := boolSpecDefault(spec, "rollout_shadow", false)
-	if shadow {
-		baselineBackend := strings.ToLower(strings.TrimSpace(stringSpec(spec, "baseline_backend")))
-		if baselineBackend != backendBuiltinLoki && baselineBackend != backendExternalES {
-			return nil, errors.New("logs plugin: rollout shadow baseline is invalid")
-		}
-		candidateActions, actionErr := backendResourceActions(spec, backend)
-		if actionErr != nil {
-			return nil, actionErr
-		}
-		candidateExporterID, candidateExporter, exporterErr := logsExporter(cfg, spec, backend)
-		if exporterErr != nil {
-			return nil, exporterErr
-		}
-		// A failing candidate must not backpressure the authoritative path.
-		// Its persistent queue may drop only after saturation; the unique Edge
-		// probe then fails and blocks promotion.
-		setExporterQueueBlocking(candidateExporter, false)
-		baselineSpec := rolloutBaselineSpec(spec, baselineBackend)
-		baselineActions, actionErr := backendResourceActions(baselineSpec, baselineBackend)
-		if actionErr != nil {
-			return nil, fmt.Errorf("logs plugin: baseline routing: %w", actionErr)
-		}
-		baselineExporterID, baselineExporter, exporterErr := logsExporter(cfg, baselineSpec, baselineBackend)
-		if exporterErr != nil {
-			return nil, fmt.Errorf("logs plugin: baseline exporter: %w", exporterErr)
-		}
-		if candidateExporterID == baselineExporterID {
-			return nil, errors.New("logs plugin: candidate and baseline exporters must be distinct")
-		}
-		processors["resource/candidate"] = map[string]interface{}{"attributes": candidateActions}
-		processors["resource/baseline"] = map[string]interface{}{"attributes": baselineActions}
-		processors["batch/candidate"] = logBatchProcessor()
-		processors["batch/baseline"] = logBatchProcessor()
-		exporters[candidateExporterID] = candidateExporter
-		exporters[baselineExporterID] = baselineExporter
-		pipelines["logs/candidate"] = map[string]interface{}{
-			"receivers":  receiverIDs,
-			"processors": append(append([]string{}, baseProcessorIDs...), "resource/candidate", "batch/candidate"),
-			"exporters":  []string{candidateExporterID},
-		}
-		pipelines["logs/baseline"] = map[string]interface{}{
-			"receivers":  receiverIDs,
-			"processors": append(append([]string{}, baseProcessorIDs...), "resource/baseline", "batch/baseline"),
-			"exporters":  []string{baselineExporterID},
-		}
-	} else {
-		backendActions, actionErr := backendResourceActions(spec, backend)
-		if actionErr != nil {
-			return nil, actionErr
-		}
-		exporterID, exporter, exporterErr := logsExporter(cfg, spec, backend)
-		if exporterErr != nil {
-			return nil, exporterErr
-		}
-		processors["resource/backend"] = map[string]interface{}{"attributes": backendActions}
-		processors["batch/logs"] = logBatchProcessor()
-		exporters[exporterID] = exporter
-		pipelines["logs"] = map[string]interface{}{
-			"receivers":  receiverIDs,
-			"processors": append(append([]string{}, baseProcessorIDs...), "resource/backend", "batch/logs"),
-			"exporters":  []string{exporterID},
-		}
+	backendActions, actionErr := backendResourceActions(spec, backend)
+	if actionErr != nil {
+		return nil, actionErr
+	}
+	exporterID, exporter, exporterErr := logsExporter(cfg, spec, backend)
+	if exporterErr != nil {
+		return nil, exporterErr
+	}
+	processors["resource/backend"] = map[string]interface{}{"attributes": backendActions}
+	processors["batch/logs"] = logBatchProcessor()
+	exporters[exporterID] = exporter
+	pipelines["logs"] = map[string]interface{}{
+		"receivers":  receiverIDs,
+		"processors": append(append([]string{}, baseProcessorIDs...), "resource/backend", "batch/logs"),
+		"exporters":  []string{exporterID},
 	}
 	config := map[string]interface{}{
 		"extensions": map[string]interface{}{
@@ -279,7 +229,6 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 			"telemetry": map[string]interface{}{
 				"resource": map[string]interface{}{
 					"ongrid.plugin": "logs", "ongrid.backend": backend,
-					"ongrid.rollout_shadow": strconv.FormatBool(shadow),
 				},
 				"logs": map[string]interface{}{"level": "info", "encoding": "json"},
 				"metrics": map[string]interface{}{
@@ -518,44 +467,9 @@ func backendResourceActions(spec map[string]interface{}, backend string) ([]inte
 	), nil
 }
 
-func rolloutBaselineSpec(spec map[string]interface{}, backend string) map[string]interface{} {
-	out := map[string]interface{}{
-		"backend": backend,
-	}
-	if backend == backendBuiltinLoki {
-		out["loki_tls_insecure_skip_verify"] = boolSpecDefault(
-			spec,
-			"baseline_loki_tls_insecure_skip_verify",
-			boolSpecDefault(spec, "loki_tls_insecure_skip_verify", true),
-		)
-		return out
-	}
-	for _, key := range []string{
-		"backend_generation",
-		"elasticsearch_endpoints",
-		"elasticsearch_api_key_file",
-		"elasticsearch_ca_file",
-		"elasticsearch_dataset",
-		"elasticsearch_namespace",
-		"elasticsearch_tls_insecure_skip_verify",
-	} {
-		if value, ok := spec["baseline_"+key]; ok {
-			out[key] = value
-		}
-	}
-	return out
-}
-
 func logBatchProcessor() map[string]interface{} {
 	return map[string]interface{}{
 		"send_batch_size": 1024, "send_batch_max_size": 2048, "timeout": "1s",
-	}
-}
-
-func setExporterQueueBlocking(exporter map[string]interface{}, blocking bool) {
-	queue, ok := exporter["sending_queue"].(map[string]interface{})
-	if ok {
-		queue["block_on_overflow"] = blocking
 	}
 }
 

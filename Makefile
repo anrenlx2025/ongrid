@@ -147,7 +147,7 @@ proto: ## [api] 重新生成 proto（优先 buf，回退 protoc + protoc-gen-go/
 			--go_out=gen --go_opt=paths=source_relative \
 			--go-grpc_out=gen --go-grpc_opt=paths=source_relative \
 			--go-grpc_opt=require_unimplemented_servers=true \
-			frontierbound/v1/frontierbound.proto; \
+			$$(find . -name '*.proto' -not -path './gen/*' -print); \
 	fi
 
 # ----------------------------------------------------------------------------

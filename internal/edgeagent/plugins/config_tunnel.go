@@ -3,6 +3,7 @@ package plugins
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -172,15 +173,11 @@ func (t *TunnelConfigFetcher) Fetch(ctx context.Context) (map[string]PluginConfi
 	if ok {
 		materialized, err := t.materializeLogsRuntime(ctx, logsCfg)
 		if err != nil {
-			// A rollout can fail before Supervisor sees the config (secret
-			// fetch/checksum or restricted-file materialization). Report that
-			// bounded error class so Manager can degrade and push the previous
-			// backend instead of leaving the rollout stuck in distributing.
-			_ = t.ReportPluginConfigApplied(ctx, "logs", logsCfg, err)
-			if cached := t.cachedSnapshot(); cached != nil {
-				return cached, nil
+			materializeErr := fmt.Errorf("materialize logs runtime: %w", err)
+			if reportErr := t.ReportPluginConfigApplied(ctx, "logs", logsCfg, err); reportErr != nil {
+				return nil, errors.Join(materializeErr, fmt.Errorf("report logs config failure: %w", reportErr))
 			}
-			return nil, fmt.Errorf("materialize logs runtime: %w", err)
+			return nil, materializeErr
 		}
 		out["logs"] = materialized
 	}

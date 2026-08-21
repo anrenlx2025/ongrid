@@ -444,7 +444,11 @@ func compileLogQL(req SearchRequest) (string, error) {
 		}
 	}
 	if len(matchers) == 0 {
-		matchers = append(matchers, `ongrid_source=~".+"`)
+		// Every Edge log stream is enriched with device_id. ongrid_source is
+		// optional and is absent from ordinary journald/file/Kubernetes streams,
+		// so using it as the required non-empty Loki matcher would leave only
+		// connection-check probe logs visible in an unfiltered search.
+		matchers = append(matchers, `device_id=~".+"`)
 	}
 
 	include := trimmedStrings(req.Keywords.Include)
@@ -541,18 +545,45 @@ func decodeLokiRecords(result *QueryRangeResult) ([]Record, error) {
 					labels[key] = item
 				}
 			}
+			for _, alias := range []struct {
+				canonical string
+				legacy    string
+			}{
+				{canonical: "device_id", legacy: "attributes_device_id"},
+				{canonical: "cluster_id", legacy: "attributes_cluster_id"},
+				{canonical: "ongrid_source", legacy: "attributes_ongrid_source"},
+				{canonical: "level", legacy: "attributes_level"},
+			} {
+				if labels[alias.canonical] == "" {
+					labels[alias.canonical] = labels[alias.legacy]
+				}
+			}
 			attrs := cloneStringMap(labels)
+			// Loki exposes the intrinsic OTel severity fields as structured
+			// metadata and older OTLP payloads may contain an attributes_ prefix.
+			// These implementation fields must not leak into the backend-neutral
+			// attribute/display-field namespace.
+			delete(attrs, "severity_text")
+			delete(attrs, "severity_number")
+			for key := range attrs {
+				if strings.HasPrefix(key, "attributes_") || strings.HasPrefix(key, "resource_attributes_") {
+					delete(attrs, key)
+				}
+			}
+			if strings.EqualFold(strings.TrimSpace(attrs["service_name"]), "unknown_service") {
+				delete(attrs, "service_name")
+			}
 			resources := map[string]string{}
 			for _, logical := range []string{"device_id", "cluster_id", "namespace", "workload", "pod", "container", "node", "service_name", "source_id"} {
 				def, _ := LookupField(logical)
-				if v := labels[def.LokiName]; v != "" {
+				if v := labels[def.LokiName]; v != "" && !(logical == "service_name" && strings.EqualFold(strings.TrimSpace(v), "unknown_service")) {
 					resources[logical] = v
 				}
 			}
 			if clusterName := labels["cluster_name"]; clusterName != "" {
 				resources["cluster_name"] = clusterName
 			}
-			severityText := normalizeLevel(firstNonEmpty(labels["level"], labels["detected_level"]))
+			severityText := normalizeLevel(firstNonEmpty(labels["level"], labels["detected_level"], labels["severity_text"]))
 			if severityText == "" {
 				severityText = detectLevel(message)
 			}

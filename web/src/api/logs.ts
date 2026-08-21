@@ -105,26 +105,13 @@ export function getLogHistogram(search: LogSearchRequest, interval: string, sign
   return request<APIEnvelope<LogHistogramBucket[]>>('POST', '/logs/histogram', { search, interval }, { signal }).then((r) => r.data);
 }
 
-export type LogBackendAssignment = {
-  id: number;
-  backend_id: number;
-  edge_id: number;
-  desired_generation: number;
-  applied_generation: number;
-  status: 'pending' | 'applied' | 'verifying' | 'verified' | 'failed';
-  cutover_at?: string;
-  last_probe_at?: string;
-  last_write_success_at?: string;
-  last_error?: string;
-};
-
 export type LogBackend = {
   id: number;
   name: string;
   type: 'elasticsearch';
   current_backend?: 'loki' | 'elasticsearch';
   current_backend_id?: number;
-  status: 'saved' | 'distributing' | 'verifying' | 'active' | 'rolling_back' | 'degraded' | 'rolled_back';
+  status: 'selected' | 'unselected';
   generation: number;
   write_endpoints: string[];
   query_endpoint: string;
@@ -137,11 +124,7 @@ export type LogBackend = {
   kibana_url?: string;
   tls_insecure: boolean;
   detected_version?: string;
-  cutover_at?: string;
-  ended_at?: string;
   last_test_at?: string;
-  last_error?: string;
-  assignments?: LogBackendAssignment[];
   created_at: string;
   updated_at: string;
 };
@@ -187,12 +170,52 @@ export function testLogBackend(id: number) {
   return request<APIEnvelope<LogBackendTestResult>>('POST', `/logs/backend/${id}/test`).then((r) => r.data);
 }
 
-export function applyLogBackend(id: number) {
-  return request<APIEnvelope<LogBackend>>('POST', `/logs/backend/${id}/apply`).then((r) => r.data);
+export function selectLogBackend(id: number) {
+  return request<APIEnvelope<LogBackend>>('POST', `/logs/backend/${id}/select`).then((r) => r.data);
 }
 
-export function rollbackLogBackend(id: number) {
-  return request<APIEnvelope<LogBackend>>('POST', `/logs/backend/${id}/rollback`).then((r) => r.data);
+export type LogBackendConnectionStatus = 'not_checked' | 'pending' | 'verified' | 'failed' | 'offline';
+
+export type LogBackendEdgeConnection = {
+  edge_id: number;
+  edge_name?: string;
+  online: boolean;
+  status: LogBackendConnectionStatus;
+  desired_generation: number;
+  applied_generation: number;
+  last_checked_at?: string;
+  last_error?: string;
+};
+
+export type LogBackendConnectionCheck = {
+  backend_id: number;
+  backend: 'loki' | 'elasticsearch';
+  generation: number;
+  observed_at: string;
+  total: number;
+  online: number;
+  verified: number;
+  pending: number;
+  failed: number;
+  offline: number;
+  all_online_verified: boolean;
+  edges: LogBackendEdgeConnection[];
+};
+
+function logBackendConnectionCheckPath(id?: number) {
+  return id == null ? '/logs/backend/connection-check' : `/logs/backend/${id}/connection-check`;
+}
+
+export function startLogBackendConnectionCheck(id?: number) {
+  return request<APIEnvelope<LogBackendConnectionCheck>>('POST', logBackendConnectionCheckPath(id)).then((r) => r.data);
+}
+
+export function getLogBackendConnectionCheck(id?: number) {
+  return request<APIEnvelope<LogBackendConnectionCheck>>('GET', logBackendConnectionCheckPath(id)).then((r) => r.data);
+}
+
+export function selectLokiLogBackend() {
+  return request<APIEnvelope<LogBackend>>('POST', '/logs/backend/loki/select').then((r) => r.data);
 }
 
 // Loki streams response: each stream has `stream` (label key/value map)

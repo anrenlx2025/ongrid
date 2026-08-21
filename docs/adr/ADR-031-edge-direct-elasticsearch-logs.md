@@ -15,14 +15,14 @@ Ongrid 当前把外部 Loki/Tempo endpoint 解析后直接下发给 Edge，内�
 ## 决策
 
 1. 配置外部 Elasticsearch 时，Host Edge、Kubernetes Node Collector 和独立 Telemetry Gateway 直接连接 Elasticsearch，日志正文不经过 Manager、Frontier 或控制隧道。
-2. Manager 只负责后端配置、加密凭证、目标 generation、Edge 应用状态、查询和审计。
+2. Manager 只负责后端配置、加密凭证、当前选中项、独立设备连接检查、查询和审计。
 3. Edge 只获得目标 data stream 的只写凭证；Manager 只保留只读查询凭证。两者独立轮换。
 4. 内置 Loki 继续通过 Manager Nginx 精确 OTLP 写入口鉴权并代理；Manager Go 不接收日志正文。
-5. 外部写入和内置 Loki 回滚都使用同一个 `otelcol-contrib` logs 流水线，不再让 Promtail成为长期回滚依赖。
+5. 外部 Elasticsearch 与内置 Loki 都使用同一个 `otelcol-contrib` logs 流水线，不再保留 Promtail 备用链路。
 6. 日志查询通过后端无关服务接口；浏览器、告警和 AIOps 不直接提交 Elasticsearch DSL。
-7. 不允许永久生产双写。灰度期间，选定 Edge 在本地 Collector 中有界地同时写“当前权威后端”和“候选 ES”；查询仍只读权威后端。真实写探针全部通过后记录全局 `cutover_at`，再停止影子写并切换查询。
-8. 全量切换只覆盖启用了 `logs` 插件的 Edge，并要求它们全部在线；否则拒绝移动全局查询时间线，避免离线 Edge 恢复后继续写旧后端。
-9. 回滚采用对称流程：ES 仍是权威写入，Edge 影子写内置 Loki；只有全部 Loki 探针可通过 Manager 查询后才记录 `ended_at` 并切回 Loki。失败时保持 ES 权威，可重试失败 Edge。
+7. Loki 与 Elasticsearch 互斥选择，持久化状态只有 `selected` 与 `unselected`。选择 Elasticsearch 时，Manager 完成查询端点、写入端点和 API Key 权限测试后立即切换；选择 Loki 时直接切换。失败返回错误且不改变当前选中项。
+8. 设备在线状态不参与选择。独立的“设备连接检查”会为所有启用了 `logs` 的 Host Edge 生成当前 generation 的一次性探针；在线 Edge 回报已加载配置且探针日志可从当前后端查询到，离线 Edge 只记入检查结果。
+9. Edge 配置始终只渲染当前选中的一个日志后端，不存在候选、基线、影子双写或自动回退状态。离线 Edge 重连后按当前选中项同步配置。
 
 ## 备选方案
 
@@ -40,7 +40,7 @@ Ongrid 当前把外部 Loki/Tempo endpoint 解析后直接下发给 Edge，内�
 
 ### 方案 D：Edge 永久双写 Loki 和 ES
 
-便于对比和回滚，但会使存储成本翻倍，产生两套 delivery 语义和结果不一致。未采用；只允许 rollout assignment 生命周期内的有界影子双写。候选队列不允许反向阻塞权威 exporter，探针失败则禁止切换。
+便于对比，但会使存储成本翻倍，产生两套 delivery 语义和结果不一致。未采用。设备连接检查只向当前选中的后端写入唯一探针，不产生跨后端双写。
 
 ## 后果
 
@@ -56,7 +56,7 @@ Ongrid 当前把外部 Loki/Tempo endpoint 解析后直接下发给 Edge，内�
 
 - 每个 Edge 必须能访问外部 ES，网络和证书排障面扩大。
 - 写 API Key 必须安全下发到 Edge；共享 Key 会扩大单 Edge 泄露影响面。
-- Manager 连接测试不能证明 Edge 可达，必须增加真实 Edge 探针。
-- 灰度和回滚预热期间存在短时双写成本；全量切换和回滚后的历史查询仍需按全局 `cutover_at/ended_at` 读取对应后端。
-- 任一启用日志的 Edge 离线都会阻塞全量切换或回滚完成；这是用运维等待换取单一全局时间线的完整性。
+- Manager 连接测试不能证明 Edge 可达，因此必须保留切换后的真实 Edge 探针和逐台 generation 状态。
+- 离线 Edge 不阻断全局切换；检查时不进入在线验证分母，并在重连后同步当前选中 generation。
+- 旧后端数据继续保留，但产品查询只访问当前选中的后端，不自动归并或迁移历史数据。
 - at-least-once 重试可能产生重复日志，不承诺 exactly-once。

@@ -59,8 +59,10 @@ type BackendService interface {
 	Get(ctx context.Context) (*bizlogs.BackendView, error)
 	Save(ctx context.Context, input bizlogs.SaveInput) (*bizlogs.BackendView, error)
 	Test(ctx context.Context, id uint64) (*bizlogs.BackendTestResult, error)
-	Apply(ctx context.Context, id uint64) (*bizlogs.BackendView, error)
-	Rollback(ctx context.Context, id uint64) (*bizlogs.BackendView, error)
+	Select(ctx context.Context, id uint64) (*bizlogs.BackendView, error)
+	SelectLoki(ctx context.Context) (*bizlogs.BackendView, error)
+	StartConnectionCheck(ctx context.Context, id uint64) (*bizlogs.BackendConnectionCheck, error)
+	ConnectionCheck(ctx context.Context, id uint64) (*bizlogs.BackendConnectionCheck, error)
 }
 
 // NewHandler builds the handler. q may be nil when Loki is disabled.
@@ -79,7 +81,7 @@ func NewHandlerWithSearcher(q Querier, searcher logquery.Searcher) *Handler {
 }
 
 // NewHandlerWithServices wires the backend-neutral query surface and the
-// administrator-only Elasticsearch backend lifecycle API.
+// administrator-only Elasticsearch backend selection API.
 func NewHandlerWithServices(q Querier, searcher logquery.Searcher, backend BackendService) *Handler {
 	return newHandler(q, searcher, backend)
 }
@@ -104,8 +106,12 @@ func (h *Handler) Register(r chi.Router) {
 	r.Get("/v1/logs/backend", h.getBackend)
 	r.Put("/v1/logs/backend", h.putBackend)
 	r.Post("/v1/logs/backend/{id}/test", h.testBackend)
-	r.Post("/v1/logs/backend/{id}/apply", h.applyBackend)
-	r.Post("/v1/logs/backend/{id}/rollback", h.rollbackBackend)
+	r.Post("/v1/logs/backend/loki/select", h.selectLoki)
+	r.Post("/v1/logs/backend/{id}/select", h.selectBackend)
+	r.Post("/v1/logs/backend/connection-check", h.startBackendConnectionCheck)
+	r.Get("/v1/logs/backend/connection-check", h.getBackendConnectionCheck)
+	r.Post("/v1/logs/backend/{id}/connection-check", h.startBackendConnectionCheck)
+	r.Get("/v1/logs/backend/{id}/connection-check", h.getBackendConnectionCheck)
 	r.Get("/v1/logs/query_range", h.queryRange)
 	r.Get("/v1/logs/labels", h.labels)
 	r.Get("/v1/logs/labels/{name}/values", h.labelValues)
@@ -181,23 +187,11 @@ func (h *Handler) testBackend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success", Data: out})
 }
 
-// applyBackend godoc
-// @Summary Validate and apply a saved Elasticsearch log backend configuration
-// @Router /api/v1/logs/backend/{id}/apply [post]
+// selectBackend godoc
+// @Summary Validate and select an Elasticsearch log backend configuration
+// @Router /api/v1/logs/backend/{id}/select [post]
 // @Success 200 {object} apiEnvelope
-func (h *Handler) applyBackend(w http.ResponseWriter, r *http.Request) {
-	h.backendAction(w, r, "apply")
-}
-
-// rollbackBackend godoc
-// @Summary Cancel an in-progress apply or roll an active backend back to Loki
-// @Router /api/v1/logs/backend/{id}/rollback [post]
-// @Success 200 {object} apiEnvelope
-func (h *Handler) rollbackBackend(w http.ResponseWriter, r *http.Request) {
-	h.backendAction(w, r, "rollback")
-}
-
-func (h *Handler) backendAction(w http.ResponseWriter, r *http.Request, action string) {
+func (h *Handler) selectBackend(w http.ResponseWriter, r *http.Request) {
 	if !requireBackendAdmin(w, r) {
 		return
 	}
@@ -210,15 +204,75 @@ func (h *Handler) backendAction(w http.ResponseWriter, r *http.Request, action s
 		writeAPIErr(w, http.StatusBadRequest, "LOG_BACKEND_INVALID", "invalid backend id")
 		return
 	}
-	var out *bizlogs.BackendView
-	switch action {
-	case "apply":
-		out, err = h.backend.Apply(r.Context(), id)
-	case "rollback":
-		out, err = h.backend.Rollback(r.Context(), id)
-	default:
-		err = errs.ErrInvalid
+	out, err := h.backend.Select(r.Context(), id)
+	if err != nil {
+		writeBackendError(w, err)
+		return
 	}
+	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success", Data: out})
+}
+
+// startBackendConnectionCheck godoc
+// @Summary Start a per-Edge real-write check for the current log backend
+// @Router /api/v1/logs/backend/connection-check [post]
+// @Router /api/v1/logs/backend/{id}/connection-check [post]
+// @Success 200 {object} apiEnvelope
+func (h *Handler) startBackendConnectionCheck(w http.ResponseWriter, r *http.Request) {
+	h.backendConnectionCheck(w, r, true)
+}
+
+// getBackendConnectionCheck godoc
+// @Summary Get the current per-Edge real-write connection check
+// @Router /api/v1/logs/backend/connection-check [get]
+// @Router /api/v1/logs/backend/{id}/connection-check [get]
+// @Success 200 {object} apiEnvelope
+func (h *Handler) getBackendConnectionCheck(w http.ResponseWriter, r *http.Request) {
+	h.backendConnectionCheck(w, r, false)
+}
+
+func (h *Handler) backendConnectionCheck(w http.ResponseWriter, r *http.Request, start bool) {
+	if !requireBackendAdmin(w, r) {
+		return
+	}
+	if h.backend == nil {
+		writeAPIErr(w, http.StatusServiceUnavailable, "LOG_BACKEND_DISABLED", "log backend management disabled")
+		return
+	}
+	var id uint64
+	var err error
+	if rawID := chi.URLParam(r, "id"); rawID != "" {
+		id, err = strconv.ParseUint(rawID, 10, 64)
+		if err != nil || id == 0 {
+			writeAPIErr(w, http.StatusBadRequest, "LOG_BACKEND_INVALID", "invalid backend id")
+			return
+		}
+	}
+	var out *bizlogs.BackendConnectionCheck
+	if start {
+		out, err = h.backend.StartConnectionCheck(r.Context(), id)
+	} else {
+		out, err = h.backend.ConnectionCheck(r.Context(), id)
+	}
+	if err != nil {
+		writeBackendError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success", Data: out})
+}
+
+// selectLoki godoc
+// @Summary Select the built-in Loki log backend
+// @Router /api/v1/logs/backend/loki/select [post]
+// @Success 200 {object} apiEnvelope
+func (h *Handler) selectLoki(w http.ResponseWriter, r *http.Request) {
+	if !requireBackendAdmin(w, r) {
+		return
+	}
+	if h.backend == nil {
+		writeAPIErr(w, http.StatusServiceUnavailable, "LOG_BACKEND_DISABLED", "log backend management disabled")
+		return
+	}
+	out, err := h.backend.SelectLoki(r.Context())
 	if err != nil {
 		writeBackendError(w, err)
 		return

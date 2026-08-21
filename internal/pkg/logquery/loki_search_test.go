@@ -267,14 +267,39 @@ func TestCompileLogQL_MapsScopeAndKeywords(t *testing.T) {
 	}
 }
 
+func TestCompileLogQL_DefaultSelectorDoesNotRequireOptionalSourceLabel(t *testing.T) {
+	req := validSearchRequest()
+	if err := req.NormalizeAndValidate(); err != nil {
+		t.Fatalf("NormalizeAndValidate() error = %v", err)
+	}
+	got, err := compileLogQL(req)
+	if err != nil {
+		t.Fatalf("compileLogQL() error = %v", err)
+	}
+	if !strings.Contains(got, `device_id=~".+"`) {
+		t.Fatalf("compileLogQL() = %q, want device-wide default selector", got)
+	}
+	if strings.Contains(got, "ongrid_source") {
+		t.Fatalf("compileLogQL() = %q, optional source label must not gate unfiltered search", got)
+	}
+}
+
 func TestDecodeLokiRecords_ProducesStableRecord(t *testing.T) {
 	raw, err := json.Marshal([]map[string]any{{
 		"stream": map[string]string{
-			"device_id": "42", "cluster_id": "7", "cluster_name": "edge-fleet-a", "ongrid_source": "journald", "level": "ERROR",
+			"cluster_id": "7", "cluster_name": "edge-fleet-a",
 		},
 		"values": []any{[]any{
 			"1787054400000000000", "connection refused",
-			map[string]string{"filename": "/var/log/app.log", "trace_id": "abc123"},
+			map[string]string{
+				"filename":                 "/var/log/app.log",
+				"trace_id":                 "abc123",
+				"severity_text":            "ERROR",
+				"severity_number":          "17",
+				"service_name":             "unknown_service",
+				"attributes_device_id":     "42",
+				"attributes_ongrid_source": "journald",
+			},
 		}},
 	}})
 	if err != nil {
@@ -300,6 +325,20 @@ func TestDecodeLokiRecords_ProducesStableRecord(t *testing.T) {
 	}
 	if first[0].Attributes["filename"] != "/var/log/app.log" || first[0].TraceID != "abc123" {
 		t.Fatalf("structured metadata = %#v trace=%q", first[0].Attributes, first[0].TraceID)
+	}
+	if _, ok := first[0].Attributes["severity_text"]; ok {
+		t.Fatalf("severity_text leaked into attributes: %#v", first[0].Attributes)
+	}
+	if _, ok := first[0].Attributes["severity_number"]; ok {
+		t.Fatalf("severity_number leaked into attributes: %#v", first[0].Attributes)
+	}
+	for _, name := range []string{"service_name", "attributes_device_id", "attributes_ongrid_source"} {
+		if _, ok := first[0].Attributes[name]; ok {
+			t.Fatalf("internal Loki field %q leaked into attributes: %#v", name, first[0].Attributes)
+		}
+	}
+	if _, ok := first[0].ResourceAttributes["service_name"]; ok {
+		t.Fatalf("unknown service leaked into resource attributes: %#v", first[0].ResourceAttributes)
 	}
 }
 

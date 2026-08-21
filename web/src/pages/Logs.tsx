@@ -119,11 +119,13 @@ const DISPLAY_FIELD_LABELS: Record<string, { zh: string; en: string }> = {
   span_id: { zh: 'Span ID', en: 'Span ID' },
 };
 
-const DEFAULT_VISIBLE_FIELDS: DisplayField[] = ['level', 'cluster_id', 'device_id', 'service_name', 'pod', 'source_id'];
+const DEFAULT_VISIBLE_FIELDS: DisplayField[] = ['level', 'cluster_id', 'device_id', 'pod', 'source_id'];
+const NO_SELECTED_DEVICE_IDS: number[] = [];
 
 const DISPLAY_FIELD_ALIASES: Record<string, DisplayField> = {
   cluster_name: 'cluster_id',
   detected_level: 'level',
+  severity_text: 'level',
   'service.name': 'service_name',
   'k8s.namespace.name': 'namespace',
   k8s_namespace_name: 'namespace',
@@ -158,20 +160,29 @@ const HIDDEN_DISPLAY_FIELDS = new Set([
   'log_iostream',
   'logtag',
   'observed_timestamp',
+  'severity_number',
+  'service_name',
 ]);
 
 function canonicalDisplayField(name: string): DisplayField | null {
-  const alias = DISPLAY_FIELD_ALIASES[name];
-  if (alias) return alias;
+  // Loki appends `_extracted` when parsed or structured metadata collides
+  // with an existing stream label. Treat that backend-specific suffix as an
+  // alias so canonical hidden fields (for example service_name) cannot leak
+  // back into the display-field catalog under a derived name.
+  const canonicalName = name.endsWith('_extracted') ? name.slice(0, -'_extracted'.length) : name;
+  const alias = DISPLAY_FIELD_ALIASES[canonicalName];
+  if (alias) return HIDDEN_DISPLAY_FIELDS.has(alias) ? null : alias;
   if (
-    name.startsWith('k8s.')
-    || name.startsWith('k8s_')
-    || name.startsWith('ongrid.')
-    || name.startsWith('ongrid_')
-    || name.startsWith('data_stream.')
-    || name.startsWith('data_stream_')
+    canonicalName.startsWith('k8s.')
+    || canonicalName.startsWith('k8s_')
+    || canonicalName.startsWith('ongrid.')
+    || canonicalName.startsWith('ongrid_')
+    || canonicalName.startsWith('data_stream.')
+    || canonicalName.startsWith('data_stream_')
+    || canonicalName.startsWith('attributes_')
+    || canonicalName.startsWith('resource_attributes_')
   ) return null;
-  return HIDDEN_DISPLAY_FIELDS.has(name) ? null : name;
+  return HIDDEN_DISPLAY_FIELDS.has(canonicalName) ? null : canonicalName;
 }
 
 function buildDisplayFields(fields: LogField[], records: LogRecord[]): DisplayFieldOption[] {
@@ -376,6 +387,7 @@ export default function LogsPage() {
   const [logFields, setLogFields] = useState<LogField[]>([]);
   const [fieldValues, setFieldValues] = useState<Record<string, string[]>>({});
   const [records, setRecords] = useState<LogRecord[]>([]);
+  const [hasCompletedSearch, setHasCompletedSearch] = useState(false);
   const [histogram, setHistogram] = useState<LogHistogramBucket[]>([]);
   const [backends, setBackends] = useState<string[]>([]);
   const [tookMS, setTookMS] = useState(0);
@@ -405,7 +417,13 @@ export default function LogsPage() {
   const histogramPointerID = useRef<number | null>(null);
   const histogramDragRef = useRef<HistogramDrag | null>(null);
   const displayFieldsInitialized = useRef(false);
-  const displayFields = useMemo(() => buildDisplayFields(logFields, records), [logFields, records]);
+  // The fields catalog often returns before the first log search. Until that
+  // search settles, records=[] means "not loaded yet", not "empty result";
+  // rendering the whole catalog here would make API-only fields flash briefly.
+  const displayFields = useMemo(
+    () => hasCompletedSearch ? buildDisplayFields(logFields, records) : [],
+    [hasCompletedSearch, logFields, records],
+  );
 
   useEffect(() => {
     if (displayFields.length === 0) return;
@@ -440,14 +458,24 @@ export default function LogsPage() {
     clusters.map((cluster) => [String(cluster.id), topologyNodeLabel(cluster)]),
   ), [clusters]);
 
-  const selectedDeviceIDs = useMemo(() => {
-    if (deviceID) return [Number(deviceID)].filter((id) => Number.isInteger(id) && id > 0);
-    if (!role) return [];
+  const directDeviceIDs = useMemo(() => {
+    if (!deviceID) return null;
+    const id = Number(deviceID);
+    return Number.isInteger(id) && id > 0 ? [id] : NO_SELECTED_DEVICE_IDS;
+  }, [deviceID]);
+
+  const roleDeviceIDs = useMemo(() => {
+    if (!role) return NO_SELECTED_DEVICE_IDS;
     return edges
       .filter((edge) => Array.isArray(edge.roles) && (edge.roles as string[]).includes(role) && edge.device_id != null)
       .map((edge) => Number(edge.device_id))
       .filter((id) => Number.isInteger(id) && id > 0);
-  }, [deviceID, edges, role]);
+  }, [edges, role]);
+
+  // Device catalog updates only affect the query when role-based selection is
+  // active. Keeping the empty/direct selections referentially stable avoids
+  // aborting and restarting the initial Loki search after /edges resolves.
+  const selectedDeviceIDs = directDeviceIDs ?? roleDeviceIDs;
 
   const buildScope = useCallback((draft: ScopeDraft): LogScope => {
     const scope: LogScope = {};
@@ -502,6 +530,7 @@ export default function LogsPage() {
       ]);
       if (seq !== requestSeq.current) return;
       pageRequestRef.current = input;
+      setHasCompletedSearch(true);
       setRecords(result.records ?? []);
       setNextCursor(result.next_cursor ?? '');
       setBackends(result.backends ?? []);
@@ -511,6 +540,7 @@ export default function LogsPage() {
     } catch (err) {
       if (seq !== requestSeq.current || (err as Error).name === 'AbortError') return;
       pageRequestRef.current = null;
+      setHasCompletedSearch(true);
       setError(errorMessage(err));
       if (!quiet) {
         setRecords([]);
@@ -618,7 +648,7 @@ export default function LogsPage() {
         if (!cancelled) setLogFields(fields);
         if (!advanced || controller.signal.aborted) return;
         const names = new Set(fields.filter((field) => field.aggregatable).map((field) => field.name));
-        const requested = ['service_name', 'source_id', 'level', 'file', 'unit'].filter((name) => names.has(name));
+        const requested = ['source_id', 'level', 'file', 'unit'].filter((name) => names.has(name));
         const values: Array<readonly [string, string[]]> = [];
         for (let index = 0; index < requested.length && !controller.signal.aborted; index += FACET_VALUE_CONCURRENCY) {
           const batch = requested.slice(index, index + FACET_VALUE_CONCURRENCY);
@@ -845,7 +875,6 @@ export default function LogsPage() {
               <FilterInput label="Container" value={scopeDraft.containers} onChange={(value) => setScopeDraft((current) => ({ ...current, containers: value }))} />
               <FilterInput label="Node" value={scopeDraft.nodes} onChange={(value) => setScopeDraft((current) => ({ ...current, nodes: value }))} />
               <FilterInput label="systemd unit" value={scopeDraft.units} onChange={(value) => setScopeDraft((current) => ({ ...current, units: value }))} suggestions={fieldValues.unit} />
-              <FilterInput label="Service" value={scopeDraft.service_names} onChange={(value) => setScopeDraft((current) => ({ ...current, service_names: value }))} suggestions={fieldValues.service_name} />
               <FilterInput label="Source" value={scopeDraft.source_ids} onChange={(value) => setScopeDraft((current) => ({ ...current, source_ids: value }))} suggestions={fieldValues.source_id} />
             </div>
           )}

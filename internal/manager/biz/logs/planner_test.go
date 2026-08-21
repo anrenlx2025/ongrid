@@ -8,13 +8,12 @@ import (
 	"github.com/ongridio/ongrid/internal/pkg/logquery"
 )
 
-func TestBuildActiveQueryPhaseUsesOnlyCurrentBackend(t *testing.T) {
+func TestBuildSelectedQueryPhaseUsesOnlyCurrentBackend(t *testing.T) {
 	start := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
-	cutover := start.Add(30 * time.Minute)
 	end := start.Add(time.Hour)
-	backend := &logsmodel.Backend{ID: 7, Generation: 3, CutoverAt: &cutover}
+	backend := &logsmodel.Backend{ID: 7, Generation: 3}
 
-	es := buildActiveQueryPhase(start, end, backend)
+	es := buildSelectedQueryPhase(start, end, backend)
 	if es.backend != backend || es.name != "elasticsearch:7" {
 		t.Fatalf("Elasticsearch phase = %#v", es)
 	}
@@ -22,7 +21,7 @@ func TestBuildActiveQueryPhaseUsesOnlyCurrentBackend(t *testing.T) {
 		t.Fatalf("Elasticsearch phase does not own the full query window: %#v", es)
 	}
 
-	loki := buildActiveQueryPhase(start, end, nil)
+	loki := buildSelectedQueryPhase(start, end, nil)
 	if loki.backend != nil || loki.name != "loki" {
 		t.Fatalf("Loki phase = %#v", loki)
 	}
@@ -31,12 +30,12 @@ func TestBuildActiveQueryPhaseUsesOnlyCurrentBackend(t *testing.T) {
 	}
 }
 
-func TestInactiveHistoricalBackendsAreNotPartOfActiveQueryPlan(t *testing.T) {
+func TestUnselectedHistoricalBackendsAreNotPartOfSelectedQueryPlan(t *testing.T) {
 	start := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
 	end := start.Add(2 * time.Hour)
-	active := &logsmodel.Backend{ID: 3, Generation: 4}
-	phase := buildActiveQueryPhase(start, end, active)
-	if phase.backend != active || phase.name != "elasticsearch:3" {
+	selected := &logsmodel.Backend{ID: 3, Generation: 4}
+	phase := buildSelectedQueryPhase(start, end, selected)
+	if phase.backend != selected || phase.name != "elasticsearch:3" {
 		t.Fatalf("phase = %#v", phase)
 	}
 }

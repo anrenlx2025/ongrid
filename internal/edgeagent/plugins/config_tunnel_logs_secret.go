@@ -26,7 +26,6 @@ var logsManagedRuntimeFilePattern = regexp.MustCompile(`^(elasticsearch_api_key\
 func (t *TunnelConfigFetcher) materializeLogsRuntime(ctx context.Context, cfg PluginConfig) (PluginConfig, error) {
 	spec := copySpec(cfg.Spec)
 	backend := configString(spec, "backend")
-	shadow, _ := spec["rollout_shadow"].(bool)
 	probeID := configString(spec, "log_probe_id")
 	dir := filepath.Join(t.secretBaseDir, "logs")
 	if !cfg.Enabled {
@@ -34,7 +33,7 @@ func (t *TunnelConfigFetcher) materializeLogsRuntime(ctx context.Context, cfg Pl
 		cfg.Spec = spec
 		return cfg, nil
 	}
-	if backend != logsExternalBackend && !shadow && probeID == "" {
+	if backend != logsExternalBackend && probeID == "" {
 		t.pruneLogsRuntimeFiles(ctx, dir, nil, "inactive")
 		cfg.Spec = spec
 		return cfg, nil
@@ -73,27 +72,6 @@ func (t *TunnelConfigFetcher) materializeLogsRuntime(ctx context.Context, cfg Pl
 		spec["log_probe_file"] = probePath
 	}
 
-	if shadow && configString(spec, "baseline_backend") == logsExternalBackend {
-		baselineGeneration, generationErr := uint64Spec(spec["baseline_backend_generation"])
-		if generationErr != nil || baselineGeneration == 0 || (backend == logsExternalBackend && baselineGeneration == generation) {
-			return PluginConfig{}, errors.New("external Elasticsearch baseline generation is invalid")
-		}
-		baselineSlot := configString(spec, "baseline_elasticsearch_secret_slot")
-		baselineKeyPath, keyErr := t.fetchAndMaterializeESKey(ctx, dir, baselineGeneration, baselineSlot)
-		if keyErr != nil {
-			return PluginConfig{}, fmt.Errorf("materialize baseline Elasticsearch credential: %w", keyErr)
-		}
-		spec["baseline_elasticsearch_api_key_file"] = baselineKeyPath
-		delete(spec, "baseline_elasticsearch_secret_slot")
-		if caPEM := configString(spec, "baseline_elasticsearch_ca_pem"); caPEM != "" {
-			caPath := filepath.Join(dir, fmt.Sprintf("elasticsearch_ca.g%d.pem", baselineGeneration))
-			if err := atomicWriteRestricted(dir, caPath, []byte(caPEM+"\n"), 0o600); err != nil {
-				return PluginConfig{}, fmt.Errorf("write baseline Elasticsearch CA: %w", err)
-			}
-			spec["baseline_elasticsearch_ca_file"] = caPath
-		}
-		delete(spec, "baseline_elasticsearch_ca_pem")
-	}
 	t.pruneLogsRuntimeFiles(ctx, dir, logsRuntimeKeepPaths(dir, spec), "superseded")
 	cfg.Spec = spec
 	return cfg, nil
@@ -107,10 +85,9 @@ func (t *TunnelConfigFetcher) pruneLogsRuntimeFiles(ctx context.Context, dir str
 }
 
 func logsRuntimeKeepPaths(dir string, spec map[string]interface{}) map[string]struct{} {
-	keep := make(map[string]struct{}, 6)
+	keep := make(map[string]struct{}, 4)
 	for _, key := range []string{
 		"elasticsearch_api_key_file", "elasticsearch_ca_file", "log_probe_file",
-		"baseline_elasticsearch_api_key_file", "baseline_elasticsearch_ca_file",
 	} {
 		path := filepath.Clean(configString(spec, key))
 		if path == "." || filepath.Dir(path) != filepath.Clean(dir) {
@@ -185,9 +162,9 @@ func (t *TunnelConfigFetcher) fetchAndMaterializeESKey(ctx context.Context, dir 
 	return keyPath, nil
 }
 
-// ReportPluginConfigApplied implements ConfigApplyReporter. Only a rollout
-// config carrying a Manager-issued probe id is acknowledged; ordinary built-in
-// or already-active snapshots do not create control-plane noise.
+// ReportPluginConfigApplied implements ConfigApplyReporter. Only a connection
+// check carrying a Manager-issued probe id is acknowledged; ordinary selected
+// backend snapshots do not create control-plane noise.
 func (t *TunnelConfigFetcher) ReportPluginConfigApplied(ctx context.Context, plugin string, cfg PluginConfig, applyErr error) error {
 	if t.client == nil || plugin != "logs" {
 		return nil

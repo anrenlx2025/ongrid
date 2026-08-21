@@ -1,4 +1,4 @@
-// Package logs owns the external log backend control plane and active-backend
+// Package logs owns the external log backend control plane and selected-backend
 // query routing. It never receives log payloads from Edge collectors.
 package logs
 
@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -48,14 +50,9 @@ type Repo interface {
 	SaveBackend(ctx context.Context, backend *model.Backend) error
 	GetBackend(ctx context.Context, id uint64) (*model.Backend, error)
 	LatestBackend(ctx context.Context) (*model.Backend, error)
-	ActiveBackend(ctx context.Context) (*model.Backend, error)
-	BeginRollout(ctx context.Context, backend *model.Backend, assignments []*model.BackendAssignment) error
-	BeginRollback(ctx context.Context, backend *model.Backend, assignments []*model.BackendAssignment) error
-	ActivateBackend(ctx context.Context, id uint64, version string, cutover time.Time) error
-	CompleteRollback(ctx context.Context, id uint64, endedAt time.Time) error
-	CancelBackend(ctx context.Context, id uint64) error
-	SetBackendState(ctx context.Context, id uint64, status model.BackendStatus, version, lastError string, testedAt time.Time) error
-	SetRolloutBackendState(ctx context.Context, id uint64, status model.BackendStatus, version, lastError string, testedAt time.Time) error
+	SelectedBackend(ctx context.Context) (*model.Backend, error)
+	SelectBackend(ctx context.Context, id uint64, version string, testedAt time.Time) error
+	SelectLoki(ctx context.Context) error
 	GetAssignment(ctx context.Context, backendID, edgeID uint64) (*model.BackendAssignment, error)
 	UpsertAssignment(ctx context.Context, assignment *model.BackendAssignment) error
 	ListAssignments(ctx context.Context, backendID uint64) ([]*model.BackendAssignment, error)
@@ -78,13 +75,12 @@ type ManagedSecretStore interface {
 	DeleteManaged(ctx context.Context, name string) error
 }
 
-type RolloutNotifier interface {
+type BackendChangeNotifier interface {
 	NotifyLogsBackendChanged(ctx context.Context) error
 }
 
-// GrafanaSyncer is an optional, best-effort observer of authoritative log
-// backend changes. Grafana failures must never roll back a verified Edge data
-// path cutover.
+// GrafanaSyncer is an optional, best-effort observer of selected log backend
+// changes. Grafana failures never alter the selected backend.
 type GrafanaSyncer interface {
 	SyncElasticsearch(ctx context.Context, config pkggrafana.ElasticsearchDatasourceConfig) error
 	SyncLoki(ctx context.Context) error
@@ -94,16 +90,17 @@ type HostDeviceResolver interface {
 	LookupHostDevice(ctx context.Context, edgeID uint64) (uint64, error)
 }
 
-type RolloutEdge struct {
+type ConnectionEdge struct {
 	EdgeID uint64
+	Name   string
 	Online bool
 }
 
-// RolloutEdgeInventory returns every Edge on which logs are enabled, including
-// disconnected identities. A global timeline cannot safely move while one of
-// those Edges may still be writing the previous backend.
-type RolloutEdgeInventory interface {
-	ListRolloutEdges(ctx context.Context) ([]RolloutEdge, error)
+// ConnectionEdgeInventory returns every Edge on which logs are enabled,
+// including disconnected identities. It is used only by the explicitly
+// requested connection check and never by backend selection.
+type ConnectionEdgeInventory interface {
+	ListConnectionEdges(ctx context.Context) ([]ConnectionEdge, error)
 }
 
 type SaveInput struct {
@@ -124,37 +121,69 @@ type SaveInput struct {
 }
 
 type BackendView struct {
-	ID                 uint64                     `json:"id"`
-	Name               string                     `json:"name"`
-	Type               model.BackendType          `json:"type"`
-	CurrentBackend     string                     `json:"current_backend"`
-	CurrentBackendID   uint64                     `json:"current_backend_id,omitempty"`
-	Status             model.BackendStatus        `json:"status"`
-	Generation         uint64                     `json:"generation"`
-	WriteEndpoints     []string                   `json:"write_endpoints"`
-	QueryEndpoint      string                     `json:"query_endpoint"`
-	Dataset            string                     `json:"dataset"`
-	Namespace          string                     `json:"namespace"`
-	IndexPattern       string                     `json:"index_pattern"`
-	WriteCredentialRef string                     `json:"write_credential_ref"`
-	QueryCredentialRef string                     `json:"query_credential_ref"`
-	HasCustomCA        bool                       `json:"has_custom_ca"`
-	KibanaURL          string                     `json:"kibana_url,omitempty"`
-	TLSInsecure        bool                       `json:"tls_insecure"`
-	DetectedVersion    string                     `json:"detected_version,omitempty"`
-	CutoverAt          *time.Time                 `json:"cutover_at,omitempty"`
-	EndedAt            *time.Time                 `json:"ended_at,omitempty"`
-	LastTestAt         *time.Time                 `json:"last_test_at,omitempty"`
-	LastError          string                     `json:"last_error,omitempty"`
-	Assignments        []*model.BackendAssignment `json:"assignments,omitempty"`
-	CreatedAt          time.Time                  `json:"created_at"`
-	UpdatedAt          time.Time                  `json:"updated_at"`
+	ID                 uint64              `json:"id"`
+	Name               string              `json:"name"`
+	Type               model.BackendType   `json:"type"`
+	CurrentBackend     string              `json:"current_backend"`
+	CurrentBackendID   uint64              `json:"current_backend_id,omitempty"`
+	Status             model.BackendStatus `json:"status"`
+	Generation         uint64              `json:"generation"`
+	WriteEndpoints     []string            `json:"write_endpoints"`
+	QueryEndpoint      string              `json:"query_endpoint"`
+	Dataset            string              `json:"dataset"`
+	Namespace          string              `json:"namespace"`
+	IndexPattern       string              `json:"index_pattern"`
+	WriteCredentialRef string              `json:"write_credential_ref"`
+	QueryCredentialRef string              `json:"query_credential_ref"`
+	HasCustomCA        bool                `json:"has_custom_ca"`
+	KibanaURL          string              `json:"kibana_url,omitempty"`
+	TLSInsecure        bool                `json:"tls_insecure"`
+	DetectedVersion    string              `json:"detected_version,omitempty"`
+	LastTestAt         *time.Time          `json:"last_test_at,omitempty"`
+	CreatedAt          time.Time           `json:"created_at"`
+	UpdatedAt          time.Time           `json:"updated_at"`
 }
 
 type BackendTestResult struct {
 	Status          string    `json:"status"`
 	DetectedVersion string    `json:"detected_version"`
 	TestedAt        time.Time `json:"tested_at"`
+}
+
+type ConnectionStatus string
+
+const (
+	ConnectionStatusNotChecked ConnectionStatus = "not_checked"
+	ConnectionStatusPending    ConnectionStatus = "pending"
+	ConnectionStatusVerified   ConnectionStatus = "verified"
+	ConnectionStatusFailed     ConnectionStatus = "failed"
+	ConnectionStatusOffline    ConnectionStatus = "offline"
+)
+
+type EdgeConnection struct {
+	EdgeID            uint64           `json:"edge_id"`
+	EdgeName          string           `json:"edge_name,omitempty"`
+	Online            bool             `json:"online"`
+	Status            ConnectionStatus `json:"status"`
+	DesiredGeneration uint64           `json:"desired_generation"`
+	AppliedGeneration uint64           `json:"applied_generation"`
+	LastCheckedAt     *time.Time       `json:"last_checked_at,omitempty"`
+	LastError         string           `json:"last_error,omitempty"`
+}
+
+type BackendConnectionCheck struct {
+	BackendID         uint64           `json:"backend_id"`
+	Backend           string           `json:"backend"`
+	Generation        uint64           `json:"generation"`
+	ObservedAt        time.Time        `json:"observed_at"`
+	Total             int              `json:"total"`
+	Online            int              `json:"online"`
+	Verified          int              `json:"verified"`
+	Pending           int              `json:"pending"`
+	Failed            int              `json:"failed"`
+	Offline           int              `json:"offline"`
+	AllOnlineVerified bool             `json:"all_online_verified"`
+	Edges             []EdgeConnection `json:"edges"`
 }
 
 // RuntimeConfig is the non-sensitive overlay merged into the Edge logs plugin
@@ -182,15 +211,26 @@ type Service struct {
 	loki    logquery.Searcher
 	log     *slog.Logger
 
-	lifecycleMu sync.Mutex
+	operationMu sync.Mutex
 	mu          sync.RWMutex
-	notifier    RolloutNotifier
+	notifier    BackendChangeNotifier
 	grafana     GrafanaSyncer
 	devices     HostDeviceResolver
-	inventory   RolloutEdgeInventory
-	applyGuard  func(context.Context) error
+	inventory   ConnectionEdgeInventory
+	selectGuard func(context.Context) error
 	cacheKey    string
 	cachedES    *logquery.ElasticsearchClient
+	lokiCheck   *lokiConnectionCheckSession
+}
+
+// lokiConnectionCheckSession is an ephemeral, Manager-issued real-write
+// probe. Loki is built in rather than represented by a persisted Backend row,
+// so the check only needs to live for the lifetime of the interactive
+// operation. Its random generation makes every Edge re-materialize a fresh
+// probe file and acknowledge the exact check the operator started.
+type lokiConnectionCheckSession struct {
+	Generation  uint64
+	Assignments map[uint64]*model.BackendAssignment
 }
 
 func NewService(repo Repo, secrets SecretResolver, loki logquery.Searcher, loggers ...*slog.Logger) *Service {
@@ -201,7 +241,7 @@ func NewService(repo Repo, secrets SecretResolver, loki logquery.Searcher, logge
 	return &Service{repo: repo, secrets: secrets, loki: loki, log: logger}
 }
 
-func (s *Service) SetRolloutNotifier(notifier RolloutNotifier) {
+func (s *Service) SetBackendChangeNotifier(notifier BackendChangeNotifier) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.notifier = notifier
@@ -219,23 +259,23 @@ func (s *Service) SetHostDeviceResolver(resolver HostDeviceResolver) {
 	s.devices = resolver
 }
 
-func (s *Service) SetRolloutEdgeInventory(inventory RolloutEdgeInventory) {
+func (s *Service) SetConnectionEdgeInventory(inventory ConnectionEdgeInventory) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.inventory = inventory
 }
 
-// SetApplyGuard installs product-level preconditions that must pass before
-// applying a saved backend configuration to the full Edge fleet.
-func (s *Service) SetApplyGuard(guard func(context.Context) error) {
+// SetSelectGuard installs product-level preconditions that must pass before
+// selecting an Elasticsearch configuration as the global log backend.
+func (s *Service) SetSelectGuard(guard func(context.Context) error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.applyGuard = guard
+	s.selectGuard = guard
 }
 
 func (s *Service) Save(ctx context.Context, input SaveInput) (view *BackendView, retErr error) {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
 
 	createdManagedRefs := make([]string, 0, 2)
 	backendPersisted := false
@@ -258,25 +298,15 @@ func (s *Service) Save(ctx context.Context, input SaveInput) (view *BackendView,
 	if loadErr != nil && !errors.Is(loadErr, errs.ErrNotFound) {
 		return nil, loadErr
 	}
-	if loadErr == nil && (previous.Status == model.BackendStatusDistributing || previous.Status == model.BackendStatusVerifying) {
-		return nil, fmt.Errorf("%w: wait for the current Elasticsearch apply operation to finish", errs.ErrConflict)
-	}
-	active, activeErr := s.repo.ActiveBackend(ctx)
-	if activeErr != nil && !errors.Is(activeErr, errs.ErrNotFound) {
-		return nil, activeErr
-	}
-	if activeErr == nil && active.Status == model.BackendStatusRollingBack {
-		return nil, fmt.Errorf("%w: wait for the Loki apply operation to finish", errs.ErrConflict)
-	}
 
 	generation := uint64(1)
 	editableInPlace := false
 	if loadErr == nil {
 		generation = previous.Generation
 		switch previous.Status {
-		case model.BackendStatusSaved, model.BackendStatusDegraded:
-			// A saved configuration that has not been applied remains editable
-			// in place. The active revision keeps serving reads and writes.
+		case model.BackendStatusUnselected:
+			// An unselected configuration remains editable in place. The
+			// selected backend keeps serving reads and writes.
 			editableInPlace = true
 		default:
 			generation++
@@ -350,7 +380,7 @@ func (s *Service) Save(ctx context.Context, input SaveInput) (view *BackendView,
 	backend := &model.Backend{
 		Name:               normalized.Name,
 		Type:               model.BackendTypeElasticsearch,
-		Status:             model.BackendStatusSaved,
+		Status:             model.BackendStatusUnselected,
 		Generation:         generation,
 		WriteEndpointsJSON: string(endpointsJSON),
 		QueryEndpoint:      normalized.QueryEndpoint,
@@ -392,34 +422,23 @@ func (s *Service) Get(ctx context.Context) (*BackendView, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A cancelled configuration must not hide the still-authoritative generation
-	// in the single-backend settings API. Prefer a live apply or saved config; otherwise
-	// surface the active (or rolling-back) backend before historical rows.
-	if backend.Status == model.BackendStatusRolledBack {
-		active, activeErr := s.repo.ActiveBackend(ctx)
-		if activeErr == nil {
-			backend = active
-		} else if !errors.Is(activeErr, errs.ErrNotFound) {
-			return nil, activeErr
-		}
-	}
 	return s.view(ctx, backend)
 }
 
 // Test validates the saved Elasticsearch query/write endpoints and their API
-// key privileges without distributing configuration to Edge or changing the
-// active log backend. Apply repeats these checks before starting the real-write
-// fleet verification and cutover.
+// key privileges without notifying Edge or changing the
+// selected log backend. Select repeats these checks before switching the global
+// read/write backend. Edge connectivity is checked independently after selection.
 func (s *Service) Test(ctx context.Context, id uint64) (*BackendTestResult, error) {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
 
 	backend, err := s.repo.GetBackend(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	switch backend.Status {
-	case model.BackendStatusSaved, model.BackendStatusActive, model.BackendStatusDegraded, model.BackendStatusRolledBack:
+	case model.BackendStatusUnselected, model.BackendStatusSelected:
 	default:
 		return nil, fmt.Errorf("%w: wait for the current log backend operation to finish", errs.ErrConflict)
 	}
@@ -434,66 +453,34 @@ func (s *Service) Test(ctx context.Context, id uint64) (*BackendTestResult, erro
 	}, nil
 }
 
-func (s *Service) Apply(ctx context.Context, id uint64) (*BackendView, error) {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+func (s *Service) Select(ctx context.Context, id uint64) (*BackendView, error) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
 
 	backend, err := s.repo.GetBackend(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if backend.Status == model.BackendStatusActive {
+	if backend.Status == model.BackendStatusSelected {
 		return s.view(ctx, backend)
 	}
-	if backend.Status != model.BackendStatusSaved && backend.Status != model.BackendStatusDegraded && backend.Status != model.BackendStatusRolledBack {
-		return nil, fmt.Errorf("%w: only a saved Elasticsearch configuration can be applied", errs.ErrConflict)
+	if backend.Status != model.BackendStatusUnselected {
+		return nil, fmt.Errorf("%w: Elasticsearch configuration cannot be selected", errs.ErrConflict)
 	}
-	active, activeErr := s.repo.ActiveBackend(ctx)
-	if activeErr != nil && !errors.Is(activeErr, errs.ErrNotFound) {
-		return nil, activeErr
-	}
-	if activeErr == nil && active.Status == model.BackendStatusRollingBack {
-		return nil, fmt.Errorf("%w: wait for the Loki apply operation to finish", errs.ErrConflict)
-	}
-	if err := s.checkApplyGuard(ctx); err != nil {
-		return nil, err
-	}
-	edgeIDs, err := s.fleetRolloutEdgeIDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.validateProbeEdges(ctx, edgeIDs); err != nil {
+	if err := s.checkSelectGuard(ctx); err != nil {
 		return nil, err
 	}
 	version, err := s.probeBackend(ctx, backend)
 	if err != nil {
-		now := time.Now().UTC()
-		stateErr := s.repo.SetBackendState(ctx, id, model.BackendStatusDegraded, "", safeProbeError(err), now)
-		if stateErr != nil {
-			return nil, errors.Join(err, stateErr)
-		}
 		return nil, err
 	}
 	now := time.Now().UTC()
-	assignments := make([]*model.BackendAssignment, 0, len(edgeIDs))
-	for _, edgeID := range edgeIDs {
-		probeID, err := newProbeID()
-		if err != nil {
-			return nil, err
-		}
-		assignments = append(assignments, &model.BackendAssignment{
-			BackendID: backend.ID, EdgeID: edgeID, DesiredGeneration: backend.Generation,
-			Status: model.AssignmentStatusPending, ProbeID: probeID,
-		})
-	}
 	backend.DetectedVersion = version
 	backend.LastTestAt = &now
-	if err := s.repo.BeginRollout(ctx, backend, assignments); err != nil {
+	// The Manager-side endpoint and privilege probe is the complete selection
+	// gate. Device convergence is deliberately checked by a separate action.
+	if err := s.selectBackend(ctx, backend); err != nil {
 		return nil, err
-	}
-	s.invalidateCache()
-	if err := s.notify(ctx); err != nil {
-		return nil, fmt.Errorf("distribute backend notification: %w", err)
 	}
 	backend, err = s.repo.GetBackend(ctx, id)
 	if err != nil {
@@ -502,85 +489,240 @@ func (s *Service) Apply(ctx context.Context, id uint64) (*BackendView, error) {
 	return s.view(ctx, backend)
 }
 
-func (s *Service) Rollback(ctx context.Context, id uint64) (*BackendView, error) {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+// StartConnectionCheck creates a fresh, generation-bound probe for every Host
+// Edge with logs enabled. It never changes the selected backend. Offline Edges
+// retain a pending assignment and complete it after reconnecting.
+func (s *Service) StartConnectionCheck(ctx context.Context, id uint64) (*BackendConnectionCheck, error) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	if id == 0 {
+		selected, err := s.repo.SelectedBackend(ctx)
+		if err == nil {
+			id = selected.ID
+		} else if errors.Is(err, errs.ErrNotFound) {
+			return s.startLokiConnectionCheck(ctx)
+		} else {
+			return nil, err
+		}
+	}
 
-	backend, err := s.repo.GetBackend(ctx, id)
+	backend, edges, err := s.selectedBackendConnectionInventory(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if backend.Status == model.BackendStatusRolledBack {
-		return s.view(ctx, backend)
-	}
-	if backend.CutoverAt == nil || (backend.Status != model.BackendStatusActive && backend.Status != model.BackendStatusRollingBack) {
-		if err := s.repo.CancelBackend(ctx, id); err != nil {
-			return nil, err
-		}
-		s.invalidateCache()
-		if err := s.notify(ctx); err != nil {
-			return nil, fmt.Errorf("cancel backend rollout notification: %w", err)
-		}
-		backend, err = s.repo.GetBackend(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		return s.view(ctx, backend)
-	}
-	if s.loki == nil {
-		return nil, fmt.Errorf("%w: built-in Loki query path is required before rollback", errs.ErrConflict)
-	}
-	edgeIDs, err := s.fleetRolloutEdgeIDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.validateProbeEdges(ctx, edgeIDs); err != nil {
-		return nil, err
-	}
-	existing := map[uint64]*model.BackendAssignment{}
-	if backend.Status == model.BackendStatusRollingBack {
-		rows, listErr := s.repo.ListAssignments(ctx, backend.ID)
-		if listErr != nil {
-			return nil, listErr
-		}
-		for _, row := range rows {
-			if row != nil {
-				existing[row.EdgeID] = row
-			}
-		}
-	}
-	assignments := make([]*model.BackendAssignment, 0, len(edgeIDs))
-	for _, edgeID := range edgeIDs {
-		if prior := existing[edgeID]; prior != nil && prior.DesiredGeneration == backend.Generation &&
-			prior.Status == model.AssignmentStatusVerified && prior.LastWriteSuccessAt != nil {
-			assignments = append(assignments, cloneAssignmentForRollout(prior))
-			continue
-		}
+	assignments := make([]*model.BackendAssignment, 0, len(edges))
+	for _, edge := range edges {
 		probeID, probeErr := newProbeID()
 		if probeErr != nil {
 			return nil, probeErr
 		}
 		assignments = append(assignments, &model.BackendAssignment{
-			BackendID: backend.ID, EdgeID: edgeID, DesiredGeneration: backend.Generation,
+			BackendID: backend.ID, EdgeID: edge.EdgeID, DesiredGeneration: backend.Generation,
 			Status: model.AssignmentStatusPending, ProbeID: probeID,
 		})
 	}
-	if err := s.repo.BeginRollback(ctx, backend, assignments); err != nil {
-		return nil, err
+	for _, assignment := range assignments {
+		if err := s.repo.UpsertAssignment(ctx, assignment); err != nil {
+			return nil, err
+		}
 	}
 	s.invalidateCache()
 	if err := s.notify(ctx); err != nil {
-		return nil, fmt.Errorf("distribute rollback notification: %w", err)
+		return nil, fmt.Errorf("notify Edge connection check: %w", err)
 	}
-	backend, err = s.repo.GetBackend(ctx, id)
+	return s.connectionCheck(ctx, backend, edges)
+}
+
+// ConnectionCheck returns current online state plus the last generation-bound
+// application and real-write result. Reading status never initiates a probe.
+func (s *Service) ConnectionCheck(ctx context.Context, id uint64) (*BackendConnectionCheck, error) {
+	if id == 0 {
+		selected, err := s.repo.SelectedBackend(ctx)
+		if err == nil {
+			id = selected.ID
+		} else if errors.Is(err, errs.ErrNotFound) {
+			return s.lokiConnectionCheck(ctx)
+		} else {
+			return nil, err
+		}
+	}
+	backend, edges, err := s.selectedBackendConnectionInventory(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.connectionCheck(ctx, backend, edges)
+}
+
+func (s *Service) selectedBackendConnectionInventory(ctx context.Context, id uint64) (*model.Backend, []ConnectionEdge, error) {
+	backend, err := s.repo.GetBackend(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	selected, err := s.repo.SelectedBackend(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if backend.ID != selected.ID || backend.Generation != selected.Generation || backend.Status != model.BackendStatusSelected {
+		return nil, nil, fmt.Errorf("%w: connection checks require the selected Elasticsearch backend", errs.ErrConflict)
+	}
+	edges, err := s.connectionEdges(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return backend, edges, nil
+}
+
+func (s *Service) connectionCheck(ctx context.Context, backend *model.Backend, edges []ConnectionEdge) (*BackendConnectionCheck, error) {
+	assignments, err := s.repo.ListAssignments(ctx, backend.ID)
+	if err != nil {
+		return nil, err
+	}
+	byEdge := make(map[uint64]*model.BackendAssignment, len(assignments))
+	for _, assignment := range assignments {
+		if assignment != nil {
+			byEdge[assignment.EdgeID] = assignment
+		}
+	}
+	return summarizeConnectionCheck(backend.ID, string(backend.Type), backend.Generation, edges, byEdge), nil
+}
+
+func (s *Service) startLokiConnectionCheck(ctx context.Context) (*BackendConnectionCheck, error) {
+	if s.loki == nil {
+		return nil, fmt.Errorf("%w: built-in Loki query path is not configured", errs.ErrConflict)
+	}
+	edges, err := s.connectionEdges(ctx)
+	if err != nil {
+		return nil, err
+	}
+	generation, err := newConnectionCheckGeneration()
+	if err != nil {
+		return nil, err
+	}
+	assignments := make(map[uint64]*model.BackendAssignment, len(edges))
+	for _, edge := range edges {
+		probeID, probeErr := newProbeID()
+		if probeErr != nil {
+			return nil, probeErr
+		}
+		assignments[edge.EdgeID] = &model.BackendAssignment{
+			EdgeID: edge.EdgeID, DesiredGeneration: generation,
+			Status: model.AssignmentStatusPending, ProbeID: probeID,
+		}
+	}
+	s.mu.Lock()
+	s.lokiCheck = &lokiConnectionCheckSession{Generation: generation, Assignments: assignments}
+	s.mu.Unlock()
+	if err := s.notify(ctx); err != nil {
+		return nil, fmt.Errorf("notify Edge Loki connection check: %w", err)
+	}
+	return summarizeConnectionCheck(0, "loki", generation, edges, assignments), nil
+}
+
+func (s *Service) lokiConnectionCheck(ctx context.Context) (*BackendConnectionCheck, error) {
+	edges, err := s.connectionEdges(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	session := cloneLokiConnectionCheckSession(s.lokiCheck)
+	s.mu.RUnlock()
+	if session == nil {
+		return nil, errs.ErrNotFound
+	}
+	return summarizeConnectionCheck(0, "loki", session.Generation, edges, session.Assignments), nil
+}
+
+func summarizeConnectionCheck(backendID uint64, backend string, generation uint64, edges []ConnectionEdge, byEdge map[uint64]*model.BackendAssignment) *BackendConnectionCheck {
+	result := &BackendConnectionCheck{
+		BackendID: backendID, Backend: backend, Generation: generation,
+		ObservedAt: time.Now().UTC(), Total: len(edges), Edges: make([]EdgeConnection, 0, len(edges)),
+	}
+	for _, edge := range edges {
+		item := EdgeConnection{
+			EdgeID: edge.EdgeID, EdgeName: edge.Name, Online: edge.Online,
+			Status: ConnectionStatusNotChecked, DesiredGeneration: generation,
+		}
+		assignment := byEdge[edge.EdgeID]
+		if assignment != nil {
+			item.DesiredGeneration = assignment.DesiredGeneration
+			item.AppliedGeneration = assignment.AppliedGeneration
+			item.LastError = assignment.LastError
+			checkedAt := assignment.UpdatedAt
+			if assignment.LastProbeAt != nil {
+				checkedAt = *assignment.LastProbeAt
+			}
+			if assignment.LastWriteSuccessAt != nil {
+				checkedAt = *assignment.LastWriteSuccessAt
+			}
+			if !checkedAt.IsZero() {
+				item.LastCheckedAt = &checkedAt
+			}
+		}
+		if !edge.Online {
+			item.Status = ConnectionStatusOffline
+			result.Offline++
+		} else {
+			result.Online++
+			switch {
+			case assignment == nil || assignment.DesiredGeneration != generation:
+				item.Status = ConnectionStatusNotChecked
+				result.Pending++
+			case assignment.Status == model.AssignmentStatusFailed:
+				item.Status = ConnectionStatusFailed
+				result.Failed++
+			case assignment.Status == model.AssignmentStatusVerified &&
+				assignment.AppliedGeneration == generation && assignment.LastWriteSuccessAt != nil:
+				item.Status = ConnectionStatusVerified
+				result.Verified++
+			default:
+				item.Status = ConnectionStatusPending
+				result.Pending++
+			}
+		}
+		result.Edges = append(result.Edges, item)
+	}
+	result.AllOnlineVerified = result.Online > 0 && result.Verified == result.Online && result.Pending == 0 && result.Failed == 0
+	return result
+}
+
+// SelectLoki switches the authoritative log backend to the built-in Loki path.
+// It performs no device validation; connection checks are an independent,
+// explicitly requested operation.
+func (s *Service) SelectLoki(ctx context.Context) (*BackendView, error) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+
+	if s.loki == nil {
+		return nil, fmt.Errorf("%w: built-in Loki query path is not configured", errs.ErrConflict)
+	}
+	backend, err := s.repo.SelectedBackend(ctx)
+	if errors.Is(err, errs.ErrNotFound) {
+		latest, latestErr := s.repo.LatestBackend(ctx)
+		if latestErr != nil {
+			return nil, latestErr
+		}
+		return s.view(ctx, latest)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.SelectLoki(ctx); err != nil {
+		return nil, err
+	}
+	s.invalidateCache()
+	s.syncGrafanaLokiAsync(ctx)
+	if err := s.notify(ctx); err != nil {
+		s.log.WarnContext(ctx, "Loki backend is selected but Edge notification failed", slog.Any("error", err))
+	}
+	backend, err = s.repo.GetBackend(ctx, backend.ID)
 	if err != nil {
 		return nil, err
 	}
 	return s.view(ctx, backend)
 }
 
-func (s *Service) ActiveRuntime(ctx context.Context) (*RuntimeConfig, error) {
-	backend, err := s.repo.ActiveBackend(ctx)
+func (s *Service) SelectedRuntime(ctx context.Context) (*RuntimeConfig, error) {
+	backend, err := s.repo.SelectedBackend(ctx)
 	if err != nil {
 		if errors.Is(err, errs.ErrNotFound) {
 			return nil, nil
@@ -590,11 +732,11 @@ func (s *Service) ActiveRuntime(ctx context.Context) (*RuntimeConfig, error) {
 	return runtimeConfig(backend)
 }
 
-// ActiveElasticsearchDatasource returns the active generation's Grafana
-// query configuration. A nil result means Loki is authoritative. Only the
+// SelectedElasticsearchDatasource returns the selected Elasticsearch query
+// configuration. A nil result means Loki is selected. Only the
 // read-only query API key is resolved.
-func (s *Service) ActiveElasticsearchDatasource(ctx context.Context) (*pkggrafana.ElasticsearchDatasourceConfig, error) {
-	backend, err := s.repo.ActiveBackend(ctx)
+func (s *Service) SelectedElasticsearchDatasource(ctx context.Context) (*pkggrafana.ElasticsearchDatasourceConfig, error) {
+	backend, err := s.repo.SelectedBackend(ctx)
 	if errors.Is(err, errs.ErrNotFound) {
 		return nil, nil
 	}
@@ -616,13 +758,16 @@ func (s *Service) PluginRuntimeOverlay(ctx context.Context, edgeID uint64, plugi
 		return nil, err
 	}
 	if backend == nil {
-		return map[string]interface{}{
+		overlay := map[string]interface{}{
 			"backend":            "builtin_loki",
 			"backend_generation": uint64(0),
-		}, nil
-	}
-	if backend.Status == model.BackendStatusRollingBack && assignment != nil {
-		return rollbackRuntimeOverlay(backend, assignment)
+		}
+		if assignment := s.lokiConnectionAssignment(edgeID); assignment != nil {
+			overlay["backend_id"] = uint64(0)
+			overlay["backend_generation"] = assignment.DesiredGeneration
+			overlay["log_probe_id"] = assignment.ProbeID
+		}
+		return overlay, nil
 	}
 	runtime, err := runtimeConfig(backend)
 	if err != nil {
@@ -642,40 +787,12 @@ func (s *Service) PluginRuntimeOverlay(ctx context.Context, edgeID uint64, plugi
 	if assignment != nil && assignment.ProbeID != "" {
 		overlay["log_probe_id"] = assignment.ProbeID
 	}
-	if assignment != nil {
-		// Apply verification uses a bounded shadow write. The current backend
-		// keeps receiving every log until all Edge probes pass, while the saved
-		// configuration receives the same records for real Edge-path checks.
-		// This avoids an observability blind spot without routing log bytes
-		// through Manager or querying two backends at once.
-		overlay["rollout_shadow"] = true
-		active, activeErr := s.repo.ActiveBackend(ctx)
-		if errors.Is(activeErr, errs.ErrNotFound) {
-			overlay["baseline_backend"] = "builtin_loki"
-		} else if activeErr != nil {
-			return nil, activeErr
-		} else {
-			baseline, runtimeErr := runtimeConfig(active)
-			if runtimeErr != nil {
-				return nil, runtimeErr
-			}
-			overlay["baseline_backend"] = "external_elasticsearch"
-			overlay["baseline_backend_id"] = baseline.BackendID
-			overlay["baseline_backend_generation"] = baseline.Generation
-			overlay["baseline_elasticsearch_endpoints"] = append([]string(nil), baseline.WriteEndpoints...)
-			overlay["baseline_elasticsearch_dataset"] = baseline.Dataset
-			overlay["baseline_elasticsearch_namespace"] = baseline.Namespace
-			overlay["baseline_elasticsearch_ca_pem"] = baseline.CAPEM
-			overlay["baseline_elasticsearch_tls_insecure_skip_verify"] = baseline.TLSInsecure
-			overlay["baseline_elasticsearch_secret_slot"] = SecretSlotESAPIKey
-		}
-	}
 	return overlay, nil
 }
 
 // PluginSecretForEdge is called only from the authenticated tunnel handler.
 // During apply, only explicitly assigned Edges may obtain the saved
-// generation. Once active, every authenticated Edge may obtain that active
+// generation. Once selected, every authenticated Edge may obtain that selected
 // generation. The request can never select an arbitrary vault entry.
 func (s *Service) PluginSecretForEdge(ctx context.Context, edgeID uint64, plugin, slot string, generation uint64) (*PluginSecret, error) {
 	if edgeID == 0 || plugin != "logs" || slot != SecretSlotESAPIKey {
@@ -699,8 +816,8 @@ func (s *Service) PluginSecretForEdge(ctx context.Context, edgeID uint64, plugin
 	if assignment != nil {
 		assignment.DesiredGeneration = backend.Generation
 		// Pulling the same secret again is normal after an Edge restart. Do
-		// not erase a previously acknowledged generation or downgrade its
-		// rollout status back to pending.
+		// not erase a previously acknowledged connection check or move it
+		// back to pending.
 		if assignment.AppliedGeneration != backend.Generation && assignment.Status != model.AssignmentStatusFailed {
 			assignment.Status = model.AssignmentStatusPending
 		}
@@ -712,17 +829,92 @@ func (s *Service) PluginSecretForEdge(ctx context.Context, edgeID uint64, plugin
 	return &PluginSecret{Generation: backend.Generation, Content: apiKey, SHA256: hex.EncodeToString(sum[:])}, nil
 }
 
-// MarkApplied closes the real-path gate: a successful local Collector start
-// is not enough. Manager searches the external backend for the unique probe
-// emitted by that Edge before marking it verified or promoting fleet-wide.
+// MarkApplied closes the real-path check: a successful local Collector start
+// is not enough. Manager searches the target backend for the unique probe
+// emitted by that Edge before marking the device verified.
+func (s *Service) lokiConnectionAssignment(edgeID uint64) *model.BackendAssignment {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.lokiCheck == nil {
+		return nil
+	}
+	assignment := s.lokiCheck.Assignments[edgeID]
+	if assignment == nil || assignment.Status == model.AssignmentStatusFailed {
+		return nil
+	}
+	return cloneBackendAssignment(assignment)
+}
+
+func (s *Service) markLokiConnectionApplied(ctx context.Context, edgeID, generation uint64, probeID, applyErr string) (bool, error) {
+	s.mu.Lock()
+	if s.lokiCheck == nil || s.lokiCheck.Generation != generation {
+		s.mu.Unlock()
+		return false, nil
+	}
+	assignment := s.lokiCheck.Assignments[edgeID]
+	if assignment == nil || probeID == "" || assignment.ProbeID != probeID {
+		s.mu.Unlock()
+		return false, nil
+	}
+	now := time.Now().UTC()
+	assignment.AppliedGeneration = generation
+	assignment.Status = model.AssignmentStatusApplied
+	assignment.LastProbeAt = &now
+	assignment.UpdatedAt = now
+	assignment.LastError = ""
+	if strings.TrimSpace(applyErr) != "" {
+		assignment.AppliedGeneration = 0
+		assignment.Status = model.AssignmentStatusFailed
+		assignment.LastError = truncate(strings.TrimSpace(applyErr), 1024)
+		s.mu.Unlock()
+		return true, nil
+	}
+	probe := cloneBackendAssignment(assignment)
+	s.mu.Unlock()
+
+	if err := s.verifyLokiEdgeProbe(ctx, nil, probe); err != nil {
+		s.mu.Lock()
+		if current := s.currentLokiConnectionAssignment(generation, edgeID, probeID); current != nil {
+			current.Status = model.AssignmentStatusFailed
+			current.LastError = safeProbeError(err)
+			current.UpdatedAt = time.Now().UTC()
+		}
+		s.mu.Unlock()
+		s.log.WarnContext(ctx, "selected Loki Edge connection probe failed",
+			slog.Uint64("edge_id", edgeID), slog.Any("error", err))
+		return true, nil
+	}
+	verifiedAt := time.Now().UTC()
+	s.mu.Lock()
+	if current := s.currentLokiConnectionAssignment(generation, edgeID, probeID); current != nil {
+		current.Status = model.AssignmentStatusVerified
+		current.LastWriteSuccessAt = &verifiedAt
+		current.LastError = ""
+		current.UpdatedAt = verifiedAt
+	}
+	s.mu.Unlock()
+	return true, nil
+}
+
+// currentLokiConnectionAssignment must be called while s.mu is held.
+func (s *Service) currentLokiConnectionAssignment(generation, edgeID uint64, probeID string) *model.BackendAssignment {
+	if s.lokiCheck == nil || s.lokiCheck.Generation != generation {
+		return nil
+	}
+	assignment := s.lokiCheck.Assignments[edgeID]
+	if assignment == nil || assignment.ProbeID != probeID {
+		return nil
+	}
+	return assignment
+}
+
 func (s *Service) MarkApplied(ctx context.Context, edgeID, generation uint64, probeID, applyErr string) error {
+	if handled, err := s.markLokiConnectionApplied(ctx, edgeID, generation, probeID, applyErr); handled {
+		return err
+	}
 	backend, assignment, err := s.backendForEdgeGeneration(ctx, edgeID, generation)
 	if err != nil {
 		return err
-	}
-	isRollback := backend.Status == model.BackendStatusRollingBack
-	if backend.Status != model.BackendStatusDistributing && backend.Status != model.BackendStatusVerifying && !isRollback {
-		return fmt.Errorf("%w: log backend is not rolling out", errs.ErrConflict)
 	}
 	if assignment == nil || generation != backend.Generation || probeID == "" || probeID != assignment.ProbeID {
 		return fmt.Errorf("%w: stale log backend generation", errs.ErrConflict)
@@ -731,7 +923,6 @@ func (s *Service) MarkApplied(ctx context.Context, edgeID, generation uint64, pr
 	assignment.DesiredGeneration = generation
 	assignment.AppliedGeneration = generation
 	assignment.Status = model.AssignmentStatusApplied
-	assignment.CutoverAt = &now
 	assignment.LastProbeAt = &now
 	assignment.LastError = ""
 	if strings.TrimSpace(applyErr) != "" {
@@ -741,172 +932,67 @@ func (s *Service) MarkApplied(ctx context.Context, edgeID, generation uint64, pr
 		if err := s.repo.UpsertAssignment(ctx, assignment); err != nil {
 			return err
 		}
-		nextStatus := model.BackendStatusDegraded
-		if isRollback {
-			nextStatus = model.BackendStatusRollingBack
-		}
-		if err := s.repo.SetRolloutBackendState(ctx, backend.ID, nextStatus, backend.DetectedVersion, assignment.LastError, now); err != nil {
-			return err
-		}
-		return s.notify(ctx)
+		return nil
 	}
 	if err := s.repo.UpsertAssignment(ctx, assignment); err != nil {
 		return err
 	}
-	nextStatus := model.BackendStatusVerifying
-	if isRollback {
-		nextStatus = model.BackendStatusRollingBack
-	}
-	if err := s.repo.SetRolloutBackendState(ctx, backend.ID, nextStatus, backend.DetectedVersion, "", now); err != nil {
-		return err
-	}
-	verify := s.verifyEdgeProbe
-	if isRollback {
-		verify = s.verifyLokiEdgeProbe
-	}
-	if err := verify(ctx, backend, assignment); err != nil {
+	if err := s.verifyEdgeProbe(ctx, backend, assignment); err != nil {
 		assignment.Status = model.AssignmentStatusFailed
 		assignment.LastError = safeProbeError(err)
 		if saveErr := s.repo.UpsertAssignment(ctx, assignment); saveErr != nil {
 			return errors.Join(err, saveErr)
 		}
-		failureStatus := model.BackendStatusDegraded
-		if isRollback {
-			failureStatus = model.BackendStatusRollingBack
-		}
-		if stateErr := s.repo.SetRolloutBackendState(ctx, backend.ID, failureStatus, backend.DetectedVersion, assignment.LastError, time.Now().UTC()); stateErr != nil {
-			return errors.Join(err, stateErr)
-		}
-		if notifyErr := s.notify(ctx); notifyErr != nil {
-			return errors.Join(err, notifyErr)
-		}
-		return err
+		s.log.WarnContext(ctx, "selected Elasticsearch Edge connection probe failed",
+			slog.Uint64("backend_id", backend.ID), slog.Uint64("edge_id", edgeID), slog.Any("error", err))
+		return nil
 	}
 	verifiedAt := time.Now().UTC()
 	assignment.Status = model.AssignmentStatusVerified
 	assignment.LastWriteSuccessAt = &verifiedAt
 	assignment.LastError = ""
-	if err := s.repo.UpsertAssignment(ctx, assignment); err != nil {
-		return err
-	}
-	if isRollback {
-		if err := s.completeVerifiedRollback(ctx, backend); err != nil && !errors.Is(err, errs.ErrConflict) {
-			return err
-		}
-	} else {
-		if err := s.promoteVerifiedRollout(ctx, backend); err != nil {
-			// Other selected Edges may still be pending; that is a normal
-			// partial convergence, not a failed RPC.
-			if !errors.Is(err, errs.ErrConflict) {
-				return err
-			}
-		}
-	}
-	return nil
+	return s.repo.UpsertAssignment(ctx, assignment)
 }
 
 func (s *Service) runtimeBackendForEdge(ctx context.Context, edgeID uint64) (*model.Backend, *model.BackendAssignment, error) {
-	if edgeID != 0 {
-		latest, err := s.repo.LatestBackend(ctx)
-		if err == nil && (latest.Status == model.BackendStatusDistributing || latest.Status == model.BackendStatusVerifying) {
-			assignment, assignmentErr := s.repo.GetAssignment(ctx, latest.ID, edgeID)
-			if assignmentErr == nil && assignment.DesiredGeneration == latest.Generation && assignment.Status != model.AssignmentStatusFailed {
-				return latest, assignment, nil
-			}
-			if assignmentErr != nil && !errors.Is(assignmentErr, errs.ErrNotFound) {
-				return nil, nil, assignmentErr
-			}
-		} else if err != nil && !errors.Is(err, errs.ErrNotFound) {
-			return nil, nil, err
-		}
-	}
-	active, err := s.repo.ActiveBackend(ctx)
+	selected, err := s.repo.SelectedBackend(ctx)
 	if errors.Is(err, errs.ErrNotFound) {
 		return nil, nil, nil
 	}
 	if err != nil {
 		return nil, nil, err
 	}
-	if edgeID != 0 && active.Status == model.BackendStatusRollingBack {
-		assignment, assignmentErr := s.repo.GetAssignment(ctx, active.ID, edgeID)
-		if assignmentErr == nil && assignment.DesiredGeneration == active.Generation && assignment.Status != model.AssignmentStatusFailed {
-			return active, assignment, nil
+	if edgeID != 0 {
+		assignment, assignmentErr := s.repo.GetAssignment(ctx, selected.ID, edgeID)
+		if assignmentErr == nil && assignment.DesiredGeneration == selected.Generation && assignment.Status != model.AssignmentStatusFailed {
+			return selected, assignment, nil
 		}
 		if assignmentErr != nil && !errors.Is(assignmentErr, errs.ErrNotFound) {
 			return nil, nil, assignmentErr
 		}
 	}
-	return active, nil, nil
+	return selected, nil, nil
 }
 
 func (s *Service) backendForEdgeGeneration(ctx context.Context, edgeID, generation uint64) (*model.Backend, *model.BackendAssignment, error) {
 	if edgeID == 0 || generation == 0 {
 		return nil, nil, errs.ErrForbidden
 	}
-	latest, err := s.repo.LatestBackend(ctx)
-	if err == nil && latest.Generation == generation &&
-		(latest.Status == model.BackendStatusDistributing || latest.Status == model.BackendStatusVerifying) {
-		assignment, assignmentErr := s.repo.GetAssignment(ctx, latest.ID, edgeID)
-		if assignmentErr != nil {
-			if errors.Is(assignmentErr, errs.ErrNotFound) {
-				return nil, nil, errs.ErrForbidden
-			}
-			return nil, nil, assignmentErr
-		}
-		if assignment.DesiredGeneration != generation || assignment.Status == model.AssignmentStatusFailed {
-			return nil, nil, errs.ErrForbidden
-		}
-		return latest, assignment, nil
-	}
-	if err != nil && !errors.Is(err, errs.ErrNotFound) {
-		return nil, nil, err
-	}
-	active, err := s.repo.ActiveBackend(ctx)
+	selected, err := s.repo.SelectedBackend(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	if active.Generation != generation {
+	if selected.Generation != generation {
 		return nil, nil, fmt.Errorf("%w: stale log backend generation", errs.ErrConflict)
 	}
-	if active.Status == model.BackendStatusRollingBack {
-		assignment, assignmentErr := s.repo.GetAssignment(ctx, active.ID, edgeID)
-		if assignmentErr != nil && !errors.Is(assignmentErr, errs.ErrNotFound) {
-			return nil, nil, assignmentErr
-		}
-		if assignmentErr == nil && assignment.DesiredGeneration == generation && assignment.Status != model.AssignmentStatusFailed {
-			return active, assignment, nil
-		}
-		// Elasticsearch remains the authoritative backend until every Loki
-		// rollback probe succeeds. A missing or failed rollback assignment must
-		// not prevent an authenticated Edge from re-fetching that active
-		// generation after a restart; MarkApplied still rejects it because the
-		// assignment returned here is nil.
-		return active, nil, nil
+	assignment, assignmentErr := s.repo.GetAssignment(ctx, selected.ID, edgeID)
+	if assignmentErr != nil && !errors.Is(assignmentErr, errs.ErrNotFound) {
+		return nil, nil, assignmentErr
 	}
-	return active, nil, nil
-}
-
-func rollbackRuntimeOverlay(backend *model.Backend, assignment *model.BackendAssignment) (map[string]interface{}, error) {
-	baseline, err := runtimeConfig(backend)
-	if err != nil {
-		return nil, err
+	if assignmentErr == nil && assignment.DesiredGeneration == generation && assignment.Status != model.AssignmentStatusFailed {
+		return selected, assignment, nil
 	}
-	return map[string]interface{}{
-		"backend":                                         "builtin_loki",
-		"backend_id":                                      backend.ID,
-		"backend_generation":                              backend.Generation,
-		"log_probe_id":                                    assignment.ProbeID,
-		"rollout_shadow":                                  true,
-		"baseline_backend":                                "external_elasticsearch",
-		"baseline_backend_id":                             baseline.BackendID,
-		"baseline_backend_generation":                     baseline.Generation,
-		"baseline_elasticsearch_endpoints":                append([]string(nil), baseline.WriteEndpoints...),
-		"baseline_elasticsearch_dataset":                  baseline.Dataset,
-		"baseline_elasticsearch_namespace":                baseline.Namespace,
-		"baseline_elasticsearch_ca_pem":                   baseline.CAPEM,
-		"baseline_elasticsearch_tls_insecure_skip_verify": baseline.TLSInsecure,
-		"baseline_elasticsearch_secret_slot":              SecretSlotESAPIKey,
-	}, nil
+	return selected, nil, nil
 }
 
 func runtimeConfig(backend *model.Backend) (*RuntimeConfig, error) {
@@ -1028,54 +1114,21 @@ func (s *Service) verifyLokiEdgeProbe(ctx context.Context, _ *model.Backend, ass
 	}
 }
 
-func (s *Service) promoteVerifiedRollout(ctx context.Context, backend *model.Backend) error {
-	assignments, err := s.repo.ListAssignments(ctx, backend.ID)
-	if err != nil {
-		return err
-	}
-	if len(assignments) == 0 {
-		return fmt.Errorf("%w: no Edge write probes selected", errs.ErrConflict)
-	}
-	for _, assignment := range assignments {
-		if assignment.DesiredGeneration != backend.Generation || assignment.Status != model.AssignmentStatusVerified || assignment.LastWriteSuccessAt == nil {
-			return fmt.Errorf("%w: Edge write probes are not fully verified", errs.ErrConflict)
-		}
-	}
-	cutover := time.Now().UTC()
-	if err := s.repo.ActivateBackend(ctx, backend.ID, backend.DetectedVersion, cutover); err != nil {
+func (s *Service) selectBackend(ctx context.Context, backend *model.Backend) error {
+	if err := s.repo.SelectBackend(ctx, backend.ID, backend.DetectedVersion, time.Now().UTC()); err != nil {
 		return err
 	}
 	s.invalidateCache()
 	s.syncGrafanaElasticsearchAsync(ctx, backend)
 	if err := s.notify(ctx); err != nil {
-		return fmt.Errorf("activate backend notification: %w", err)
-	}
-	return nil
-}
-
-func (s *Service) completeVerifiedRollback(ctx context.Context, backend *model.Backend) error {
-	assignments, err := s.repo.ListAssignments(ctx, backend.ID)
-	if err != nil {
-		return err
-	}
-	if !assignmentsVerified(assignments, backend.Generation) {
-		return fmt.Errorf("%w: built-in Loki write probes are not fully verified", errs.ErrConflict)
-	}
-	endedAt := time.Now().UTC()
-	if err := s.repo.CompleteRollback(ctx, backend.ID, endedAt); err != nil {
-		return err
-	}
-	s.invalidateCache()
-	s.syncGrafanaLokiAsync(ctx)
-	if err := s.notify(ctx); err != nil {
-		return fmt.Errorf("complete backend rollback notification: %w", err)
+		s.log.WarnContext(ctx, "Elasticsearch backend is selected but Edge notification failed", slog.Any("error", err))
 	}
 	return nil
 }
 
 func (s *Service) elasticsearchDatasourceConfig(ctx context.Context, backend *model.Backend) (*pkggrafana.ElasticsearchDatasourceConfig, error) {
 	if backend == nil {
-		return nil, errors.New("active Elasticsearch backend is nil")
+		return nil, errors.New("selected Elasticsearch backend is nil")
 	}
 	queryKey, err := s.apiKey(ctx, backend.QueryCredentialRef)
 	if err != nil {
@@ -1118,7 +1171,7 @@ func (s *Service) syncGrafanaElasticsearchAsync(ctx context.Context, backend *mo
 			err = syncer.SyncElasticsearch(syncCtx, *config)
 		}
 		if err != nil {
-			s.log.WarnContext(syncCtx, "Grafana Elasticsearch datasource sync failed; log backend remains active",
+			s.log.WarnContext(syncCtx, "Grafana Elasticsearch datasource sync failed; log backend remains selected",
 				slog.Uint64("backend_id", backendCopy.ID), slog.Any("error", err))
 		}
 	}()
@@ -1140,64 +1193,52 @@ func (s *Service) syncGrafanaLokiAsync(ctx context.Context) {
 		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 		defer cancel()
 		if err := syncer.SyncLoki(syncCtx); err != nil {
-			s.log.WarnContext(syncCtx, "Grafana Loki datasource sync failed; Loki remains active", slog.Any("error", err))
+			s.log.WarnContext(syncCtx, "Grafana Loki datasource sync failed; Loki remains selected", slog.Any("error", err))
 		}
 	}()
 }
 
-func normalizeEdgeIDs(input []uint64) ([]uint64, error) {
-	const maxRolloutEdges = 10_000
-	if len(input) == 0 || len(input) > maxRolloutEdges {
-		return nil, fmt.Errorf("%w: edge_ids must contain 1..%d entries", errs.ErrInvalid, maxRolloutEdges)
-	}
-	seen := make(map[uint64]struct{}, len(input))
-	out := make([]uint64, 0, len(input))
-	for _, edgeID := range input {
-		if edgeID == 0 {
-			return nil, fmt.Errorf("%w: edge_id must be greater than zero", errs.ErrInvalid)
-		}
-		if _, exists := seen[edgeID]; exists {
-			continue
-		}
-		seen[edgeID] = struct{}{}
-		out = append(out, edgeID)
-	}
-	return out, nil
-}
-
-func (s *Service) fleetRolloutEdgeIDs(ctx context.Context) ([]uint64, error) {
+func (s *Service) connectionEdges(ctx context.Context) ([]ConnectionEdge, error) {
 	s.mu.RLock()
 	inventory := s.inventory
 	s.mu.RUnlock()
 	if inventory == nil {
-		return nil, errors.New("log backend rollout Edge inventory is not configured")
+		return nil, errors.New("log connection Edge inventory is not configured")
 	}
-	edges, err := inventory.ListRolloutEdges(ctx)
+	edges, err := inventory.ListConnectionEdges(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list Edges for logs rollout: %w", err)
+		return nil, fmt.Errorf("list Edges for log connection check: %w", err)
 	}
-	edgeIDs := make([]uint64, 0, len(edges))
-	offline := make([]uint64, 0)
+	if len(edges) > 10_000 {
+		return nil, fmt.Errorf("%w: log connection inventory exceeds 10000 Edges", errs.ErrInvalid)
+	}
+	byID := make(map[uint64]ConnectionEdge, len(edges))
 	for _, edge := range edges {
 		if edge.EdgeID == 0 {
-			return nil, fmt.Errorf("%w: logs rollout inventory contains an empty Edge id", errs.ErrInvalid)
+			return nil, fmt.Errorf("%w: log connection inventory contains an empty Edge id", errs.ErrInvalid)
 		}
-		edgeIDs = append(edgeIDs, edge.EdgeID)
-		if !edge.Online {
-			offline = append(offline, edge.EdgeID)
+		if existing, ok := byID[edge.EdgeID]; ok {
+			existing.Online = existing.Online || edge.Online
+			if existing.Name == "" {
+				existing.Name = edge.Name
+			}
+			byID[edge.EdgeID] = existing
+			continue
 		}
+		byID[edge.EdgeID] = edge
 	}
-	if len(offline) > 0 {
-		return nil, fmt.Errorf("%w: all log-enabled Edges must be online before a fleet log cutover; offline edge_ids=%v", errs.ErrConflict, offline)
+	result := make([]ConnectionEdge, 0, len(byID))
+	for _, edge := range byID {
+		result = append(result, edge)
 	}
-	edgeIDs, err = normalizeEdgeIDs(edgeIDs)
-	if err != nil {
-		return nil, fmt.Errorf("fleet rollout requires at least one log-enabled Edge: %w", err)
-	}
-	return edgeIDs, nil
+	sort.Slice(result, func(i, j int) bool { return result[i].EdgeID < result[j].EdgeID })
+	return result, nil
 }
 
 func (s *Service) validateProbeEdges(ctx context.Context, edgeIDs []uint64) error {
+	if len(edgeIDs) == 0 {
+		return nil
+	}
 	s.mu.RLock()
 	resolver := s.devices
 	s.mu.RUnlock()
@@ -1216,31 +1257,26 @@ func (s *Service) validateProbeEdges(ctx context.Context, edgeIDs []uint64) erro
 	return nil
 }
 
-func cloneAssignmentForRollout(in *model.BackendAssignment) *model.BackendAssignment {
+func cloneBackendAssignment(in *model.BackendAssignment) *model.BackendAssignment {
 	if in == nil {
 		return nil
 	}
-	return &model.BackendAssignment{
-		BackendID: in.BackendID, EdgeID: in.EdgeID,
-		DesiredGeneration: in.DesiredGeneration, AppliedGeneration: in.AppliedGeneration,
-		Status: in.Status, ProbeID: in.ProbeID, CutoverAt: in.CutoverAt,
-		LastProbeAt: in.LastProbeAt, LastWriteSuccessAt: in.LastWriteSuccessAt,
-		LastError: in.LastError,
-	}
+	out := *in
+	return &out
 }
 
-func assignmentsVerified(assignments []*model.BackendAssignment, generation uint64) bool {
-	if len(assignments) == 0 || generation == 0 {
-		return false
+func cloneLokiConnectionCheckSession(in *lokiConnectionCheckSession) *lokiConnectionCheckSession {
+	if in == nil {
+		return nil
 	}
-	for _, assignment := range assignments {
-		if assignment == nil || assignment.DesiredGeneration != generation ||
-			assignment.AppliedGeneration != generation || assignment.Status != model.AssignmentStatusVerified ||
-			assignment.LastWriteSuccessAt == nil {
-			return false
-		}
+	out := &lokiConnectionCheckSession{
+		Generation:  in.Generation,
+		Assignments: make(map[uint64]*model.BackendAssignment, len(in.Assignments)),
 	}
-	return true
+	for edgeID, assignment := range in.Assignments {
+		out.Assignments[edgeID] = cloneBackendAssignment(assignment)
+	}
+	return out
 }
 
 func newProbeID() (string, error) {
@@ -1249,6 +1285,20 @@ func newProbeID() (string, error) {
 		return "", fmt.Errorf("generate Edge log probe id: %w", err)
 	}
 	return "ongrid-log-probe-" + base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func newConnectionCheckGeneration() (uint64, error) {
+	raw := make([]byte, 8)
+	if _, err := rand.Read(raw); err != nil {
+		return 0, fmt.Errorf("generate Loki connection check generation: %w", err)
+	}
+	// Keep the value exactly representable by browser JavaScript numbers while
+	// retaining enough entropy to distinguish concurrent/restarted checks.
+	generation := binary.BigEndian.Uint64(raw) & ((1 << 52) - 1)
+	if generation == 0 {
+		generation = 1
+	}
+	return generation, nil
 }
 
 func (s *Service) probeBackend(ctx context.Context, backend *model.Backend) (string, error) {
@@ -1420,16 +1470,12 @@ func (s *Service) view(ctx context.Context, backend *model.Backend) (*BackendVie
 	}
 	currentBackend := "loki"
 	var currentBackendID uint64
-	active, activeErr := s.repo.ActiveBackend(ctx)
-	if activeErr == nil && active != nil {
-		currentBackend = string(active.Type)
-		currentBackendID = active.ID
-	} else if activeErr != nil && !errors.Is(activeErr, errs.ErrNotFound) {
-		return nil, activeErr
-	}
-	assignments, err := s.repo.ListAssignments(ctx, backend.ID)
-	if err != nil {
-		return nil, err
+	selected, selectedErr := s.repo.SelectedBackend(ctx)
+	if selectedErr == nil && selected != nil {
+		currentBackend = string(selected.Type)
+		currentBackendID = selected.ID
+	} else if selectedErr != nil && !errors.Is(selectedErr, errs.ErrNotFound) {
+		return nil, selectedErr
 	}
 	return &BackendView{
 		ID: backend.ID, Name: backend.Name, Type: backend.Type, CurrentBackend: currentBackend, CurrentBackendID: currentBackendID, Status: backend.Status,
@@ -1439,9 +1485,8 @@ func (s *Service) view(ctx context.Context, backend *model.Backend) (*BackendVie
 		HasCustomCA: strings.TrimSpace(backend.CAPEM) != "", KibanaURL: backend.KibanaURL,
 		TLSInsecure:     backend.TLSInsecure,
 		DetectedVersion: backend.DetectedVersion,
-		CutoverAt:       backend.CutoverAt, EndedAt: backend.EndedAt,
-		LastTestAt: backend.LastTestAt, LastError: backend.LastError,
-		Assignments: assignments, CreatedAt: backend.CreatedAt, UpdatedAt: backend.UpdatedAt,
+		LastTestAt:      backend.LastTestAt,
+		CreatedAt:       backend.CreatedAt, UpdatedAt: backend.UpdatedAt,
 	}, nil
 }
 
@@ -1455,9 +1500,9 @@ func (s *Service) notify(ctx context.Context) error {
 	return notifier.NotifyLogsBackendChanged(ctx)
 }
 
-func (s *Service) checkApplyGuard(ctx context.Context) error {
+func (s *Service) checkSelectGuard(ctx context.Context) error {
 	s.mu.RLock()
-	guard := s.applyGuard
+	guard := s.selectGuard
 	s.mu.RUnlock()
 	if guard == nil {
 		return nil

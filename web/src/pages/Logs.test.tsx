@@ -37,6 +37,12 @@ const records = [
     backend: 'elasticsearch',
     attributes: {
       ongrid_source: 'k8s',
+      severity_text: 'INFO',
+      severity_number: '9',
+      service_name: 'unknown_service',
+      service_name_extracted: 'payments',
+      attributes_device_id: '42',
+      attributes_ongrid_source: 'k8s',
       'k8s.pod.name': 'payments-7d4',
       'service.name': 'payments',
       comp: 'reconciler',
@@ -82,6 +88,7 @@ const logFields = [
   { name: 'pod', type: 'keyword', searchable: true, aggregatable: true },
   { name: 'container', type: 'keyword', searchable: true, aggregatable: true },
   { name: 'service_name', type: 'keyword', searchable: true, aggregatable: true },
+  { name: 'service_name_extracted', type: 'keyword', searchable: true, aggregatable: true },
   { name: 'source_id', type: 'keyword', searchable: true, aggregatable: true },
   { name: 'level', type: 'keyword', searchable: true, aggregatable: true },
   { name: 'trace_id', type: 'keyword', searchable: true, aggregatable: false },
@@ -149,6 +156,7 @@ describe('LogsPage', () => {
     await waitForInitialLogs();
     expect(screen.getByText('payment request completed')).toBeInTheDocument();
     expect(screen.getByText('payment request completed').closest('[role="listitem"]')).toHaveTextContent('设备:checkout-host (#42)');
+    expect(screen.getByText('payment request completed').closest('[role="listitem"]')).not.toHaveTextContent('unknown_service');
     expect(screen.getAllByText('elasticsearch')).toHaveLength(1);
     expect(screen.getAllByText('kind-local (#7)')).not.toHaveLength(0);
     expect(screen.getByRole('checkbox', { name: /级别.*level/i })).toBeChecked();
@@ -156,6 +164,11 @@ describe('LogsPage', () => {
     expect(screen.getByRole('checkbox', { name: /comp/i })).not.toBeChecked();
     expect(screen.queryByRole('checkbox', { name: /Workload.*workload/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: /后端.*backend/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /服务.*service_name/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /severity_text/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /severity_number/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /attributes_device_id/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /attributes_ongrid_source/i })).not.toBeInTheDocument();
     expect(screen.queryByText('k8s.container.restart_count')).not.toBeInTheDocument();
     expect(screen.queryByText('k8s.pod.uid')).not.toBeInTheDocument();
     expect(screen.queryByText('ongrid.backend')).not.toBeInTheDocument();
@@ -206,6 +219,7 @@ describe('LogsPage', () => {
       message: '',
       data: [
         { name: 'cluster_id', type: 'keyword', searchable: true, aggregatable: true },
+        { name: 'service_name_extracted', type: 'keyword', searchable: true, aggregatable: true },
         { name: 'trace_id', type: 'keyword', searchable: true, aggregatable: false },
         { name: 'message', type: 'text', searchable: true, aggregatable: false },
       ],
@@ -221,7 +235,80 @@ describe('LogsPage', () => {
     await waitFor(() => expect(clusterField).toBeChecked());
     expect(screen.getByRole('checkbox', { name: /Trace ID.*trace_id/i })).not.toBeChecked();
     expect(screen.queryByRole('checkbox', { name: /设备.*device_id/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /service_name_extracted/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: /message/i })).not.toBeInTheDocument();
+  });
+
+  it('does not flash API-only fields before the initial search settles', async () => {
+    let fieldsCompleted = false;
+    let resolveSearch!: () => void;
+    const searchGate = new Promise<void>((resolve) => { resolveSearch = resolve; });
+    server.use(
+      http.get('/api/v1/logs/fields', () => {
+        fieldsCompleted = true;
+        return HttpResponse.json({ code: 0, message: '', data: logFields });
+      }),
+      http.post('/api/v1/logs/search', async () => {
+        await searchGate;
+        return HttpResponse.json({
+          code: 0,
+          message: '',
+          data: { records, has_more: false, took_ms: 27, backends: ['elasticsearch'] },
+        });
+      }),
+    );
+
+    render(<MemoryRouter><LogsPage /></MemoryRouter>);
+
+    await waitFor(() => expect(fieldsCompleted).toBe(true));
+    expect(screen.queryByRole('checkbox', { name: /Workload.*workload/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /Trace ID.*trace_id/i })).not.toBeInTheDocument();
+
+    resolveSearch();
+    await waitForInitialLogs();
+    expect(screen.queryByRole('checkbox', { name: /Workload.*workload/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /Trace ID.*trace_id/i })).not.toBeInTheDocument();
+  });
+
+  it('does not restart the initial log queries when the device catalog finishes loading without a device filter', async () => {
+    let resolveEdges!: () => void;
+    const edgesGate = new Promise<void>((resolve) => { resolveEdges = resolve; });
+    let histogramRequests = 0;
+    server.use(
+      http.get('/api/v1/edges', async () => {
+        await edgesGate;
+        return HttpResponse.json({
+          items: [{
+            id: 3,
+            name: 'edge-42',
+            device_name: 'checkout-host',
+            status: 'online',
+            roles: ['server'],
+            access_key_id: 'test-key',
+            last_seen_at: null,
+            device_id: 42,
+          }],
+          total: 1,
+        });
+      }),
+      http.post('/api/v1/logs/histogram', () => {
+        histogramRequests++;
+        return HttpResponse.json({ code: 0, message: '', data: [] });
+      }),
+    );
+
+    render(<MemoryRouter><LogsPage /></MemoryRouter>);
+    await waitForInitialLogs();
+    expect(searchRequests).toHaveLength(1);
+    expect(histogramRequests).toBe(1);
+
+    resolveEdges();
+    const rawRow = screen.getByText('payment request completed').closest('[role="listitem"]');
+    await waitFor(() => expect(rawRow).toHaveTextContent('设备:checkout-host (#42)'));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    expect(searchRequests).toHaveLength(1);
+    expect(histogramRequests).toBe(1);
   });
 
   it('loads advanced facet values on demand with bounded concurrency', async () => {
@@ -247,8 +334,8 @@ describe('LogsPage', () => {
 
     await user.click(screen.getByRole('button', { name: /更多筛选/ }));
 
-    await waitFor(() => expect(completed).toBe(3));
-    expect(started).toBe(3);
+    await waitFor(() => expect(completed).toBe(2));
+    expect(started).toBe(2);
     expect(maxActive).toBeLessThanOrEqual(2);
   });
 
@@ -341,6 +428,7 @@ describe('LogsPage', () => {
     await waitForInitialLogs();
 
     await user.click(screen.getByRole('button', { name: /更多筛选/ }));
+    expect(screen.queryByRole('combobox', { name: 'Service' })).not.toBeInTheDocument();
     await user.type(screen.getByRole('textbox', { name: '级别' }), 'ERROR');
     await user.click(screen.getByRole('button', { name: '搜索' }));
 

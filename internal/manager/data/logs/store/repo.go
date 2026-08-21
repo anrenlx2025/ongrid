@@ -45,10 +45,10 @@ func (r *Repo) LatestBackend(ctx context.Context) (*model.Backend, error) {
 	return &out, nil
 }
 
-func (r *Repo) ActiveBackend(ctx context.Context) (*model.Backend, error) {
+func (r *Repo) SelectedBackend(ctx context.Context) (*model.Backend, error) {
 	var out model.Backend
 	if err := r.db.WithContext(ctx).
-		Where("status IN ?", []model.BackendStatus{model.BackendStatusActive, model.BackendStatusRollingBack}).
+		Where("status = ?", model.BackendStatusSelected).
 		Order("id DESC").First(&out).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errs.ErrNotFound
@@ -58,140 +58,20 @@ func (r *Repo) ActiveBackend(ctx context.Context) (*model.Backend, error) {
 	return &out, nil
 }
 
-// BeginRollout atomically moves one saved configuration into distribution and
-// replaces its selected Edge set. Previous attempts remain soft-deleted for
-// audit while the active backend (if any) is left untouched.
-func (r *Repo) BeginRollout(ctx context.Context, backend *model.Backend, assignments []*model.BackendAssignment) error {
-	if backend == nil || backend.ID == 0 || len(assignments) == 0 {
-		return errs.ErrInvalid
-	}
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&model.Backend{}).Where("id = ?", backend.ID).Updates(map[string]any{
-			"status":           model.BackendStatusDistributing,
-			"detected_version": backend.DetectedVersion,
-			"last_test_at":     backend.LastTestAt,
-			"last_error":       "",
-		})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return errs.ErrNotFound
-		}
-		if err := tx.Where("backend_id = ?", backend.ID).Delete(&model.BackendAssignment{}).Error; err != nil {
-			return err
-		}
-		for _, assignment := range assignments {
-			if assignment == nil || assignment.BackendID != backend.ID || assignment.EdgeID == 0 {
-				return errs.ErrInvalid
-			}
-			if err := tx.Create(assignment).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-// BeginRollback keeps the Elasticsearch generation authoritative while the
-// selected Edge set shadow-writes built-in Loki. ended_at remains unset until
-// every real Loki write probe is visible through the Manager query path.
-func (r *Repo) BeginRollback(ctx context.Context, backend *model.Backend, assignments []*model.BackendAssignment) error {
-	if backend == nil || backend.ID == 0 || backend.CutoverAt == nil || len(assignments) == 0 {
-		return errs.ErrInvalid
-	}
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&model.Backend{}).
-			Where("id = ? AND status IN ?", backend.ID, []model.BackendStatus{
-				model.BackendStatusActive, model.BackendStatusRollingBack,
-			}).Updates(map[string]any{
-			"status":     model.BackendStatusRollingBack,
-			"last_error": "",
-		})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return errs.ErrConflict
-		}
-		if err := tx.Where("backend_id = ?", backend.ID).Delete(&model.BackendAssignment{}).Error; err != nil {
-			return err
-		}
-		for _, assignment := range assignments {
-			if assignment == nil || assignment.BackendID != backend.ID || assignment.EdgeID == 0 {
-				return errs.ErrInvalid
-			}
-			if err := tx.Create(assignment).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-func (r *Repo) ActivateBackend(ctx context.Context, id uint64, version string, cutover time.Time) error {
+func (r *Repo) SelectBackend(ctx context.Context, id uint64, version string, testedAt time.Time) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&model.Backend{}).
-			Where("status = ? AND id <> ?", model.BackendStatusActive, id).
-			Updates(map[string]any{
-				"status":   model.BackendStatusRolledBack,
-				"ended_at": cutover.UTC(),
-			}).Error; err != nil {
+			Where("status = ? AND id <> ?", model.BackendStatusSelected, id).
+			Update("status", model.BackendStatusUnselected).Error; err != nil {
 			return err
 		}
 		result := tx.Model(&model.Backend{}).
-			Where("id = ? AND status IN ?", id, []model.BackendStatus{
-				model.BackendStatusDistributing, model.BackendStatusVerifying,
-			}).
+			Where("id = ?", id).
 			Updates(map[string]any{
-				"status":           model.BackendStatusActive,
+				"status":           model.BackendStatusSelected,
 				"detected_version": version,
-				"cutover_at":       cutover.UTC(),
-				"ended_at":         nil,
-				"last_test_at":     cutover.UTC(),
-				"last_error":       "",
+				"last_test_at":     testedAt.UTC(),
 			})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return errs.ErrConflict
-		}
-		return nil
-	})
-}
-
-func (r *Repo) CompleteRollback(ctx context.Context, id uint64, endedAt time.Time) error {
-	result := r.db.WithContext(ctx).Model(&model.Backend{}).
-		Where("id = ? AND status = ?", id, model.BackendStatusRollingBack).
-		Updates(map[string]any{
-			"status":     model.BackendStatusRolledBack,
-			"ended_at":   endedAt.UTC(),
-			"last_error": "",
-		})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return errs.ErrConflict
-	}
-	return nil
-}
-
-// CancelBackend abandons a generation that never owned the authoritative
-// data path. It deliberately leaves ended_at unset because there is no query
-// interval to close.
-func (r *Repo) CancelBackend(ctx context.Context, id uint64) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&model.Backend{}).
-			Where("id = ? AND cutover_at IS NULL AND status IN ?", id, []model.BackendStatus{
-				model.BackendStatusSaved, model.BackendStatusDistributing,
-				model.BackendStatusVerifying, model.BackendStatusDegraded,
-			}).Updates(map[string]any{
-			"status":     model.BackendStatusRolledBack,
-			"ended_at":   nil,
-			"last_error": "",
-		})
 		if result.Error != nil {
 			return result.Error
 		}
@@ -202,48 +82,27 @@ func (r *Repo) CancelBackend(ctx context.Context, id uint64) error {
 	})
 }
 
-func (r *Repo) SetBackendState(ctx context.Context, id uint64, status model.BackendStatus, version, lastError string, testedAt time.Time) error {
-	fields := map[string]any{
-		"status":           status,
-		"detected_version": version,
-		"last_error":       lastError,
-	}
-	if !testedAt.IsZero() {
-		fields["last_test_at"] = testedAt.UTC()
-	}
-	result := r.db.WithContext(ctx).Model(&model.Backend{}).Where("id = ?", id).Updates(fields)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return errs.ErrNotFound
-	}
-	return nil
-}
-
-// SetRolloutBackendState is intentionally conditional. A late/concurrent Edge
-// acknowledgement must never move an already-active generation back to
-// verifying or degraded after another acknowledgement completed promotion.
-func (r *Repo) SetRolloutBackendState(ctx context.Context, id uint64, status model.BackendStatus, version, lastError string, testedAt time.Time) error {
-	fields := map[string]any{
-		"status":           status,
-		"detected_version": version,
-		"last_error":       lastError,
-	}
-	if !testedAt.IsZero() {
-		fields["last_test_at"] = testedAt.UTC()
-	}
-	result := r.db.WithContext(ctx).Model(&model.Backend{}).
-		Where("id = ? AND status IN ?", id, []model.BackendStatus{
-			model.BackendStatusDistributing, model.BackendStatusVerifying, model.BackendStatusRollingBack,
-		}).Updates(fields)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return errs.ErrConflict
-	}
-	return nil
+// SelectLoki makes Loki authoritative by unselecting every Elasticsearch
+// configuration. Device verification is intentionally independent.
+func (r *Repo) SelectLoki(ctx context.Context) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var selectedIDs []uint64
+		if err := tx.Model(&model.Backend{}).
+			Where("status = ?", model.BackendStatusSelected).
+			Pluck("id", &selectedIDs).Error; err != nil {
+			return err
+		}
+		if len(selectedIDs) == 0 {
+			return nil
+		}
+		result := tx.Model(&model.Backend{}).
+			Where("id IN ?", selectedIDs).
+			Update("status", model.BackendStatusUnselected)
+		if result.Error != nil {
+			return result.Error
+		}
+		return tx.Where("backend_id IN ?", selectedIDs).Delete(&model.BackendAssignment{}).Error
+	})
 }
 
 func (r *Repo) GetAssignment(ctx context.Context, backendID, edgeID uint64) (*model.BackendAssignment, error) {
@@ -266,7 +125,7 @@ func (r *Repo) UpsertAssignment(ctx context.Context, assignment *model.BackendAs
 	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "backend_id"}, {Name: "edge_id"}, {Name: "delete_marker"}},
 		DoUpdates: clause.AssignmentColumns([]string{
-			"desired_generation", "applied_generation", "status", "cutover_at",
+			"desired_generation", "applied_generation", "status", "probe_id",
 			"last_probe_at", "last_write_success_at", "last_error", "updated_at",
 		}),
 	}).Create(assignment).Error

@@ -15,9 +15,12 @@ import (
 )
 
 type stubBackendService struct {
-	saved   *bizlogs.SaveInput
-	tested  bool
-	applied bool
+	saved        *bizlogs.SaveInput
+	tested       bool
+	selected     bool
+	lokiSelected bool
+	checks       int
+	checkIDs     []uint64
 }
 
 func (s *stubBackendService) Test(context.Context, uint64) (*bizlogs.BackendTestResult, error) {
@@ -26,21 +29,34 @@ func (s *stubBackendService) Test(context.Context, uint64) (*bizlogs.BackendTest
 }
 
 func (s *stubBackendService) Get(context.Context) (*bizlogs.BackendView, error) {
-	return &bizlogs.BackendView{ID: 7, Type: logsmodel.BackendTypeElasticsearch, Status: logsmodel.BackendStatusSaved}, nil
+	return &bizlogs.BackendView{ID: 7, Type: logsmodel.BackendTypeElasticsearch, Status: logsmodel.BackendStatusUnselected}, nil
 }
 
 func (s *stubBackendService) Save(_ context.Context, input bizlogs.SaveInput) (*bizlogs.BackendView, error) {
 	s.saved = &input
-	return &bizlogs.BackendView{ID: 7, Dataset: input.Dataset, Status: logsmodel.BackendStatusSaved}, nil
+	return &bizlogs.BackendView{ID: 7, Dataset: input.Dataset, Status: logsmodel.BackendStatusUnselected}, nil
 }
 
-func (s *stubBackendService) Apply(context.Context, uint64) (*bizlogs.BackendView, error) {
-	s.applied = true
-	return &bizlogs.BackendView{ID: 7, Status: logsmodel.BackendStatusDistributing}, nil
+func (s *stubBackendService) Select(context.Context, uint64) (*bizlogs.BackendView, error) {
+	s.selected = true
+	return &bizlogs.BackendView{ID: 7, Status: logsmodel.BackendStatusSelected}, nil
 }
 
-func (s *stubBackendService) Rollback(context.Context, uint64) (*bizlogs.BackendView, error) {
-	return &bizlogs.BackendView{ID: 7, Status: logsmodel.BackendStatusRolledBack}, nil
+func (s *stubBackendService) StartConnectionCheck(_ context.Context, id uint64) (*bizlogs.BackendConnectionCheck, error) {
+	s.checks++
+	s.checkIDs = append(s.checkIDs, id)
+	return &bizlogs.BackendConnectionCheck{BackendID: 7, Generation: 3, Online: 1, Pending: 1}, nil
+}
+
+func (s *stubBackendService) ConnectionCheck(_ context.Context, id uint64) (*bizlogs.BackendConnectionCheck, error) {
+	s.checks++
+	s.checkIDs = append(s.checkIDs, id)
+	return &bizlogs.BackendConnectionCheck{BackendID: 7, Generation: 3, Online: 1, Verified: 1, AllOnlineVerified: true}, nil
+}
+
+func (s *stubBackendService) SelectLoki(context.Context) (*bizlogs.BackendView, error) {
+	s.lokiSelected = true
+	return &bizlogs.BackendView{ID: 7, Status: logsmodel.BackendStatusUnselected, CurrentBackend: "loki"}, nil
 }
 
 func TestBackendRoutesRequireAdministrator(t *testing.T) {
@@ -103,7 +119,7 @@ func TestPutBackendUsesStrictJSONAndCallsService(t *testing.T) {
 
 func TestBackendActionRejectsInvalidID(t *testing.T) {
 	router := backendTestRouter(NewHandlerWithServices(nil, nil, &stubBackendService{}))
-	req := adminBackendRequest(http.MethodPost, "/v1/logs/backend/not-a-number/apply", nil)
+	req := adminBackendRequest(http.MethodPost, "/v1/logs/backend/not-a-number/select", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -111,17 +127,28 @@ func TestBackendActionRejectsInvalidID(t *testing.T) {
 	}
 }
 
-func TestApplyBackendCallsService(t *testing.T) {
+func TestSelectBackendCallsService(t *testing.T) {
 	svc := &stubBackendService{}
 	router := backendTestRouter(NewHandlerWithServices(nil, nil, svc))
-	req := adminBackendRequest(http.MethodPost, "/v1/logs/backend/7/apply", nil)
+	req := adminBackendRequest(http.MethodPost, "/v1/logs/backend/7/select", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if !svc.applied {
-		t.Fatal("Apply was not called")
+	if !svc.selected {
+		t.Fatal("Select was not called")
+	}
+}
+
+func TestSelectLokiCallsService(t *testing.T) {
+	svc := &stubBackendService{}
+	router := backendTestRouter(NewHandlerWithServices(nil, nil, svc))
+	req := adminBackendRequest(http.MethodPost, "/v1/logs/backend/loki/select", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !svc.lokiSelected {
+		t.Fatalf("status=%d selected=%v body=%s", rec.Code, svc.lokiSelected, rec.Body.String())
 	}
 }
 
@@ -134,8 +161,32 @@ func TestTestBackendCallsServiceWithoutApply(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if !svc.tested || svc.applied {
-		t.Fatalf("tested=%v applied=%v", svc.tested, svc.applied)
+	if !svc.tested || svc.selected {
+		t.Fatalf("tested=%v selected=%v", svc.tested, svc.selected)
+	}
+}
+
+func TestBackendConnectionCheckRoutesCallService(t *testing.T) {
+	svc := &stubBackendService{}
+	router := backendTestRouter(NewHandlerWithServices(nil, nil, svc))
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		req := adminBackendRequest(method, "/v1/logs/backend/7/connection-check", nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", method, rec.Code, rec.Body.String())
+		}
+	}
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		req := adminBackendRequest(method, "/v1/logs/backend/connection-check", nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("current %s status=%d body=%s", method, rec.Code, rec.Body.String())
+		}
+	}
+	if svc.checks != 4 || len(svc.checkIDs) != 4 || svc.checkIDs[0] != 7 || svc.checkIDs[1] != 7 || svc.checkIDs[2] != 0 || svc.checkIDs[3] != 0 {
+		t.Fatalf("connection check calls=%d ids=%v, want [7 7 0 0]", svc.checks, svc.checkIDs)
 	}
 }
 

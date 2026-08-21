@@ -17,8 +17,10 @@ service LogsService {
   rpc GetLogBackend(GetLogBackendRequest) returns (GetLogBackendResponse);
   rpc PutLogBackend(PutLogBackendRequest) returns (PutLogBackendResponse);
   rpc TestLogBackend(TestLogBackendRequest) returns (TestLogBackendResponse);
-  rpc ActivateLogBackend(ActivateLogBackendRequest) returns (ActivateLogBackendResponse);
-  rpc RollbackLogBackend(RollbackLogBackendRequest) returns (RollbackLogBackendResponse);
+  rpc SelectLogBackend(SelectLogBackendRequest) returns (SelectLogBackendResponse);
+  rpc StartLogBackendConnectionCheck(StartLogBackendConnectionCheckRequest) returns (LogBackendConnectionCheckResponse);
+  rpc GetLogBackendConnectionCheck(GetLogBackendConnectionCheckRequest) returns (LogBackendConnectionCheckResponse);
+  rpc SelectLoki(SelectLokiRequest) returns (SelectLokiResponse);
 }
 
 enum LogMatchMode {
@@ -173,13 +175,8 @@ enum LogBackendType {
 
 enum LogBackendStatus {
   LOG_BACKEND_STATUS_UNSPECIFIED = 0;
-  LOG_BACKEND_STATUS_DRAFT = 1;
-  LOG_BACKEND_STATUS_DISTRIBUTING = 2;
-  LOG_BACKEND_STATUS_VERIFYING = 3;
-  LOG_BACKEND_STATUS_ACTIVE = 4;
-  LOG_BACKEND_STATUS_DEGRADED = 5;
-  LOG_BACKEND_STATUS_ROLLED_BACK = 6;
-  LOG_BACKEND_STATUS_ROLLING_BACK = 7;
+  LOG_BACKEND_STATUS_UNSELECTED = 1;
+  LOG_BACKEND_STATUS_SELECTED = 2;
 }
 
 message LogBackend {
@@ -196,8 +193,6 @@ message LogBackend {
   string ca_credential_name = 11;
   string kibana_url = 12;
   bool tls_insecure = 13;
-  google.protobuf.Timestamp activated_at = 14;
-  google.protobuf.Timestamp ended_at = 15;
 }
 
 message GetLogBackendRequest {}
@@ -239,22 +234,62 @@ message TestLogBackendResponse {
   string probe_id = 6;
 }
 
-message ActivateLogBackendRequest {
-  repeated uint64 edge_ids = 1;
-  bool canary = 2;
-}
+message SelectLogBackendRequest {}
 
-message ActivateLogBackendResponse {
+message SelectLogBackendResponse {
   int32 code = 1;
   string message = 2;
   LogBackend data = 3;
 }
 
-message RollbackLogBackendRequest {
-  string reason = 1;
+enum LogBackendConnectionStatus {
+  LOG_BACKEND_CONNECTION_STATUS_UNSPECIFIED = 0;
+  LOG_BACKEND_CONNECTION_STATUS_NOT_CHECKED = 1;
+  LOG_BACKEND_CONNECTION_STATUS_PENDING = 2;
+  LOG_BACKEND_CONNECTION_STATUS_VERIFIED = 3;
+  LOG_BACKEND_CONNECTION_STATUS_FAILED = 4;
+  LOG_BACKEND_CONNECTION_STATUS_OFFLINE = 5;
 }
 
-message RollbackLogBackendResponse {
+message LogBackendEdgeConnection {
+  uint64 edge_id = 1;
+  string edge_name = 2;
+  bool online = 3;
+  LogBackendConnectionStatus status = 4;
+  uint64 desired_generation = 5;
+  uint64 applied_generation = 6;
+  google.protobuf.Timestamp last_checked_at = 7;
+  string last_error = 8;
+}
+
+message StartLogBackendConnectionCheckRequest {}
+
+message GetLogBackendConnectionCheckRequest {}
+
+message LogBackendConnectionCheck {
+  uint64 backend_id = 1;
+  string backend = 2;
+  uint64 generation = 3;
+  google.protobuf.Timestamp observed_at = 4;
+  uint32 total = 5;
+  uint32 online = 6;
+  uint32 verified = 7;
+  uint32 pending = 8;
+  uint32 failed = 9;
+  uint32 offline = 10;
+  bool all_online_verified = 11;
+  repeated LogBackendEdgeConnection edges = 12;
+}
+
+message LogBackendConnectionCheckResponse {
+  int32 code = 1;
+  string message = 2;
+  LogBackendConnectionCheck data = 3;
+}
+
+message SelectLokiRequest {}
+
+message SelectLokiResponse {
   int32 code = 1;
   string message = 2;
   LogBackend data = 3;

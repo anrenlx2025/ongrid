@@ -71,64 +71,8 @@ func TestLocalRuntimeLogPipelines(t *testing.T) {
 		message := fmt.Sprintf("ongrid-runtime-es-direct-%d", time.Now().UnixNano())
 		source := writeRuntimeLog(t, message)
 		spec := baseRuntimeSpec(source)
-		addElasticsearchSpec(spec, "", esURL, writeKeyFile, namespace, 1)
+		addElasticsearchSpec(spec, esURL, writeKeyFile, namespace, 1)
 		cfg := plugins.PluginConfig{Enabled: true, EdgeID: deviceID, Spec: spec}
-		stop := startRuntimePlugin(t, collector, cfg)
-		defer stop()
-		waitForRuntimeLog(t, newES(t, namespace), deviceID, message)
-	})
-
-	t.Run("Loki baseline and Elasticsearch canary", func(t *testing.T) {
-		const deviceID = uint64(990003)
-		const namespace = "e2e-canary"
-		message := fmt.Sprintf("ongrid-runtime-canary-%d", time.Now().UnixNano())
-		source := writeRuntimeLog(t, message)
-		spec := baseRuntimeSpec(source)
-		addElasticsearchSpec(spec, "", esURL, writeKeyFile, namespace, 2)
-		spec["rollout_shadow"] = true
-		spec["baseline_backend"] = backendBuiltinLoki
-		cfg := plugins.PluginConfig{
-			Enabled: true, EdgeID: deviceID, Endpoint: lokiIngestEndpoint,
-			AuthUser: lokiAuthUser, AuthPass: lokiAuthPass, Spec: spec,
-		}
-		stop := startRuntimePlugin(t, collector, cfg)
-		defer stop()
-		waitForRuntimeLog(t, loki, deviceID, message)
-		waitForRuntimeLog(t, newES(t, namespace), deviceID, message)
-	})
-
-	t.Run("Loki baseline survives unavailable Elasticsearch canary", func(t *testing.T) {
-		const deviceID = uint64(990005)
-		message := fmt.Sprintf("ongrid-runtime-loki-survives-es-%d", time.Now().UnixNano())
-		source := writeRuntimeLog(t, message)
-		spec := baseRuntimeSpec(source)
-		addElasticsearchSpec(spec, "", "http://127.0.0.1:39998", writeKeyFile, "e2e-unavailable", 2)
-		spec["rollout_shadow"] = true
-		spec["baseline_backend"] = backendBuiltinLoki
-		cfg := plugins.PluginConfig{
-			Enabled: true, EdgeID: deviceID, Endpoint: lokiIngestEndpoint,
-			AuthUser: lokiAuthUser, AuthPass: lokiAuthPass, Spec: spec,
-		}
-		stop := startRuntimePlugin(t, collector, cfg)
-		defer stop()
-		waitForRuntimeLog(t, loki, deviceID, message)
-	})
-
-	t.Run("Elasticsearch baseline survives unavailable Loki rollback candidate", func(t *testing.T) {
-		const deviceID = uint64(990004)
-		const namespace = "e2e-rollback"
-		message := fmt.Sprintf("ongrid-runtime-rollback-%d", time.Now().UnixNano())
-		source := writeRuntimeLog(t, message)
-		spec := baseRuntimeSpec(source)
-		spec["backend"] = backendBuiltinLoki
-		spec["backend_generation"] = uint64(3)
-		spec["rollout_shadow"] = true
-		spec["baseline_backend"] = backendExternalES
-		addElasticsearchSpec(spec, "baseline_", esURL, writeKeyFile, namespace, 2)
-		cfg := plugins.PluginConfig{
-			Enabled: true, EdgeID: deviceID,
-			Endpoint: "http://127.0.0.1:39999/loki/api/v1/push", Spec: spec,
-		}
 		stop := startRuntimePlugin(t, collector, cfg)
 		defer stop()
 		waitForRuntimeLog(t, newES(t, namespace), deviceID, message)
@@ -184,14 +128,14 @@ func baseRuntimeSpec(source string) map[string]interface{} {
 	}
 }
 
-func addElasticsearchSpec(spec map[string]interface{}, prefix, endpoint, keyFile, namespace string, generation uint64) {
-	spec[prefix+"backend"] = backendExternalES
-	spec[prefix+"backend_generation"] = generation
-	spec[prefix+"elasticsearch_endpoints"] = []interface{}{endpoint}
-	spec[prefix+"elasticsearch_api_key_file"] = keyFile
-	spec[prefix+"elasticsearch_dataset"] = "ongrid.host"
-	spec[prefix+"elasticsearch_namespace"] = namespace
-	spec[prefix+"elasticsearch_tls_insecure_skip_verify"] = true
+func addElasticsearchSpec(spec map[string]interface{}, endpoint, keyFile, namespace string, generation uint64) {
+	spec["backend"] = backendExternalES
+	spec["backend_generation"] = generation
+	spec["elasticsearch_endpoints"] = []interface{}{endpoint}
+	spec["elasticsearch_api_key_file"] = keyFile
+	spec["elasticsearch_dataset"] = "ongrid.host"
+	spec["elasticsearch_namespace"] = namespace
+	spec["elasticsearch_tls_insecure_skip_verify"] = true
 }
 
 func startRuntimePlugin(t *testing.T, collector string, cfg plugins.PluginConfig) func() {

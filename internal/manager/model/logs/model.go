@@ -17,13 +17,8 @@ const (
 type BackendStatus string
 
 const (
-	BackendStatusSaved        BackendStatus = "saved"
-	BackendStatusDistributing BackendStatus = "distributing"
-	BackendStatusVerifying    BackendStatus = "verifying"
-	BackendStatusActive       BackendStatus = "active"
-	BackendStatusRollingBack  BackendStatus = "rolling_back"
-	BackendStatusDegraded     BackendStatus = "degraded"
-	BackendStatusRolledBack   BackendStatus = "rolled_back"
+	BackendStatusUnselected BackendStatus = "unselected"
+	BackendStatusSelected   BackendStatus = "selected"
 )
 
 // Backend is one versioned external log backend. Sensitive credential values
@@ -33,7 +28,7 @@ type Backend struct {
 	ID                 uint64                `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
 	Name               string                `gorm:"column:name;type:varchar(128);not null;default:'';uniqueIndex:uk_log_backend_name,priority:1" json:"name"`
 	Type               BackendType           `gorm:"column:type;type:varchar(32);not null;default:'elasticsearch'" json:"type"`
-	Status             BackendStatus         `gorm:"column:status;type:varchar(24);not null;default:'saved';index:idx_log_backends_status" json:"status"`
+	Status             BackendStatus         `gorm:"column:status;type:varchar(24);not null;default:'unselected';index:idx_log_backends_status" json:"status"`
 	Generation         uint64                `gorm:"column:generation;not null;default:1;uniqueIndex:uk_log_backend_name,priority:2" json:"generation"`
 	WriteEndpointsJSON string                `gorm:"column:write_endpoints_json;type:text;not null" json:"-"`
 	QueryEndpoint      string                `gorm:"column:query_endpoint;type:varchar(2048);not null;default:''" json:"query_endpoint"`
@@ -46,10 +41,7 @@ type Backend struct {
 	KibanaURL          string                `gorm:"column:kibana_url;type:varchar(2048);not null;default:''" json:"kibana_url,omitempty"`
 	TLSInsecure        bool                  `gorm:"column:tls_insecure;not null;default:false" json:"tls_insecure"`
 	DetectedVersion    string                `gorm:"column:detected_version;type:varchar(32);not null;default:''" json:"detected_version,omitempty"`
-	CutoverAt          *time.Time            `gorm:"column:cutover_at" json:"cutover_at,omitempty"`
-	EndedAt            *time.Time            `gorm:"column:ended_at;index:idx_log_backends_ended_at" json:"ended_at,omitempty"`
 	LastTestAt         *time.Time            `gorm:"column:last_test_at" json:"last_test_at,omitempty"`
-	LastError          string                `gorm:"column:last_error;type:varchar(1024);not null;default:''" json:"last_error,omitempty"`
 	CreatedAt          time.Time             `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt          time.Time             `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 	DeletedAt          *time.Time            `gorm:"column:deleted_at;index" json:"-"`
@@ -67,8 +59,8 @@ const (
 	AssignmentStatusFailed   AssignmentStatus = "failed"
 )
 
-// BackendAssignment tracks rollout convergence for one Edge. It is control
-// state only; LastError must contain a normalized error and never response
+// BackendAssignment tracks an explicitly requested connection check for one
+// Edge. It is control state only; LastError must contain a normalized error and never response
 // bodies, URLs with credentials, or log content.
 type BackendAssignment struct {
 	ID                 uint64                `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
@@ -78,7 +70,6 @@ type BackendAssignment struct {
 	AppliedGeneration  uint64                `gorm:"column:applied_generation;not null;default:0" json:"applied_generation"`
 	Status             AssignmentStatus      `gorm:"column:status;type:varchar(24);not null;default:'pending';index:idx_log_backend_assignments_status" json:"status"`
 	ProbeID            string                `gorm:"column:probe_id;type:varchar(128);not null;default:''" json:"probe_id,omitempty"`
-	CutoverAt          *time.Time            `gorm:"column:cutover_at" json:"cutover_at,omitempty"`
 	LastProbeAt        *time.Time            `gorm:"column:last_probe_at" json:"last_probe_at,omitempty"`
 	LastWriteSuccessAt *time.Time            `gorm:"column:last_write_success_at" json:"last_write_success_at,omitempty"`
 	LastError          string                `gorm:"column:last_error;type:varchar(1024);not null;default:''" json:"last_error,omitempty"`

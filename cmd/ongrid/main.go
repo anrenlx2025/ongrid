@@ -1091,8 +1091,8 @@ func main() {
 	metricHandler := managerservermetric.NewPromHandler(metricPromQuerier, hostDeviceResolverAdapter{edgeDeviceRepo})
 
 	// Log control/query plane. Loki remains the built-in default. When an
-	// external Elasticsearch generation is active, the planner selects ES
-	// for new ranges and Loki for pre-cutover history. Log payloads never
+	// external Elasticsearch configuration is selected, the planner selects
+	// ES for the complete query window. Log payloads never
 	// traverse this service; Edge collectors still write directly to the
 	// selected data-plane endpoint.
 	var lokiLogClient *pkglogquery.Client
@@ -1102,11 +1102,11 @@ func main() {
 	logsBackendRepo := managerlogsdata.NewRepo(db)
 	logsBackendSvc := managerbizlogs.NewService(logsBackendRepo, secretUC, lokiLogClient, log.With(slog.String("comp", "logs-backend")))
 	logsBackendSvc.SetHostDeviceResolver(edgeDeviceRepo)
-	logsBackendSvc.SetRolloutEdgeInventory(logsRolloutEdgeInventory{edges: edgeUC, configs: pluginConfigUC})
+	logsBackendSvc.SetConnectionEdgeInventory(logsConnectionEdgeInventory{edges: edgeUC, configs: pluginConfigUC})
 	logsBackendSvc.SetGrafanaSyncer(grafanaSvc)
-	grafanaSvc.SetLogsDatasourceProvider(logsBackendSvc.ActiveElasticsearchDatasource)
+	grafanaSvc.SetLogsDatasourceProvider(logsBackendSvc.SelectedElasticsearchDatasource)
 	go func() {
-		// Reconcile an already-active generation after upgrades. Wait until the
+		// Reconcile the selected backend after upgrades. Wait until the
 		// embedded Grafana bootstrap has had a chance to persist its SA token.
 		timer := time.NewTimer(15 * time.Second)
 		defer timer.Stop()
@@ -1120,10 +1120,10 @@ func main() {
 		if err := grafanaSvc.SyncLogsDatasource(syncCtx); err != nil {
 			log.Warn("logs: initial grafana datasource sync failed (retry from integrations)", slog.Any("err", err))
 		} else {
-			log.Info("logs: active grafana datasource synced at boot")
+			log.Info("logs: selected grafana datasource synced at boot")
 		}
 	}()
-	logsBackendSvc.SetApplyGuard(func(ctx context.Context) error {
+	logsBackendSvc.SetSelectGuard(func(ctx context.Context) error {
 		rules, err := alertRepo.ListAllEnabledRules(ctx)
 		if err != nil {
 			return fmt.Errorf("inspect enabled log alert rules: %w", err)
@@ -1255,9 +1255,9 @@ func main() {
 	// real-time push to the affected edge.
 	pluginConfigUC.SetNotifier(fbClient)
 	pluginConfigUC.SetDatabaseMetricsSecretWriter(fbClient)
-	logsBackendSvc.SetRolloutNotifier(&logsPluginReloadBroadcaster{
+	logsBackendSvc.SetBackendChangeNotifier(&logsPluginReloadBroadcaster{
 		edges: edgeUC, notifier: fbClient,
-		log: log.With(slog.String("comp", "logs-rollout-notifier")),
+		log: log.With(slog.String("comp", "logs-backend-change-notifier")),
 	})
 
 	// WebSSH HTTP handler — uses fbClient.OpenStream to layer ssh +
@@ -4061,22 +4061,21 @@ type pluginConfigReloadNotifier interface {
 	NotifyPluginConfigsChanged(ctx context.Context, edgeID uint64) error
 }
 
-// logsPluginReloadBroadcaster turns a fleet backend transition into bounded,
+// logsPluginReloadBroadcaster turns a selected backend change into bounded,
 // best-effort reload hints for online Edges. The 60-second Edge pull loop is
-// authoritative, so one disconnected Edge must not make an already-persisted
-// rollout API call fail.
+// authoritative, so one disconnected Edge never changes the selection result.
 type logsPluginReloadBroadcaster struct {
 	edges    *managerbizedge.Usecase
 	notifier pluginConfigReloadNotifier
 	log      *slog.Logger
 }
 
-type logsRolloutEdgeInventory struct {
+type logsConnectionEdgeInventory struct {
 	edges   *managerbizedge.Usecase
 	configs *managerbizedge.PluginConfigUC
 }
 
-func (i logsRolloutEdgeInventory) ListRolloutEdges(ctx context.Context) ([]managerbizlogs.RolloutEdge, error) {
+func (i logsConnectionEdgeInventory) ListConnectionEdges(ctx context.Context) ([]managerbizlogs.ConnectionEdge, error) {
 	if i.edges == nil {
 		return nil, nil
 	}
@@ -4084,9 +4083,9 @@ func (i logsRolloutEdgeInventory) ListRolloutEdges(ctx context.Context) ([]manag
 	if err != nil {
 		return nil, err
 	}
-	items := make([]managerbizlogs.RolloutEdge, 0, len(edges))
+	items := make([]managerbizlogs.ConnectionEdge, 0, len(edges))
 	for _, edge := range edges {
-		if !isHostLogsRolloutEdge(edge) {
+		if !isHostLogsConnectionEdge(edge) {
 			continue
 		}
 		if i.configs != nil {
@@ -4098,18 +4097,17 @@ func (i logsRolloutEdgeInventory) ListRolloutEdges(ctx context.Context) ([]manag
 				continue
 			}
 		}
-		items = append(items, managerbizlogs.RolloutEdge{EdgeID: edge.ID, Online: edge.Status == "online"})
+		items = append(items, managerbizlogs.ConnectionEdge{EdgeID: edge.ID, Name: edge.Name, Online: edge.Status == "online"})
 	}
 	return items, nil
 }
 
-// isHostLogsRolloutEdge excludes control-plane-only Edge identities from a
-// fleet log cutover. The rollout's real-write gate scopes every probe by the
-// linked Host device; an identity without that link (for example the
+// isHostLogsConnectionEdge excludes control-plane-only Edge identities from a
+// log connection check. The real-write check scopes every probe by the linked
+// Host device; an identity without that link (for example the
 // Kubernetes controller) cannot emit or verify such a probe and would make a
-// fleet cutover permanently impossible even though no logs process runs on
-// that identity.
-func isHostLogsRolloutEdge(edge *managermodeledge.Edge) bool {
+// connection check impossible even though no logs process runs on that identity.
+func isHostLogsConnectionEdge(edge *managermodeledge.Edge) bool {
 	return edge != nil && edge.ID != 0 && edge.DeviceID != nil && *edge.DeviceID != 0
 }
 

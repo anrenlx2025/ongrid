@@ -126,10 +126,10 @@ func (m mapHostDevices) LookupHostDevice(_ context.Context, edgeID uint64) (uint
 	return deviceID, nil
 }
 
-type fixedEdgeInventory []bizlogs.RolloutEdge
+type fixedEdgeInventory []bizlogs.ConnectionEdge
 
-func (i fixedEdgeInventory) ListRolloutEdges(context.Context) ([]bizlogs.RolloutEdge, error) {
-	return append([]bizlogs.RolloutEdge(nil), i...), nil
+func (i fixedEdgeInventory) ListConnectionEdges(context.Context) ([]bizlogs.ConnectionEdge, error) {
+	return append([]bizlogs.ConnectionEdge(nil), i...), nil
 }
 
 type histogramCountingSearcher struct {
@@ -264,7 +264,7 @@ func (s *recordingGrafanaSyncer) SyncLoki(context.Context) error {
 	return nil
 }
 
-func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
+func TestServiceSelectionSecretsAndIndependentConnectionChecks(t *testing.T) {
 	db := openTestDB(t)
 	repo := logsstore.NewRepo(db)
 
@@ -317,9 +317,9 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	loki := &echoProbeSearcher{}
 	svc := bizlogs.NewService(repo, secrets, loki)
 	svc.SetHostDeviceResolver(mapHostDevices{42: 9001, 43: 9002})
-	svc.SetRolloutEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}, {EdgeID: 43, Online: true}})
+	svc.SetConnectionEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}, {EdgeID: 43, Online: true}})
 	notifier := &countingNotifier{}
-	svc.SetRolloutNotifier(notifier)
+	svc.SetBackendChangeNotifier(notifier)
 	grafanaSyncer := newRecordingGrafanaSyncer()
 	svc.SetGrafanaSyncer(grafanaSyncer)
 
@@ -335,7 +335,7 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save(first): %v", err)
 	}
-	if first.Generation != 1 || first.Status != logsmodel.BackendStatusSaved {
+	if first.Generation != 1 || first.Status != logsmodel.BackendStatusUnselected {
 		t.Fatalf("first saved configuration = generation %d status %q", first.Generation, first.Status)
 	}
 
@@ -353,32 +353,51 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBackend after Test: %v", err)
 	}
-	if persistedAfterTest.Status != logsmodel.BackendStatusSaved || persistedAfterTest.DetectedVersion != "" || persistedAfterTest.LastTestAt != nil {
+	if persistedAfterTest.Status != logsmodel.BackendStatusUnselected || persistedAfterTest.DetectedVersion != "" || persistedAfterTest.LastTestAt != nil {
 		t.Fatalf("test mutated saved backend = %+v", persistedAfterTest)
 	}
 
-	distributing, err := svc.Apply(context.Background(), first.ID)
+	selectedView, err := svc.Select(context.Background(), first.ID)
 	if err != nil {
-		t.Fatalf("Apply: %v", err)
+		t.Fatalf("Select: %v", err)
 	}
-	if distributing.Status != logsmodel.BackendStatusDistributing || distributing.DetectedVersion != "8.16.3" || distributing.CutoverAt != nil {
-		t.Fatalf("distributing view = %+v", distributing)
+	if selectedView.Status != logsmodel.BackendStatusSelected || selectedView.DetectedVersion != "8.16.3" {
+		t.Fatalf("selected view = %+v", selectedView)
 	}
 	if notifier.count() != 1 {
-		t.Fatalf("notifications after distribution = %d, want 1", notifier.count())
+		t.Fatalf("notifications after selection = %d, want 1", notifier.count())
 	}
 	authMu.Lock()
 	if seenAuth["ApiKey query-key"] == 0 || seenAuth["ApiKey write-key"] == 0 {
 		t.Fatalf("probe auth headers = %#v", seenAuth)
 	}
 	authMu.Unlock()
-	if len(distributing.Assignments) != 2 {
-		t.Fatalf("rollout assignments = %+v", distributing.Assignments)
+	select {
+	case config := <-grafanaSyncer.elasticsearch:
+		if config.URL != es.URL || config.IndexPattern != "logs-ongrid.*.otel-prod" || config.APIKey != "query-key" {
+			t.Fatalf("Grafana Elasticsearch config = %+v", config)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Grafana Elasticsearch sync was not triggered")
+	}
+	checking, err := svc.StartConnectionCheck(context.Background(), first.ID)
+	if err != nil {
+		t.Fatalf("StartConnectionCheck: %v", err)
+	}
+	if checking.Online != 2 || checking.Pending != 2 || checking.Verified != 0 || checking.AllOnlineVerified {
+		t.Fatalf("initial connection check = %+v", checking)
+	}
+	if notifier.count() != 2 {
+		t.Fatalf("notifications after connection check = %d, want 2", notifier.count())
+	}
+	assignments, err := repo.ListAssignments(context.Background(), first.ID)
+	if err != nil || len(assignments) != 2 {
+		t.Fatalf("connection check assignments = %+v, %v", assignments, err)
 	}
 	probeIDs := map[uint64]string{}
-	for _, item := range distributing.Assignments {
+	for _, item := range assignments {
 		if item.ProbeID == "" {
-			t.Fatalf("rollout assignment has no probe ID: %+v", item)
+			t.Fatalf("connection-check assignment has no probe ID: %+v", item)
 		}
 		probeIDs[item.EdgeID] = item.ProbeID
 	}
@@ -386,8 +405,8 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PluginRuntimeOverlay: %v", err)
 	}
-	if overlay["rollout_shadow"] != true || overlay["baseline_backend"] != "builtin_loki" {
-		t.Fatalf("initial rollout overlay = %#v", overlay)
+	if overlay["log_probe_id"] != probeIDs[42] {
+		t.Fatalf("selected connection-check overlay = %#v", overlay)
 	}
 	secret, err := svc.PluginSecretForEdge(context.Background(), 42, "logs", bizlogs.SecretSlotESAPIKey, 1)
 	if err != nil {
@@ -400,12 +419,12 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	if err := svc.MarkApplied(context.Background(), 42, 1, probeIDs[42], ""); err != nil {
 		t.Fatalf("MarkApplied: %v", err)
 	}
-	verifying, err := svc.Get(context.Background())
+	partial, err := svc.ConnectionCheck(context.Background(), first.ID)
 	if err != nil {
-		t.Fatalf("Get(verifying): %v", err)
+		t.Fatalf("ConnectionCheck(partial): %v", err)
 	}
-	if verifying.Status != logsmodel.BackendStatusVerifying || verifying.CutoverAt != nil || notifier.count() != 1 {
-		t.Fatalf("backend after first real probe = %+v notifications=%d", verifying, notifier.count())
+	if partial.Verified != 1 || partial.Pending != 1 || partial.AllOnlineVerified || notifier.count() != 2 {
+		t.Fatalf("connection check after first probe = %+v notifications=%d", partial, notifier.count())
 	}
 	if _, err := svc.PluginSecretForEdge(context.Background(), 43, "logs", bizlogs.SecretSlotESAPIKey, 1); err != nil {
 		t.Fatalf("PluginSecretForEdge(edge 43): %v", err)
@@ -413,27 +432,16 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	if err := svc.MarkApplied(context.Background(), 43, 1, probeIDs[43], ""); err != nil {
 		t.Fatalf("MarkApplied(edge 43): %v", err)
 	}
-	active, err := svc.Get(context.Background())
+	verified, err := svc.ConnectionCheck(context.Background(), first.ID)
 	if err != nil {
-		t.Fatalf("Get(active): %v", err)
+		t.Fatalf("ConnectionCheck(verified): %v", err)
 	}
-	if active.Status != logsmodel.BackendStatusActive || active.CutoverAt == nil || notifier.count() != 2 {
-		t.Fatalf("active after fleet real probes = %+v notifications=%d", active, notifier.count())
+	if verified.Verified != 2 || verified.Pending != 0 || !verified.AllOnlineVerified || notifier.count() != 2 {
+		t.Fatalf("verified connection check = %+v notifications=%d", verified, notifier.count())
 	}
-	select {
-	case config := <-grafanaSyncer.elasticsearch:
-		if config.URL != es.URL || config.IndexPattern != "logs-ongrid.*.otel-prod" || config.APIKey != "query-key" {
-			t.Fatalf("Grafana Elasticsearch config = %+v", config)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Grafana Elasticsearch sync was not triggered")
-	}
-	if err := repo.SetRolloutBackendState(context.Background(), first.ID, logsmodel.BackendStatusDegraded, "8.16.3", "late probe", time.Now().UTC()); !errors.Is(err, errs.ErrConflict) {
-		t.Fatalf("late rollout state update error = %v, want conflict", err)
-	}
-	stillActive, err := repo.GetBackend(context.Background(), first.ID)
-	if err != nil || stillActive.Status != logsmodel.BackendStatusActive {
-		t.Fatalf("late acknowledgement changed active backend: %+v, %v", stillActive, err)
+	stillSelected, err := repo.GetBackend(context.Background(), first.ID)
+	if err != nil || stillSelected.Status != logsmodel.BackendStatusSelected {
+		t.Fatalf("connection acknowledgement changed selected backend: %+v, %v", stillSelected, err)
 	}
 
 	second, err := svc.Save(context.Background(), bizlogs.SaveInput{
@@ -448,15 +456,15 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save(second): %v", err)
 	}
-	if second.ID == first.ID || second.Generation != 2 || second.Status != logsmodel.BackendStatusSaved {
+	if second.ID == first.ID || second.Generation != 2 || second.Status != logsmodel.BackendStatusUnselected {
 		t.Fatalf("second saved configuration = id %d generation %d status %q; first id=%d", second.ID, second.Generation, second.Status, first.ID)
 	}
-	runtime, err := svc.ActiveRuntime(context.Background())
+	runtime, err := svc.SelectedRuntime(context.Background())
 	if err != nil {
-		t.Fatalf("ActiveRuntime while editing next revision: %v", err)
+		t.Fatalf("SelectedRuntime while editing next revision: %v", err)
 	}
 	if runtime == nil || runtime.BackendID != first.ID || runtime.Generation != 1 || runtime.Dataset != "ongrid.system" {
-		t.Fatalf("active runtime was overwritten by saved configuration: %+v", runtime)
+		t.Fatalf("selected runtime was overwritten by unselected configuration: %+v", runtime)
 	}
 
 	// Re-fetching after a restart must not regress an already-applied row.
@@ -474,86 +482,43 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 		t.Fatalf("verified assignment must record a successful real log write")
 	}
 
-	rollingBack, err := svc.Rollback(context.Background(), first.ID)
+	lokiView, err := svc.SelectLoki(context.Background())
 	if err != nil {
-		t.Fatalf("Rollback: %v", err)
+		t.Fatalf("SelectLoki: %v", err)
 	}
-	if rollingBack.Status != logsmodel.BackendStatusRollingBack || rollingBack.EndedAt != nil || len(rollingBack.Assignments) != 2 || notifier.count() != 3 {
-		t.Fatalf("rollback prewarm = %+v notifications %d", rollingBack, notifier.count())
+	if lokiView.Status != logsmodel.BackendStatusUnselected ||
+		lokiView.CurrentBackend != "loki" || notifier.count() != 3 {
+		t.Fatalf("Loki selection = %+v notifications %d", lokiView, notifier.count())
 	}
-	rollbackOverlay, err := svc.PluginRuntimeOverlay(context.Background(), 42, "logs")
+	lokiOverlay, err := svc.PluginRuntimeOverlay(context.Background(), 42, "logs")
 	if err != nil {
-		t.Fatalf("PluginRuntimeOverlay(rollback): %v", err)
+		t.Fatalf("PluginRuntimeOverlay(Loki): %v", err)
 	}
-	if rollbackOverlay["backend"] != "builtin_loki" || rollbackOverlay["baseline_backend"] != "external_elasticsearch" || rollbackOverlay["rollout_shadow"] != true {
-		t.Fatalf("rollback overlay = %#v", rollbackOverlay)
+	if lokiOverlay["backend"] != "builtin_loki" {
+		t.Fatalf("Loki overlay = %#v", lokiOverlay)
 	}
-	runtime, err = svc.ActiveRuntime(context.Background())
-	if err != nil || runtime == nil || runtime.BackendID != first.ID {
-		t.Fatalf("authoritative runtime during rollback = %+v, %v", runtime, err)
-	}
-	rollbackProbeIDs := map[uint64]string{}
-	for _, item := range rollingBack.Assignments {
-		rollbackProbeIDs[item.EdgeID] = item.ProbeID
-	}
-	failedRollback, err := repo.GetAssignment(context.Background(), first.ID, 42)
-	if err != nil {
-		t.Fatalf("GetAssignment(failed rollback): %v", err)
-	}
-	failedRollback.Status = logsmodel.AssignmentStatusFailed
-	failedRollback.AppliedGeneration = 0
-	failedRollback.LastError = "probe log is not visible yet"
-	if err := repo.UpsertAssignment(context.Background(), failedRollback); err != nil {
-		t.Fatalf("UpsertAssignment(failed rollback): %v", err)
-	}
-	if _, err := svc.PluginSecretForEdge(context.Background(), 42, "logs", bizlogs.SecretSlotESAPIKey, first.Generation); err != nil {
-		t.Fatalf("authoritative secret after failed rollback probe: %v", err)
-	}
-	failedRollback.Status = logsmodel.AssignmentStatusPending
-	failedRollback.LastError = ""
-	if err := repo.UpsertAssignment(context.Background(), failedRollback); err != nil {
-		t.Fatalf("restore rollback assignment: %v", err)
-	}
-	for _, edgeID := range []uint64{42, 43} {
-		if _, err := svc.PluginSecretForEdge(context.Background(), edgeID, "logs", bizlogs.SecretSlotESAPIKey, first.Generation); err != nil {
-			t.Fatalf("PluginSecretForEdge(rollback edge %d): %v", edgeID, err)
-		}
-		if err := svc.MarkApplied(context.Background(), edgeID, first.Generation, rollbackProbeIDs[edgeID], ""); err != nil {
-			t.Fatalf("MarkApplied(rollback edge %d): %v", edgeID, err)
-		}
-	}
-	rolledBack, err := repo.GetBackend(context.Background(), first.ID)
-	if err != nil {
-		t.Fatalf("GetBackend(rolled back): %v", err)
-	}
-	if rolledBack.Status != logsmodel.BackendStatusRolledBack || rolledBack.EndedAt == nil || notifier.count() != 4 {
-		t.Fatalf("completed rollback = status %q notifications %d", rolledBack.Status, notifier.count())
+	runtime, err = svc.SelectedRuntime(context.Background())
+	if err != nil || runtime != nil {
+		t.Fatalf("runtime after Loki selection = %+v, %v", runtime, err)
 	}
 	select {
 	case <-grafanaSyncer.loki:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Grafana Loki sync was not triggered after rollback")
+		t.Fatal("Grafana Loki sync was not triggered after selection")
 	}
-	runtime, err = svc.ActiveRuntime(context.Background())
+	idempotent, err := svc.SelectLoki(context.Background())
 	if err != nil {
-		t.Fatalf("ActiveRuntime after rollback: %v", err)
+		t.Fatalf("SelectLoki(already selected): %v", err)
 	}
-	if runtime != nil {
-		t.Fatalf("runtime after rollback = %+v, want built-in Loki", runtime)
+	if idempotent.Status != logsmodel.BackendStatusUnselected || notifier.count() != 3 {
+		t.Fatalf("idempotent Loki selection = %+v notifications=%d", idempotent, notifier.count())
 	}
-	idempotent, err := svc.Rollback(context.Background(), first.ID)
+	reselected, err := svc.Select(context.Background(), first.ID)
 	if err != nil {
-		t.Fatalf("Rollback(already rolled back): %v", err)
+		t.Fatalf("Select(unselected configuration): %v", err)
 	}
-	if idempotent.Status != logsmodel.BackendStatusRolledBack || notifier.count() != 4 {
-		t.Fatalf("idempotent rollback = %+v notifications=%d", idempotent, notifier.count())
-	}
-	reapplying, err := svc.Apply(context.Background(), first.ID)
-	if err != nil {
-		t.Fatalf("Apply(already saved rolled-back configuration): %v", err)
-	}
-	if reapplying.Status != logsmodel.BackendStatusDistributing || reapplying.ID != first.ID || reapplying.Generation != first.Generation || notifier.count() != 5 {
-		t.Fatalf("direct reapply = %+v notifications=%d", reapplying, notifier.count())
+	if reselected.Status != logsmodel.BackendStatusSelected || reselected.ID != first.ID || reselected.Generation != first.Generation || notifier.count() != 4 {
+		t.Fatalf("reselection = %+v notifications=%d", reselected, notifier.count())
 	}
 }
 
@@ -617,7 +582,7 @@ func TestServiceHistogramFoldsInclusiveEndBoundaryIntoFinalBucket(t *testing.T) 
 	}
 }
 
-func TestServiceReplacementRolloutShadowsPreviousElasticsearch(t *testing.T) {
+func TestServiceReplacementSelectionUsesOnlyNewElasticsearch(t *testing.T) {
 	db := openTestDB(t)
 	repo := logsstore.NewRepo(db)
 	es := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -641,7 +606,7 @@ func TestServiceReplacementRolloutShadowsPreviousElasticsearch(t *testing.T) {
 		"query-v2": {"api_key": "query-key-v2"},
 	}, nil)
 	svc.SetHostDeviceResolver(mapHostDevices{42: 9001})
-	svc.SetRolloutEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}})
+	svc.SetConnectionEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}})
 	first, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{es.URL}, QueryEndpoint: es.URL,
 		Dataset: "ongrid.host", Namespace: "old",
@@ -650,11 +615,8 @@ func TestServiceReplacementRolloutShadowsPreviousElasticsearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save(first): %v", err)
 	}
-	if err := repo.SetBackendState(context.Background(), first.ID, logsmodel.BackendStatusVerifying, "8.16.3", "", time.Now().UTC()); err != nil {
-		t.Fatalf("SetBackendState(first): %v", err)
-	}
-	if err := repo.ActivateBackend(context.Background(), first.ID, "8.16.3", time.Now().UTC().Add(-time.Minute)); err != nil {
-		t.Fatalf("ActivateBackend(first): %v", err)
+	if err := repo.SelectBackend(context.Background(), first.ID, "8.16.3", time.Now().UTC().Add(-time.Minute)); err != nil {
+		t.Fatalf("SelectBackend(first): %v", err)
 	}
 	second, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{es.URL}, QueryEndpoint: es.URL,
@@ -664,31 +626,28 @@ func TestServiceReplacementRolloutShadowsPreviousElasticsearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save(second): %v", err)
 	}
-	if _, err := svc.Apply(context.Background(), second.ID); err != nil {
-		t.Fatalf("Apply(second): %v", err)
+	if _, err := svc.Select(context.Background(), second.ID); err != nil {
+		t.Fatalf("Select(second): %v", err)
 	}
 	overlay, err := svc.PluginRuntimeOverlay(context.Background(), 42, "logs")
 	if err != nil {
 		t.Fatalf("PluginRuntimeOverlay: %v", err)
 	}
-	if overlay["rollout_shadow"] != true || overlay["baseline_backend"] != "external_elasticsearch" {
-		t.Fatalf("replacement rollout overlay = %#v", overlay)
-	}
-	if overlay["backend_generation"] != uint64(2) || overlay["baseline_backend_generation"] != uint64(1) {
+	if overlay["backend_generation"] != uint64(2) {
 		t.Fatalf("replacement generations = %#v", overlay)
 	}
-	if overlay["baseline_elasticsearch_namespace"] != "old" || overlay["elasticsearch_namespace"] != "new" {
+	if overlay["elasticsearch_namespace"] != "new" {
 		t.Fatalf("replacement routing = %#v", overlay)
 	}
 	if _, err := svc.PluginSecretForEdge(context.Background(), 42, "logs", bizlogs.SecretSlotESAPIKey, 2); err != nil {
 		t.Fatalf("applying backend secret: %v", err)
 	}
-	if _, err := svc.PluginSecretForEdge(context.Background(), 42, "logs", bizlogs.SecretSlotESAPIKey, 1); err != nil {
-		t.Fatalf("authoritative baseline secret: %v", err)
+	if _, err := svc.PluginSecretForEdge(context.Background(), 42, "logs", bizlogs.SecretSlotESAPIKey, 1); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("old generation secret error = %v, want conflict", err)
 	}
 }
 
-func TestServiceApplyChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testing.T) {
+func TestServiceSelectChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testing.T) {
 	var requestMu sync.Mutex
 	newEndpoint := func(requests *[]string) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -717,7 +676,7 @@ func TestServiceApplyChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testin
 		"query": {"api_key": "query-key"},
 	}, nil)
 	svc.SetHostDeviceResolver(mapHostDevices{42: 9001})
-	svc.SetRolloutEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}})
+	svc.SetConnectionEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}})
 	backend, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{firstEndpoint.URL, secondEndpoint.URL}, QueryEndpoint: firstEndpoint.URL,
 		Dataset: "ongrid.host", Namespace: "prod",
@@ -726,11 +685,11 @@ func TestServiceApplyChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testin
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	applied, err := svc.Apply(context.Background(), backend.ID)
+	applied, err := svc.Select(context.Background(), backend.ID)
 	if err != nil {
-		t.Fatalf("Apply: %v", err)
+		t.Fatalf("Select: %v", err)
 	}
-	if applied.Status != logsmodel.BackendStatusDistributing || applied.DetectedVersion != "8.16.3" {
+	if applied.Status != logsmodel.BackendStatusSelected || applied.DetectedVersion != "8.16.3" {
 		t.Fatalf("applied backend = %+v", applied)
 	}
 
@@ -850,7 +809,7 @@ func TestServiceSavedConfigurationReplacementDoesNotDeleteExternalCredentialRefs
 	}
 }
 
-func TestServiceNewGenerationRetainsManagedCredentialsNeededByActiveBackend(t *testing.T) {
+func TestServiceNewGenerationRetainsManagedCredentialsNeededBySelectedBackend(t *testing.T) {
 	secrets := newManagedSecrets()
 	repo := logsstore.NewRepo(openTestDB(t))
 	svc := bizlogs.NewService(repo, secrets, nil)
@@ -862,8 +821,8 @@ func TestServiceNewGenerationRetainsManagedCredentialsNeededByActiveBackend(t *t
 	if err != nil {
 		t.Fatalf("Save(first): %v", err)
 	}
-	if err := repo.SetBackendState(t.Context(), first.ID, logsmodel.BackendStatusActive, "8.16.3", "", time.Now().UTC()); err != nil {
-		t.Fatalf("activate first backend state: %v", err)
+	if err := repo.SelectBackend(t.Context(), first.ID, "8.16.3", time.Now().UTC()); err != nil {
+		t.Fatalf("select first backend: %v", err)
 	}
 	second, err := svc.Save(t.Context(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://next-es.example.com"}, QueryEndpoint: "https://next-es.example.com",
@@ -876,7 +835,7 @@ func TestServiceNewGenerationRetainsManagedCredentialsNeededByActiveBackend(t *t
 		t.Fatalf("second generation = %d, want %d", second.Generation, first.Generation+1)
 	}
 	if secrets.apiKey(first.WriteCredentialRef) != "write-v1" || secrets.apiKey(first.QueryCredentialRef) != "query-v1" {
-		t.Fatal("active generation credentials were deleted while creating the next saved configuration")
+		t.Fatal("selected generation credentials were deleted while creating the next saved configuration")
 	}
 	if secrets.storedCount() != 4 || secrets.deleteCount() != 0 {
 		t.Fatalf("managed credentials across generations: stored=%d deleted=%d, want 4/0", secrets.storedCount(), secrets.deleteCount())
@@ -1009,7 +968,7 @@ func TestServiceRejectsUnsafeBackendInput(t *testing.T) {
 	}
 }
 
-func TestServiceApplyGuardBlocksFullCutover(t *testing.T) {
+func TestServiceSelectGuardBlocksSelection(t *testing.T) {
 	db := openTestDB(t)
 	svc := bizlogs.NewService(logsstore.NewRepo(db), mapSecrets{
 		"write": {"api_key": "write-key"},
@@ -1022,108 +981,250 @@ func TestServiceApplyGuardBlocksFullCutover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	svc.SetApplyGuard(func(context.Context) error { return errors.New("legacy-log-rule") })
-	if _, err := svc.Apply(context.Background(), backend.ID); !errors.Is(err, errs.ErrConflict) {
-		t.Fatalf("Apply error = %v, want conflict", err)
+	svc.SetSelectGuard(func(context.Context) error { return errors.New("legacy-log-rule") })
+	if _, err := svc.Select(context.Background(), backend.ID); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("Select error = %v, want conflict", err)
 	}
 	latest, err := svc.Get(context.Background())
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if latest.Status != logsmodel.BackendStatusSaved {
-		t.Fatalf("status = %q, want saved", latest.Status)
+	if latest.Status != logsmodel.BackendStatusUnselected {
+		t.Fatalf("status = %q, want unselected", latest.Status)
 	}
 }
 
-func TestServiceSaveRejectsWhileApplyIsInProgress(t *testing.T) {
-	repo := logsstore.NewRepo(openTestDB(t))
-	svc := bizlogs.NewService(repo, mapSecrets{
-		"write": {"api_key": "write-key"},
-		"query": {"api_key": "query-key"},
-	}, nil)
-	input := bizlogs.SaveInput{
-		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
-		Dataset: "ongrid.system", WriteCredentialRef: "write", QueryCredentialRef: "query",
-	}
-	backend, err := svc.Save(t.Context(), input)
-	if err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	for _, status := range []logsmodel.BackendStatus{logsmodel.BackendStatusDistributing, logsmodel.BackendStatusVerifying} {
-		if err := repo.SetBackendState(t.Context(), backend.ID, status, "8.16.3", "", time.Now().UTC()); err != nil {
-			t.Fatalf("SetBackendState(%s): %v", status, err)
-		}
-		if _, err := svc.Save(t.Context(), input); !errors.Is(err, errs.ErrConflict) {
-			t.Fatalf("Save while %s error = %v, want conflict", status, err)
-		}
-	}
-}
-
-func TestServiceSaveAndApplyRejectWhileLokiApplyIsInProgress(t *testing.T) {
+func TestServiceSelectingLokiClearsSelectedElasticsearch(t *testing.T) {
 	repo := logsstore.NewRepo(openTestDB(t))
 	svc := bizlogs.NewService(repo, mapSecrets{
 		"write": {"api_key": "write-key"},
 		"query": {"api_key": "query-key"},
 	}, &echoProbeSearcher{})
-	svc.SetHostDeviceResolver(mapHostDevices{42: 9001})
-	svc.SetRolloutEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}})
 	input := bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", Namespace: "old", WriteCredentialRef: "write", QueryCredentialRef: "query",
 	}
-	active, err := svc.Save(t.Context(), input)
+	selected, err := svc.Save(t.Context(), input)
 	if err != nil {
-		t.Fatalf("Save(active): %v", err)
+		t.Fatalf("Save: %v", err)
 	}
-	if err := repo.SetBackendState(t.Context(), active.ID, logsmodel.BackendStatusVerifying, "8.16.3", "", time.Now().UTC()); err != nil {
-		t.Fatalf("SetBackendState(active): %v", err)
+	if err := repo.SelectBackend(t.Context(), selected.ID, "8.16.3", time.Now().UTC()); err != nil {
+		t.Fatalf("SelectBackend: %v", err)
 	}
-	if err := repo.ActivateBackend(t.Context(), active.ID, "8.16.3", time.Now().UTC()); err != nil {
-		t.Fatalf("ActivateBackend: %v", err)
-	}
-	input.Namespace = "new"
-	saved, err := svc.Save(t.Context(), input)
+	lokiView, err := svc.SelectLoki(t.Context())
 	if err != nil {
-		t.Fatalf("Save(next): %v", err)
+		t.Fatalf("SelectLoki: %v", err)
 	}
-	if _, err := svc.Rollback(t.Context(), active.ID); err != nil {
-		t.Fatalf("Rollback: %v", err)
+	if lokiView.Status != logsmodel.BackendStatusUnselected || lokiView.CurrentBackend != "loki" {
+		t.Fatalf("selected Loki view = %+v", lokiView)
 	}
-	if _, err := svc.Save(t.Context(), input); !errors.Is(err, errs.ErrConflict) {
-		t.Fatalf("Save during Loki apply error = %v, want conflict", err)
+	assignments, err := repo.ListAssignments(t.Context(), selected.ID)
+	if err != nil || len(assignments) != 0 {
+		t.Fatalf("assignments after selecting Loki = %+v, %v", assignments, err)
 	}
-	if _, err := svc.Apply(t.Context(), saved.ID); !errors.Is(err, errs.ErrConflict) {
-		t.Fatalf("Apply during Loki apply error = %v, want conflict", err)
+	runtime, err := svc.SelectedRuntime(t.Context())
+	if err != nil || runtime != nil {
+		t.Fatalf("selected runtime after choosing Loki = %+v, %v", runtime, err)
 	}
 }
 
-func TestServiceFleetCutoverRejectsOfflineLogEnabledEdge(t *testing.T) {
+func TestServiceConnectionCheckIncludesOfflineLogEnabledEdgeWithoutBlockingCutover(t *testing.T) {
 	repo := logsstore.NewRepo(openTestDB(t))
+	es := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges":
+			_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer es.Close()
 	svc := bizlogs.NewService(repo, mapSecrets{
 		"write": {"api_key": "write-key"},
 		"query": {"api_key": "query-key"},
 	}, nil)
-	svc.SetRolloutEdgeInventory(fixedEdgeInventory{
-		{EdgeID: 42, Online: true},
-		{EdgeID: 43, Online: false},
+	svc.SetHostDeviceResolver(mapHostDevices{42: 9001})
+	svc.SetConnectionEdgeInventory(fixedEdgeInventory{
+		{EdgeID: 42, Name: "online-edge", Online: true},
+		{EdgeID: 43, Name: "offline-edge", Online: false},
 	})
 	backend, err := svc.Save(context.Background(), bizlogs.SaveInput{
+		WriteEndpoints: []string{es.URL}, QueryEndpoint: es.URL,
+		Dataset: "ongrid.system", WriteCredentialRef: "write", QueryCredentialRef: "query", TLSInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	applied, err := svc.Select(context.Background(), backend.ID)
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if applied.Status != logsmodel.BackendStatusSelected {
+		t.Fatalf("selection should be immediate and assignment-free: %+v", applied)
+	}
+	check, err := svc.StartConnectionCheck(context.Background(), backend.ID)
+	if err != nil {
+		t.Fatalf("StartConnectionCheck: %v", err)
+	}
+	if check.Total != 2 || check.Online != 1 || check.Pending != 1 || check.Offline != 1 || len(check.Edges) != 2 {
+		t.Fatalf("connection check = %+v", check)
+	}
+	if check.Edges[0].EdgeName != "online-edge" || check.Edges[0].Status != bizlogs.ConnectionStatusPending ||
+		check.Edges[1].EdgeName != "offline-edge" || check.Edges[1].Status != bizlogs.ConnectionStatusOffline {
+		t.Fatalf("connection check edges = %+v", check.Edges)
+	}
+	firstAssignment, err := repo.GetAssignment(context.Background(), backend.ID, 42)
+	if err != nil {
+		t.Fatalf("GetAssignment(first check): %v", err)
+	}
+	if _, err := svc.StartConnectionCheck(context.Background(), backend.ID); err != nil {
+		t.Fatalf("StartConnectionCheck(retry): %v", err)
+	}
+	retriedAssignment, err := repo.GetAssignment(context.Background(), backend.ID, 42)
+	if err != nil {
+		t.Fatalf("GetAssignment(retry): %v", err)
+	}
+	if retriedAssignment.ProbeID == "" || retriedAssignment.ProbeID == firstAssignment.ProbeID || retriedAssignment.AppliedGeneration != 0 {
+		t.Fatalf("retried assignment did not reset with a fresh probe: first=%+v retry=%+v", firstAssignment, retriedAssignment)
+	}
+	if err := svc.MarkApplied(context.Background(), 42, backend.Generation, retriedAssignment.ProbeID, "dial Elasticsearch: timeout"); err != nil {
+		t.Fatalf("MarkApplied(connection failure): %v", err)
+	}
+	failed, err := svc.ConnectionCheck(context.Background(), backend.ID)
+	if err != nil {
+		t.Fatalf("ConnectionCheck(failed): %v", err)
+	}
+	if failed.Failed != 1 || failed.Offline != 1 || failed.Edges[0].LastError != "dial Elasticsearch: timeout" {
+		t.Fatalf("failed connection check = %+v", failed)
+	}
+	stillSelected, err := repo.GetBackend(context.Background(), backend.ID)
+	if err != nil || stillSelected.Status != logsmodel.BackendStatusSelected {
+		t.Fatalf("connection failure changed the selected backend: %+v, %v", stillSelected, err)
+	}
+}
+
+func TestServiceCurrentConnectionCheckVerifiesBuiltinLokiWithoutElasticsearchBackend(t *testing.T) {
+	repo := logsstore.NewRepo(openTestDB(t))
+	loki := &echoProbeSearcher{}
+	svc := bizlogs.NewService(repo, nil, loki)
+	svc.SetHostDeviceResolver(mapHostDevices{42: 9001})
+	svc.SetConnectionEdgeInventory(fixedEdgeInventory{
+		{EdgeID: 42, Name: "online-edge", Online: true},
+		{EdgeID: 43, Name: "offline-edge", Online: false},
+	})
+	notifier := &countingNotifier{}
+	svc.SetBackendChangeNotifier(notifier)
+
+	checking, err := svc.StartConnectionCheck(t.Context(), 0)
+	if err != nil {
+		t.Fatalf("StartConnectionCheck(current Loki): %v", err)
+	}
+	if checking.BackendID != 0 || checking.Backend != "loki" || checking.Generation == 0 ||
+		checking.Online != 1 || checking.Pending != 1 || checking.Verified != 0 || checking.Offline != 1 {
+		t.Fatalf("initial Loki connection check = %+v", checking)
+	}
+	if notifier.count() != 1 {
+		t.Fatalf("Loki connection check notifications = %d, want 1", notifier.count())
+	}
+	overlay, err := svc.PluginRuntimeOverlay(t.Context(), 42, "logs")
+	if err != nil {
+		t.Fatalf("PluginRuntimeOverlay(Loki check): %v", err)
+	}
+	probeID, _ := overlay["log_probe_id"].(string)
+	if overlay["backend"] != "builtin_loki" || overlay["backend_generation"] != checking.Generation || probeID == "" {
+		t.Fatalf("Loki connection check overlay = %#v", overlay)
+	}
+	if err := svc.MarkApplied(t.Context(), 42, checking.Generation, probeID, ""); err != nil {
+		t.Fatalf("MarkApplied(Loki check): %v", err)
+	}
+	verified, err := svc.ConnectionCheck(t.Context(), 0)
+	if err != nil {
+		t.Fatalf("ConnectionCheck(current Loki): %v", err)
+	}
+	if verified.Verified != 1 || verified.Pending != 0 || verified.Offline != 1 || !verified.AllOnlineVerified {
+		t.Fatalf("verified Loki connection check = %+v", verified)
+	}
+
+	retried, err := svc.StartConnectionCheck(t.Context(), 0)
+	if err != nil {
+		t.Fatalf("StartConnectionCheck(retry current Loki): %v", err)
+	}
+	retryOverlay, err := svc.PluginRuntimeOverlay(t.Context(), 42, "logs")
+	if err != nil {
+		t.Fatalf("PluginRuntimeOverlay(retry Loki check): %v", err)
+	}
+	if retried.Generation == checking.Generation || retryOverlay["log_probe_id"] == probeID {
+		t.Fatalf("Loki retry did not issue a fresh generation/probe: first=%+v retry=%+v", checking, retried)
+	}
+}
+
+func TestServiceSelectionWithNoOnlineEdgesUsesManagerProbe(t *testing.T) {
+	repo := logsstore.NewRepo(openTestDB(t))
+	es := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges":
+			_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer es.Close()
+
+	svc := bizlogs.NewService(repo, mapSecrets{
+		"write": {"api_key": "write-key"},
+		"query": {"api_key": "query-key"},
+	}, nil)
+	svc.SetConnectionEdgeInventory(fixedEdgeInventory{{EdgeID: 43, Online: false}})
+	backend, err := svc.Save(t.Context(), bizlogs.SaveInput{
+		WriteEndpoints: []string{es.URL}, QueryEndpoint: es.URL,
+		Dataset: "ongrid.system", WriteCredentialRef: "write", QueryCredentialRef: "query", TLSInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	applied, err := svc.Select(t.Context(), backend.ID)
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if applied.Status != logsmodel.BackendStatusSelected || applied.CurrentBackend != string(logsmodel.BackendTypeElasticsearch) {
+		t.Fatalf("manager-probed selection = %+v", applied)
+	}
+}
+
+func TestServiceLokiSelectionWithNoOnlineEdgesDoesNotBlock(t *testing.T) {
+	repo := logsstore.NewRepo(openTestDB(t))
+	svc := bizlogs.NewService(repo, mapSecrets{
+		"write": {"api_key": "write-key"},
+		"query": {"api_key": "query-key"},
+	}, &echoProbeSearcher{})
+	svc.SetConnectionEdgeInventory(fixedEdgeInventory{{EdgeID: 43, Online: false}})
+	backend, err := svc.Save(t.Context(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteCredentialRef: "write", QueryCredentialRef: "query",
 	})
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if _, err := svc.Apply(context.Background(), backend.ID); !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), "43") {
-		t.Fatalf("Apply error = %v, want offline Edge conflict", err)
+	if err := repo.SelectBackend(t.Context(), backend.ID, "8.16.3", time.Now().UTC()); err != nil {
+		t.Fatalf("SelectBackend: %v", err)
 	}
-	latest, err := repo.GetBackend(context.Background(), backend.ID)
-	if err != nil || latest.Status != logsmodel.BackendStatusSaved {
-		t.Fatalf("offline fleet check mutated backend: %+v, %v", latest, err)
+
+	lokiView, err := svc.SelectLoki(t.Context())
+	if err != nil {
+		t.Fatalf("SelectLoki: %v", err)
+	}
+	if lokiView.Status != logsmodel.BackendStatusUnselected || lokiView.CurrentBackend != "loki" {
+		t.Fatalf("offline fleet Loki selection = %+v", lokiView)
 	}
 }
 
-func TestServiceCancelledSavedConfigurationDoesNotHideActiveBackend(t *testing.T) {
+func TestServiceUnselectedConfigurationKeepsSelectedBackendMetadata(t *testing.T) {
 	repo := logsstore.NewRepo(openTestDB(t))
 	svc := bizlogs.NewService(repo, mapSecrets{
 		"write": {"api_key": "write-key"},
@@ -1136,11 +1237,8 @@ func TestServiceCancelledSavedConfigurationDoesNotHideActiveBackend(t *testing.T
 	if err != nil {
 		t.Fatalf("Save(first): %v", err)
 	}
-	if err := repo.SetBackendState(context.Background(), first.ID, logsmodel.BackendStatusVerifying, "8.16.3", "", time.Now().UTC()); err != nil {
-		t.Fatalf("SetBackendState(first): %v", err)
-	}
-	if err := repo.ActivateBackend(context.Background(), first.ID, "8.16.3", time.Now().UTC()); err != nil {
-		t.Fatalf("ActivateBackend(first): %v", err)
+	if err := repo.SelectBackend(context.Background(), first.ID, "8.16.3", time.Now().UTC()); err != nil {
+		t.Fatalf("SelectBackend(first): %v", err)
 	}
 	second, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
@@ -1152,12 +1250,9 @@ func TestServiceCancelledSavedConfigurationDoesNotHideActiveBackend(t *testing.T
 	if second.CurrentBackend != "elasticsearch" || second.CurrentBackendID != first.ID {
 		t.Fatalf("Save(second) current backend = %q #%d, want elasticsearch #%d", second.CurrentBackend, second.CurrentBackendID, first.ID)
 	}
-	if _, err := svc.Rollback(context.Background(), second.ID); err != nil {
-		t.Fatalf("Rollback(cancel saved configuration): %v", err)
-	}
 	visible, err := svc.Get(context.Background())
-	if err != nil || visible.ID != first.ID || visible.Status != logsmodel.BackendStatusActive || visible.CurrentBackend != "elasticsearch" || visible.CurrentBackendID != first.ID {
-		t.Fatalf("Get after saved configuration cancellation = %+v, %v", visible, err)
+	if err != nil || visible.ID != second.ID || visible.Status != logsmodel.BackendStatusUnselected || visible.CurrentBackend != "elasticsearch" || visible.CurrentBackendID != first.ID {
+		t.Fatalf("Get with an unselected configuration = %+v, %v", visible, err)
 	}
 }
 

@@ -71,7 +71,7 @@ func (s *Service) Search(ctx context.Context, req logquery.SearchRequest) (*logq
 		phaseReq := req
 		// Query phases use the same (start, end] ownership convention as
 		// Count. Backend search APIs accept an inclusive lower bound, so move
-		// it by one nanosecond to prevent duplicates at cutover/rollback.
+		// it by one nanosecond to prevent duplicates at a backend switch.
 		phaseReq.Start, phaseReq.End = phase.start.Add(time.Nanosecond), phase.end
 		phaseReq.Limit, phaseReq.Cursor = remaining, backendCursor
 		searcher, err := s.searcherForPhase(ctx, phase)
@@ -113,7 +113,7 @@ func (s *Service) Search(ctx context.Context, req logquery.SearchRequest) (*logq
 	return result, nil
 }
 
-// Count uses the same single active backend as Search. Data retained in an
+// Count uses the same single selected backend as Search. Data retained in an
 // inactive backend is intentionally outside the product query surface.
 func (s *Service) Count(ctx context.Context, req logquery.SearchRequest) (uint64, error) {
 	if err := req.NormalizeAndValidate(); err != nil {
@@ -196,7 +196,7 @@ func (s *Service) Histogram(ctx context.Context, req logquery.SearchRequest, int
 		return nil, err
 	}
 	if len(phases) != 1 {
-		return nil, errors.New("logquery: histogram requires exactly one active backend")
+		return nil, errors.New("logquery: histogram requires exactly one selected backend")
 	}
 	searcher, err := s.searcherForPhase(ctx, phases[0])
 	if err != nil {
@@ -240,14 +240,14 @@ func (s *Service) Histogram(ctx context.Context, req logquery.SearchRequest, int
 }
 
 func (s *Service) plan(ctx context.Context, start, end time.Time, _ logquery.SortDirection) ([]queryPhase, string, error) {
-	backend, err := s.repo.ActiveBackend(ctx)
+	backend, err := s.repo.SelectedBackend(ctx)
 	if err != nil && !errors.Is(err, apperrs.ErrNotFound) {
 		return nil, "", err
 	}
 	if errors.Is(err, apperrs.ErrNotFound) {
 		backend = nil
 	}
-	phases := []queryPhase{buildActiveQueryPhase(start, end, backend)}
+	phases := []queryPhase{buildSelectedQueryPhase(start, end, backend)}
 	planSum, err := queryPlanSum(phases)
 	if err != nil {
 		return nil, "", err
@@ -255,7 +255,7 @@ func (s *Service) plan(ctx context.Context, start, end time.Time, _ logquery.Sor
 	return phases, planSum, nil
 }
 
-func buildActiveQueryPhase(start, end time.Time, backend *model.Backend) queryPhase {
+func buildSelectedQueryPhase(start, end time.Time, backend *model.Backend) queryPhase {
 	if backend == nil {
 		return queryPhase{name: "loki", start: start, end: end}
 	}
