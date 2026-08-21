@@ -286,7 +286,7 @@ func LookupField(name string) (FieldDefinition, bool) {
 	case "source_id":
 		return field(name, "keyword", "ongrid_source", "resource.attributes.ongrid_source"), true
 	case "level":
-		return field(name, "keyword", "level", "resource.attributes.level"), true
+		return structuredField(name, "keyword", "level", "severity_text"), true
 	case "file":
 		return structuredField(name, "keyword", "filename", "resource.attributes.filename"), true
 	case "unit":

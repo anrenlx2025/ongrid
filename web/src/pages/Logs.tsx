@@ -6,7 +6,6 @@ import {
   Braces,
   Check,
   ChevronDown,
-  ChevronRight,
   Clock,
   Download,
   FileSearch,
@@ -24,7 +23,6 @@ import {
   Table2,
   Undo2,
   WrapText,
-  X,
 } from 'lucide-react';
 import {
   Bar,
@@ -36,7 +34,6 @@ import {
   YAxis,
 } from 'recharts';
 import {
-  getLogContext,
   getLogHistogram,
   listLogFieldValues,
   listLogFields,
@@ -69,6 +66,7 @@ const RANGE_PRESETS = [
 const PAGE_LIMIT = 200;
 const MAX_EXPORT_ROWS = 1000;
 const LIVE_INTERVAL_MS = 5000;
+const FACET_VALUE_CONCURRENCY = 2;
 const INPUT = 'h-9 w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none';
 
 type ScopeKey =
@@ -125,29 +123,55 @@ const DEFAULT_VISIBLE_FIELDS: DisplayField[] = ['level', 'cluster_id', 'device_i
 
 const DISPLAY_FIELD_ALIASES: Record<string, DisplayField> = {
   cluster_name: 'cluster_id',
+  detected_level: 'level',
   'service.name': 'service_name',
   'k8s.namespace.name': 'namespace',
+  k8s_namespace_name: 'namespace',
   'k8s.deployment.name': 'workload',
+  k8s_deployment_name: 'workload',
   'k8s.statefulset.name': 'workload',
+  k8s_statefulset_name: 'workload',
   'k8s.daemonset.name': 'workload',
+  k8s_daemonset_name: 'workload',
   'k8s.job.name': 'workload',
+  k8s_job_name: 'workload',
   'k8s.cronjob.name': 'workload',
+  k8s_cronjob_name: 'workload',
   'k8s.pod.name': 'pod',
+  k8s_pod_name: 'pod',
   'k8s.container.name': 'container',
+  k8s_container_name: 'container',
   'k8s.node.name': 'node',
+  k8s_node_name: 'node',
   ongrid_source: 'source_id',
   filename: 'file',
   'log.file.path': 'file',
+  log_file_path: 'file',
   'systemd.unit': 'unit',
+  systemd_unit: 'unit',
   _SYSTEMD_UNIT: 'unit',
 };
+
+const HIDDEN_DISPLAY_FIELDS = new Set([
+  'backend',
+  'message',
+  'log_iostream',
+  'logtag',
+  'observed_timestamp',
+]);
 
 function canonicalDisplayField(name: string): DisplayField | null {
   const alias = DISPLAY_FIELD_ALIASES[name];
   if (alias) return alias;
-  if (name.startsWith('k8s.') || name.startsWith('ongrid.')) return null;
-  const field = name;
-  return field === 'backend' || field === 'message' || field.startsWith('data_stream.') ? null : field;
+  if (
+    name.startsWith('k8s.')
+    || name.startsWith('k8s_')
+    || name.startsWith('ongrid.')
+    || name.startsWith('ongrid_')
+    || name.startsWith('data_stream.')
+    || name.startsWith('data_stream_')
+  ) return null;
+  return HIDDEN_DISPLAY_FIELDS.has(name) ? null : name;
 }
 
 function buildDisplayFields(fields: LogField[], records: LogRecord[]): DisplayFieldOption[] {
@@ -274,14 +298,19 @@ function formatLogDateTime(timestamp: Date): string {
   return `${date} ${formatLogTime(timestamp)}`;
 }
 
-function displayFieldValue(record: LogRecord, field: DisplayField, deviceLabels?: ReadonlyMap<string, string>): string {
+function displayFieldValue(
+  record: LogRecord,
+  field: DisplayField,
+  deviceLabels?: ReadonlyMap<string, string>,
+  clusterLabels?: ReadonlyMap<string, string>,
+): string {
   switch (field) {
     case 'level':
-      return record.severity_text || scopeValue(record, 'level');
+      return record.severity_text || scopeValue(record, 'level', 'detected_level');
     case 'cluster_id': {
       const id = scopeValue(record, 'cluster_id');
       const name = scopeValue(record, 'cluster_name');
-      return name && id ? `${name} (#${id})` : name || id;
+      return name && id ? `${name} (#${id})` : name || clusterLabels?.get(id) || id;
     }
     case 'device_id': {
       const id = scopeValue(record, 'device_id');
@@ -290,21 +319,21 @@ function displayFieldValue(record: LogRecord, field: DisplayField, deviceLabels?
     case 'service_name':
       return scopeValue(record, 'service.name', 'service_name');
     case 'namespace':
-      return scopeValue(record, 'k8s.namespace.name', 'namespace');
+      return scopeValue(record, 'k8s.namespace.name', 'k8s_namespace_name', 'namespace');
     case 'workload':
-      return scopeValue(record, 'workload', 'k8s.deployment.name', 'k8s.statefulset.name', 'k8s.daemonset.name', 'k8s.job.name', 'k8s.cronjob.name');
+      return scopeValue(record, 'workload', 'k8s.deployment.name', 'k8s_deployment_name', 'k8s.statefulset.name', 'k8s_statefulset_name', 'k8s.daemonset.name', 'k8s_daemonset_name', 'k8s.job.name', 'k8s_job_name', 'k8s.cronjob.name', 'k8s_cronjob_name');
     case 'pod':
-      return scopeValue(record, 'k8s.pod.name', 'pod');
+      return scopeValue(record, 'k8s.pod.name', 'k8s_pod_name', 'pod');
     case 'container':
-      return scopeValue(record, 'k8s.container.name', 'container');
+      return scopeValue(record, 'k8s.container.name', 'k8s_container_name', 'container');
     case 'node':
-      return scopeValue(record, 'k8s.node.name', 'node');
+      return scopeValue(record, 'k8s.node.name', 'k8s_node_name', 'node');
     case 'source_id':
       return scopeValue(record, 'ongrid_source', 'source_id');
     case 'file':
-      return scopeValue(record, 'filename', 'file', 'log.file.path');
+      return scopeValue(record, 'filename', 'file', 'log.file.path', 'log_file_path');
     case 'unit':
-      return scopeValue(record, 'unit', 'systemd.unit');
+      return scopeValue(record, 'unit', 'systemd.unit', 'systemd_unit', '_SYSTEMD_UNIT');
     case 'trace_id':
       return record.trace_id ?? '';
     case 'span_id':
@@ -317,6 +346,12 @@ function displayFieldValue(record: LogRecord, field: DisplayField, deviceLabels?
 function edgeDeviceLabel(edge: Edge): string {
   const id = edge.device_id == null ? '' : String(edge.device_id);
   const name = (edge.device_name || edge.name).trim();
+  return name && id ? `${name} (#${id})` : name || id;
+}
+
+function topologyNodeLabel(node: TopologyNode): string {
+  const id = String(node.id);
+  const name = node.name.trim();
   return name && id ? `${name} (#${id})` : name || id;
 }
 
@@ -359,16 +394,12 @@ export default function LogsPage() {
   const [denseRows, setDenseRows] = useState(false);
   const [fieldSearch, setFieldSearch] = useState('');
   const [visibleFields, setVisibleFields] = useState<DisplayField[]>([]);
-  const [selected, setSelected] = useState<LogRecord | null>(null);
-  const [contextRows, setContextRows] = useState<LogRecord[]>([]);
-  const [contextLoading, setContextLoading] = useState(false);
   const requestSeq = useRef(0);
-  const contextRequestSeq = useRef(0);
   const paginationGeneration = useRef(0);
   const pageRequestRef = useRef<LogSearchRequest | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
   const pageAbortRef = useRef<AbortController | null>(null);
-  const contextAbortRef = useRef<AbortController | null>(null);
+  const facetAbortRef = useRef<AbortController | null>(null);
   const resultScrollRef = useRef<HTMLElement>(null);
   const histogramRef = useRef<HTMLDivElement>(null);
   const histogramPointerID = useRef<number | null>(null);
@@ -404,6 +435,10 @@ export default function LogsPage() {
       .filter((edge) => edge.device_id != null)
       .map((edge) => [String(edge.device_id), edgeDeviceLabel(edge)]),
   ), [edges]);
+
+  const clusterLabels = useMemo(() => new Map(
+    clusters.map((cluster) => [String(cluster.id), topologyNodeLabel(cluster)]),
+  ), [clusters]);
 
   const selectedDeviceIDs = useMemo(() => {
     if (deviceID) return [Number(deviceID)].filter((id) => Number.isInteger(id) && id > 0);
@@ -538,7 +573,7 @@ export default function LogsPage() {
   useEffect(() => () => {
     searchAbortRef.current?.abort();
     pageAbortRef.current?.abort();
-    contextAbortRef.current?.abort();
+    facetAbortRef.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -574,79 +609,47 @@ export default function LogsPage() {
     const timeWindow = resolveWindow();
     if (!timeWindow) return;
     let cancelled = false;
+    facetAbortRef.current?.abort();
+    const controller = new AbortController();
+    facetAbortRef.current = controller;
     void (async () => {
       try {
-        const fields = await listLogFields({ start: timeWindow.start, end: timeWindow.end });
+        const fields = await listLogFields({ start: timeWindow.start, end: timeWindow.end }, controller.signal);
         if (!cancelled) setLogFields(fields);
+        if (!advanced || controller.signal.aborted) return;
         const names = new Set(fields.filter((field) => field.aggregatable).map((field) => field.name));
         const requested = ['service_name', 'source_id', 'level', 'file', 'unit'].filter((name) => names.has(name));
-        const values = await Promise.all(requested.map(async (field) => {
-          try {
-            return [field, await listLogFieldValues({ field, start: timeWindow.start, end: timeWindow.end, limit: 100 })] as const;
-          } catch {
-            return null;
-          }
-        }));
+        const values: Array<readonly [string, string[]]> = [];
+        for (let index = 0; index < requested.length && !controller.signal.aborted; index += FACET_VALUE_CONCURRENCY) {
+          const batch = requested.slice(index, index + FACET_VALUE_CONCURRENCY);
+          const entries = await Promise.all(batch.map(async (field) => {
+            try {
+              const result = await listLogFieldValues(
+                { field, start: timeWindow.start, end: timeWindow.end, limit: 100 },
+                controller.signal,
+              );
+              return [field, result] as const;
+            } catch {
+              return null;
+            }
+          }));
+          values.push(...entries.filter((entry): entry is readonly [string, string[]] => entry != null));
+        }
         if (!cancelled) {
-          setFieldValues(Object.fromEntries(values.filter((entry): entry is readonly [string, string[]] => entry != null)));
+          setFieldValues(Object.fromEntries(values));
         }
       } catch {
         // Facet discovery is best-effort; free-form filters remain usable.
+      } finally {
+        if (facetAbortRef.current === controller) facetAbortRef.current = null;
       }
     })();
-    return () => { cancelled = true; };
-  }, [resolveWindow, refreshKey]);
-
-  const openContext = async (record: LogRecord) => {
-    const seq = ++contextRequestSeq.current;
-    contextAbortRef.current?.abort();
-    const controller = new AbortController();
-    contextAbortRef.current = controller;
-    setSelected(record);
-    setContextLoading(true);
-    setContextRows([]);
-    try {
-      const scope: LogScope = {};
-      const device = scopeValue(record, 'device_id');
-      const cluster = scopeValue(record, 'cluster_id');
-      const namespace = scopeValue(record, 'namespace', 'k8s.namespace.name');
-      const workload = scopeValue(record, 'workload', 'k8s.deployment.name', 'k8s.statefulset.name', 'k8s.daemonset.name', 'k8s.job.name', 'k8s.cronjob.name');
-      const pod = scopeValue(record, 'pod', 'k8s.pod.name');
-      const container = scopeValue(record, 'container', 'k8s.container.name');
-      const node = scopeValue(record, 'node', 'k8s.node.name');
-      const service = scopeValue(record, 'service_name', 'service.name');
-      const source = scopeValue(record, 'source_id', 'ongrid_source');
-      const file = scopeValue(record, 'file', 'filename', 'log.file.path');
-      const unit = scopeValue(record, 'unit', 'systemd.unit');
-      if (device && Number(device) > 0) scope.device_ids = [Number(device)];
-      if (cluster) scope.cluster_ids = [cluster];
-      if (namespace) scope.namespaces = [namespace];
-      if (workload) scope.workloads = [workload];
-      if (pod) scope.pods = [pod];
-      if (container) scope.containers = [container];
-      if (node) scope.nodes = [node];
-      if (service) scope.service_names = [service];
-      if (source) scope.source_ids = [source];
-      if (file) scope.files = [file];
-      if (unit) scope.units = [unit];
-      const rows = await getLogContext({ timestamp: record.timestamp, scope, before: 30, after: 30 }, controller.signal);
-      if (seq === contextRequestSeq.current) setContextRows(rows);
-    } catch (err) {
-      if (seq === contextRequestSeq.current && (err as Error).name !== 'AbortError') setError(errorMessage(err));
-    } finally {
-      if (contextAbortRef.current === controller) contextAbortRef.current = null;
-      if (seq === contextRequestSeq.current) setContextLoading(false);
-    }
-  };
-
-  const closeContext = () => {
-    ++contextRequestSeq.current;
-    contextAbortRef.current?.abort();
-    contextAbortRef.current = null;
-    setSelected(null);
-    setContextRows([]);
-    setContextLoading(false);
-  };
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (facetAbortRef.current === controller) facetAbortRef.current = null;
+    };
+  }, [advanced, resolveWindow, refreshKey]);
 
   const exportJSONL = () => {
     const rows = records.slice(0, MAX_EXPORT_ROWS);
@@ -811,7 +814,7 @@ export default function LogsPage() {
           <div className="flex flex-wrap items-center gap-2">
             <RoleSelect omitUnknown value={role} onChange={(value) => setRole(value as '' | EdgeRole)} className="h-9 min-w-[150px] shrink-0" />
             <ToolbarSelect label={tr('设备', 'Device')} value={deviceID} onChange={setDeviceID} options={edges.filter((edge) => edge.device_id != null).map((edge) => ({ value: String(edge.device_id), label: edgeDeviceLabel(edge) }))} empty={tr('全部设备', 'All devices')} wide />
-            <ToolbarSelect label={tr('集群', 'Cluster')} value={scopeDraft.cluster_ids} onChange={selectCluster} options={clusters.map((cluster) => ({ value: String(cluster.id), label: `${cluster.name} (#${cluster.id})` }))} empty={tr('全部集群', 'All clusters')} wide />
+            <ToolbarSelect label={tr('集群', 'Cluster')} value={scopeDraft.cluster_ids} onChange={selectCluster} options={clusters.map((cluster) => ({ value: String(cluster.id), label: topologyNodeLabel(cluster) }))} empty={tr('全部集群', 'All clusters')} wide />
             <button type="button" onClick={() => setAdvanced((value) => !value)} className={cn('inline-flex h-9 items-center gap-1 rounded-md border px-2.5 text-xs', advanced ? 'border-indigo-500/50 bg-indigo-500/10 text-indigo-300' : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200')}>
               <ListFilter size={12} /><span>{tr('更多筛选', 'More filters')}</span><ChevronDown size={11} className={cn('transition-transform', advanced && 'rotate-180')} />
             </button>
@@ -974,10 +977,10 @@ export default function LogsPage() {
             </div>
           )}
           {viewMode === 'raw' ? (
-            <div className={cn('divide-y divide-zinc-800/40 font-mono text-[11px] leading-snug', !wrapLines && 'overflow-x-auto')}>
-              {records.map((record, index) => <LogRow key={recordKey(record)} index={index + 1} record={record} selected={selected != null && recordKey(selected) === recordKey(record)} visibleFields={visibleFields} deviceLabels={deviceLabels} wrap={wrapLines} dense={denseRows} onContext={() => void openContext(record)} />)}
+            <div role="list" className={cn('divide-y divide-zinc-800/40 font-mono text-[11px] leading-snug', !wrapLines && 'overflow-x-auto')}>
+              {records.map((record, index) => <LogRow key={recordKey(record)} index={index + 1} record={record} visibleFields={visibleFields} deviceLabels={deviceLabels} clusterLabels={clusterLabels} wrap={wrapLines} dense={denseRows} />)}
             </div>
-          ) : <LogTable records={records} visibleFields={visibleFields} deviceLabels={deviceLabels} wrap={wrapLines} dense={denseRows} selected={selected} onContext={(record) => void openContext(record)} tr={tr} />}
+          ) : <LogTable records={records} visibleFields={visibleFields} deviceLabels={deviceLabels} clusterLabels={clusterLabels} wrap={wrapLines} dense={denseRows} tr={tr} />}
           {nextCursor && (
             <div className="flex items-center justify-center gap-3 border-t border-zinc-800/60 py-3 text-[11px] text-zinc-500">
               <span>{tr(`已显示 ${records.length} 条`, `${records.length} shown`)}</span>
@@ -988,21 +991,6 @@ export default function LogsPage() {
           )}
         </section>
 
-        {selected && (
-          <aside className="w-[410px] shrink-0 overflow-y-auto border-l border-zinc-800 bg-zinc-950/80">
-            <div className="sticky top-0 z-10 flex items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4 py-3">
-              <div><p className="text-xs font-medium text-zinc-200">{tr('上下文日志', 'Log context')}</p><p className="mt-0.5 text-[10px] text-zinc-600">{new Date(selected.timestamp).toLocaleString()}</p></div>
-              <button type="button" aria-label={tr('关闭上下文', 'Close context')} onClick={closeContext} className="rounded p-1 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"><X size={14} /></button>
-            </div>
-            <div className="p-3">
-              {contextLoading ? <div className="flex h-24 items-center justify-center text-xs text-zinc-500"><Loader2 size={14} className="mr-2 animate-spin" />{tr('读取前后文…', 'Loading context…')}</div> : (
-                <div className="space-y-1 font-mono text-[11px]">
-                  {contextRows.map((record) => <ContextRow key={recordKey(record)} record={record} active={recordKey(record) === recordKey(selected)} />)}
-                </div>
-              )}
-            </div>
-          </aside>
-        )}
       </div>
     </main>
   );
@@ -1065,26 +1053,25 @@ function FieldPanel({ fields, visibleFields, search, onSearch, onToggle, tr }: {
   );
 }
 
-function LogRow({ index, record, selected, visibleFields, deviceLabels, wrap, dense, onContext }: { index: number; record: LogRecord; selected: boolean; visibleFields: DisplayField[]; deviceLabels: ReadonlyMap<string, string>; wrap: boolean; dense: boolean; onContext: () => void }) {
+function LogRow({ index, record, visibleFields, deviceLabels, clusterLabels, wrap, dense }: { index: number; record: LogRecord; visibleFields: DisplayField[]; deviceLabels: ReadonlyMap<string, string>; clusterLabels: ReadonlyMap<string, string>; wrap: boolean; dense: boolean }) {
   const timestamp = new Date(record.timestamp);
   const recordLevel = record.severity_text || scopeValue(record, 'level');
   const level = recordLevel.toLowerCase();
   const color = /fatal|error|critical|panic/.test(level) ? 'bg-red-500' : /warn/.test(level) ? 'bg-amber-500' : /info|notice/.test(level) ? 'bg-sky-500' : 'bg-zinc-600';
-  const fieldValues = visibleFields.map((field) => ({ field, value: displayFieldValue(record, field, deviceLabels) })).filter((item) => item.value);
+  const fieldValues = visibleFields.map((field) => ({ field, value: displayFieldValue(record, field, deviceLabels, clusterLabels) })).filter((item) => item.value);
   return (
-    <button type="button" onClick={onContext} className={cn('group grid gap-2 px-3 text-left hover:bg-zinc-900/60', wrap ? 'w-full grid-cols-[36px_166px_minmax(0,1fr)]' : 'w-max min-w-full grid-cols-[36px_166px_max-content]', dense ? 'py-1' : 'py-2', selected && 'bg-indigo-500/10 ring-1 ring-inset ring-indigo-500/40')}>
+    <div role="listitem" className={cn('grid cursor-text select-text gap-2 px-3 text-left hover:bg-zinc-900/60', wrap ? 'w-full grid-cols-[36px_166px_minmax(0,1fr)]' : 'w-max min-w-full grid-cols-[36px_166px_max-content]', dense ? 'py-1' : 'py-2')}>
       <span className="pt-px text-right tabular-nums text-zinc-700">{index}</span>
       <span className="flex items-start gap-2 whitespace-nowrap tabular-nums text-zinc-600"><span className={cn('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', color)} />{formatLogDateTime(timestamp)}</span>
       <span className={cn('text-zinc-200', wrap ? 'min-w-0 whitespace-pre-wrap break-words' : 'whitespace-nowrap pr-4')}>
         {fieldValues.map((item) => <Tag key={item.field} label={DISPLAY_FIELD_LABELS[item.field]?.zh ?? item.field} value={item.value} tone={item.field === 'level' ? level : ''} />)}
         <span>{record.message}</span>
-        <span className="ml-2 hidden items-center gap-0.5 text-zinc-500 group-hover:inline-flex"><ChevronRight size={10} />context</span>
       </span>
-    </button>
+    </div>
   );
 }
 
-function LogTable({ records, visibleFields, deviceLabels, wrap, dense, selected, onContext, tr }: { records: LogRecord[]; visibleFields: DisplayField[]; deviceLabels: ReadonlyMap<string, string>; wrap: boolean; dense: boolean; selected: LogRecord | null; onContext: (record: LogRecord) => void; tr: (zh: string, en: string) => string }) {
+function LogTable({ records, visibleFields, deviceLabels, clusterLabels, wrap, dense, tr }: { records: LogRecord[]; visibleFields: DisplayField[]; deviceLabels: ReadonlyMap<string, string>; clusterLabels: ReadonlyMap<string, string>; wrap: boolean; dense: boolean; tr: (zh: string, en: string) => string }) {
   return (
     <div className="min-w-full overflow-x-auto">
       <table className={cn('min-w-full border-collapse text-left font-mono text-[11px]', wrap ? 'w-full' : 'w-max')}>
@@ -1098,10 +1085,10 @@ function LogTable({ records, visibleFields, deviceLabels, wrap, dense, selected,
         </thead>
         <tbody className="divide-y divide-zinc-800/40">
           {records.map((record, index) => (
-            <tr key={recordKey(record)} role="button" tabIndex={0} onClick={() => onContext(record)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onContext(record); }} className={cn('cursor-pointer text-zinc-400 hover:bg-zinc-900/60', selected != null && recordKey(selected) === recordKey(record) && 'bg-indigo-500/10')}>
+            <tr key={recordKey(record)} className="cursor-text select-text text-zinc-400 hover:bg-zinc-900/60">
               <td className={cn('px-3 text-right text-zinc-700', dense ? 'py-1' : 'py-2')}>{index + 1}</td>
               <td className={cn('whitespace-nowrap px-3 tabular-nums text-zinc-600', dense ? 'py-1' : 'py-2')}>{formatLogDateTime(new Date(record.timestamp))}</td>
-              {visibleFields.map((field) => <td key={field} className={cn('px-3', dense ? 'py-1' : 'py-2', wrap ? 'max-w-48 break-words' : 'whitespace-nowrap')}>{displayFieldValue(record, field, deviceLabels) || '—'}</td>)}
+              {visibleFields.map((field) => <td key={field} className={cn('px-3', dense ? 'py-1' : 'py-2', wrap ? 'max-w-48 break-words' : 'whitespace-nowrap')}>{displayFieldValue(record, field, deviceLabels, clusterLabels) || '—'}</td>)}
               <td className={cn('px-3 text-zinc-200', dense ? 'py-1' : 'py-2', wrap ? 'whitespace-pre-wrap break-words' : 'whitespace-nowrap')}>{record.message}</td>
             </tr>
           ))}
@@ -1109,10 +1096,6 @@ function LogTable({ records, visibleFields, deviceLabels, wrap, dense, selected,
       </table>
     </div>
   );
-}
-
-function ContextRow({ record, active }: { record: LogRecord; active: boolean }) {
-  return <div className={cn('rounded border-l-2 px-2 py-1.5', active ? 'border-sky-400 bg-sky-500/10 text-zinc-100' : 'border-zinc-800 text-zinc-400')}><span className="mr-2 text-zinc-600">{new Date(record.timestamp).toLocaleTimeString(undefined, { hour12: false })}</span><span className="break-words">{record.message}</span></div>;
 }
 
 function Tag({ label, value, tone = '' }: { label: string; value: string; tone?: string }) {

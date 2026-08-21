@@ -16,7 +16,13 @@ import (
 
 type stubBackendService struct {
 	saved   *bizlogs.SaveInput
+	tested  bool
 	applied bool
+}
+
+func (s *stubBackendService) Test(context.Context, uint64) (*bizlogs.BackendTestResult, error) {
+	s.tested = true
+	return &bizlogs.BackendTestResult{Status: "ok", DetectedVersion: "8.16.3"}, nil
 }
 
 func (s *stubBackendService) Get(context.Context) (*bizlogs.BackendView, error) {
@@ -116,6 +122,20 @@ func TestApplyBackendCallsService(t *testing.T) {
 	}
 	if !svc.applied {
 		t.Fatal("Apply was not called")
+	}
+}
+
+func TestTestBackendCallsServiceWithoutApply(t *testing.T) {
+	svc := &stubBackendService{}
+	router := backendTestRouter(NewHandlerWithServices(nil, nil, svc))
+	req := adminBackendRequest(http.MethodPost, "/v1/logs/backend/7/test", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !svc.tested || svc.applied {
+		t.Fatalf("tested=%v applied=%v", svc.tested, svc.applied)
 	}
 }
 

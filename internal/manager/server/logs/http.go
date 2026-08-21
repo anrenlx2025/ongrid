@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -30,7 +31,10 @@ import (
 	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
 )
 
-const maxConcurrentStructuredSearches = 4
+const (
+	maxConcurrentStructuredSearches = 8
+	structuredSearchAdmissionWait   = time.Second
+)
 
 // Querier is the narrow surface this handler needs. *logquery.Client
 // satisfies it.
@@ -48,11 +52,13 @@ type Handler struct {
 	search      logquery.Searcher
 	backend     BackendService
 	searchSlots chan struct{}
+	searchWait  time.Duration
 }
 
 type BackendService interface {
 	Get(ctx context.Context) (*bizlogs.BackendView, error)
 	Save(ctx context.Context, input bizlogs.SaveInput) (*bizlogs.BackendView, error)
+	Test(ctx context.Context, id uint64) (*bizlogs.BackendTestResult, error)
 	Apply(ctx context.Context, id uint64) (*bizlogs.BackendView, error)
 	Rollback(ctx context.Context, id uint64) (*bizlogs.BackendView, error)
 }
@@ -82,6 +88,7 @@ func newHandler(q Querier, searcher logquery.Searcher, backend BackendService) *
 	return &Handler{
 		q: q, search: searcher, backend: backend,
 		searchSlots: make(chan struct{}, maxConcurrentStructuredSearches),
+		searchWait:  structuredSearchAdmissionWait,
 	}
 }
 
@@ -96,6 +103,7 @@ func (h *Handler) Register(r chi.Router) {
 	r.Post("/v1/logs/context", h.contextLogs)
 	r.Get("/v1/logs/backend", h.getBackend)
 	r.Put("/v1/logs/backend", h.putBackend)
+	r.Post("/v1/logs/backend/{id}/test", h.testBackend)
 	r.Post("/v1/logs/backend/{id}/apply", h.applyBackend)
 	r.Post("/v1/logs/backend/{id}/rollback", h.rollbackBackend)
 	r.Get("/v1/logs/query_range", h.queryRange)
@@ -141,6 +149,31 @@ func (h *Handler) putBackend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := h.backend.Save(r.Context(), input)
+	if err != nil {
+		writeBackendError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success", Data: out})
+}
+
+// testBackend godoc
+// @Summary Test saved Elasticsearch endpoints and credentials without applying them
+// @Router /api/v1/logs/backend/{id}/test [post]
+// @Success 200 {object} apiEnvelope
+func (h *Handler) testBackend(w http.ResponseWriter, r *http.Request) {
+	if !requireBackendAdmin(w, r) {
+		return
+	}
+	if h.backend == nil {
+		writeAPIErr(w, http.StatusServiceUnavailable, "LOG_BACKEND_DISABLED", "log backend management disabled")
+		return
+	}
+	id, err := strconv.ParseUint(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id == 0 {
+		writeAPIErr(w, http.StatusBadRequest, "LOG_BACKEND_INVALID", "invalid backend id")
+		return
+	}
+	out, err := h.backend.Test(r.Context(), id)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -227,33 +260,48 @@ func (h *Handler) searchLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if !h.acquireSearchSlotOrReject(w) {
+	if !h.acquireSearchSlotOrReject(ctx, w) {
 		return
 	}
 	defer h.releaseSearchSlot()
 	out, err := h.search.Search(ctx, in)
 	if err != nil {
-		writeSearchError(w, err)
+		writeSearchError(ctx, w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success", Data: out})
 }
 
-func (h *Handler) acquireSearchSlot() bool {
+func (h *Handler) acquireSearchSlot(ctx context.Context) bool {
 	if h.searchSlots == nil {
 		return true
 	}
+	if h.searchWait <= 0 {
+		select {
+		case h.searchSlots <- struct{}{}:
+			return true
+		default:
+			return false
+		}
+	}
+	timer := time.NewTimer(h.searchWait)
+	defer timer.Stop()
 	select {
 	case h.searchSlots <- struct{}{}:
 		return true
-	default:
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
 		return false
 	}
 }
 
-func (h *Handler) acquireSearchSlotOrReject(w http.ResponseWriter) bool {
-	if h.acquireSearchSlot() {
+func (h *Handler) acquireSearchSlotOrReject(ctx context.Context, w http.ResponseWriter) bool {
+	if h.acquireSearchSlot(ctx) {
 		return true
+	}
+	if ctx.Err() != nil {
+		return false
 	}
 	w.Header().Set("Retry-After", "1")
 	writeAPIErr(w, http.StatusTooManyRequests, "LOG_QUERY_BUSY", "too many concurrent log searches")
@@ -282,13 +330,9 @@ func (h *Handler) fields(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	if !h.acquireSearchSlotOrReject(w) {
-		return
-	}
-	defer h.releaseSearchSlot()
 	out, err := h.search.Fields(ctx, start, end, logquery.Scope{})
 	if err != nil {
-		writeSearchError(w, err)
+		writeSearchError(r.Context(), w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success", Data: out})
@@ -310,13 +354,13 @@ func (h *Handler) fieldValues(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	if !h.acquireSearchSlotOrReject(w) {
+	if !h.acquireSearchSlotOrReject(ctx, w) {
 		return
 	}
 	defer h.releaseSearchSlot()
 	out, err := h.search.FieldValues(ctx, in)
 	if err != nil {
-		writeSearchError(w, err)
+		writeSearchError(r.Context(), w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success", Data: out})
@@ -343,13 +387,13 @@ func (h *Handler) histogram(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if !h.acquireSearchSlotOrReject(w) {
+	if !h.acquireSearchSlotOrReject(ctx, w) {
 		return
 	}
 	defer h.releaseSearchSlot()
 	out, err := h.search.Histogram(ctx, in.Search, interval)
 	if err != nil {
-		writeSearchError(w, err)
+		writeSearchError(r.Context(), w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success", Data: out})
@@ -381,7 +425,7 @@ func (h *Handler) contextLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if !h.acquireSearchSlotOrReject(w) {
+	if !h.acquireSearchSlotOrReject(ctx, w) {
 		return
 	}
 	defer h.releaseSearchSlot()
@@ -390,7 +434,7 @@ func (h *Handler) contextLogs(w http.ResponseWriter, r *http.Request) {
 		Scope: in.Scope, Limit: max(in.Before, 1), Direction: logquery.SortBackward,
 	})
 	if err != nil {
-		writeSearchError(w, err)
+		writeSearchError(r.Context(), w, err)
 		return
 	}
 	after, err := h.search.Search(ctx, logquery.SearchRequest{
@@ -398,7 +442,7 @@ func (h *Handler) contextLogs(w http.ResponseWriter, r *http.Request) {
 		Scope: in.Scope, Limit: max(in.After, 1), Direction: logquery.SortForward,
 	})
 	if err != nil {
-		writeSearchError(w, err)
+		writeSearchError(r.Context(), w, err)
 		return
 	}
 	records := append(before.Records, after.Records...)
@@ -594,7 +638,8 @@ func parseOptionalRange(r *http.Request) (time.Time, time.Time, error) {
 	return start, end, nil
 }
 
-func writeSearchError(w http.ResponseWriter, err error) {
+func writeSearchError(ctx context.Context, w http.ResponseWriter, err error) {
+	slog.ErrorContext(ctx, "structured log request failed", slog.Any("err", err))
 	if errors.Is(err, context.DeadlineExceeded) {
 		writeAPIErr(w, http.StatusGatewayTimeout, "LOG_QUERY_TIMEOUT", "log query timed out")
 		return

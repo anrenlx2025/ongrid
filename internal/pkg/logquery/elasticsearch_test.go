@@ -30,7 +30,7 @@ func TestElasticsearchClient_SearchUsesPITAndOpaqueCursor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadAll() error = %v", err)
 			}
-			if !strings.Contains(string(body), `"resource.attributes.device_id":["42"]`) || !strings.Contains(string(body), `"resource.attributes.level":["ERROR"]`) || !strings.Contains(string(body), `"match_phrase":{"body.text":"timeout"}`) {
+			if !strings.Contains(string(body), `"resource.attributes.device_id":["42"]`) || !strings.Contains(string(body), `"severity_text":["ERROR"]`) || !strings.Contains(string(body), `"match_phrase":{"body.text":"timeout"}`) {
 				t.Fatalf("search body missing scoped query: %s", body)
 			}
 			if strings.Contains(string(body), "simple_query_string") {
@@ -215,8 +215,26 @@ func TestDecodeElasticsearchRecordFallsBackToResourceLevel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeElasticsearchRecord: %v", err)
 	}
-	if record.SeverityText != "WARN" || record.ResourceAttributes["cluster_name"] != "edge-fleet-a" {
+	if record.SeverityText != "warn" || record.SeverityNumber != 13 || record.ResourceAttributes["cluster_name"] != "edge-fleet-a" {
 		t.Fatalf("record = %#v", record)
+	}
+}
+
+func TestDecodeElasticsearchRecordDetectsHistoricalKlogLevel(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"@timestamp": "2026-08-21T13:51:44Z",
+		"body":       map[string]any{"text": `E0821 13:51:44.572761 320 pod_workers.go:1324] "Error syncing pod"`},
+		"resource":   map[string]any{"attributes": map[string]any{"device_id": "650"}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	record, err := decodeElasticsearchRecord("log-klog", raw)
+	if err != nil {
+		t.Fatalf("decodeElasticsearchRecord: %v", err)
+	}
+	if record.SeverityText != "error" || record.SeverityNumber != 17 {
+		t.Fatalf("record severity = %q/%d, want error/17", record.SeverityText, record.SeverityNumber)
 	}
 }
 

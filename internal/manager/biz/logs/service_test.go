@@ -22,6 +22,7 @@ import (
 	logsstore "github.com/ongridio/ongrid/internal/manager/data/logs/store"
 	logsmodel "github.com/ongridio/ongrid/internal/manager/model/logs"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
+	pkggrafana "github.com/ongridio/ongrid/internal/pkg/grafana"
 	"github.com/ongridio/ongrid/internal/pkg/logquery"
 )
 
@@ -136,6 +137,7 @@ type histogramCountingSearcher struct {
 	countRequests     []logquery.SearchRequest
 	histogramRequests []logquery.SearchRequest
 	intervals         []time.Duration
+	includeEndBucket  bool
 }
 
 type failingSaveRepo struct {
@@ -202,11 +204,16 @@ func (s *histogramCountingSearcher) Histogram(_ context.Context, req logquery.Se
 	s.histogramRequests = append(s.histogramRequests, req)
 	s.intervals = append(s.intervals, interval)
 	s.mu.Unlock()
-	return []logquery.HistogramBucket{
+	buckets := []logquery.HistogramBucket{
 		{Start: req.Start, Count: 120},
 		{Start: req.Start.Add(interval), Count: 120},
-		{Start: req.Start.Add(2 * interval), Count: 90},
-	}, nil
+	}
+	if s.includeEndBucket {
+		buckets = append(buckets, logquery.HistogramBucket{Start: req.End, Count: 7})
+	} else {
+		buckets = append(buckets, logquery.HistogramBucket{Start: req.Start.Add(2 * interval), Count: 90})
+	}
+	return buckets, nil
 }
 
 func (s *histogramCountingSearcher) snapshot() ([]logquery.SearchRequest, []logquery.SearchRequest, []time.Duration) {
@@ -233,6 +240,28 @@ func (n *countingNotifier) count() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.calls
+}
+
+type recordingGrafanaSyncer struct {
+	elasticsearch chan pkggrafana.ElasticsearchDatasourceConfig
+	loki          chan struct{}
+}
+
+func newRecordingGrafanaSyncer() *recordingGrafanaSyncer {
+	return &recordingGrafanaSyncer{
+		elasticsearch: make(chan pkggrafana.ElasticsearchDatasourceConfig, 1),
+		loki:          make(chan struct{}, 1),
+	}
+}
+
+func (s *recordingGrafanaSyncer) SyncElasticsearch(_ context.Context, config pkggrafana.ElasticsearchDatasourceConfig) error {
+	s.elasticsearch <- config
+	return nil
+}
+
+func (s *recordingGrafanaSyncer) SyncLoki(context.Context) error {
+	s.loki <- struct{}{}
+	return nil
 }
 
 func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
@@ -291,6 +320,8 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	svc.SetRolloutEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}, {EdgeID: 43, Online: true}})
 	notifier := &countingNotifier{}
 	svc.SetRolloutNotifier(notifier)
+	grafanaSyncer := newRecordingGrafanaSyncer()
+	svc.SetGrafanaSyncer(grafanaSyncer)
 
 	first, err := svc.Save(context.Background(), bizlogs.SaveInput{
 		WriteEndpoints:     []string{es.URL},
@@ -306,6 +337,24 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	}
 	if first.Generation != 1 || first.Status != logsmodel.BackendStatusSaved {
 		t.Fatalf("first saved configuration = generation %d status %q", first.Generation, first.Status)
+	}
+
+	tested, err := svc.Test(context.Background(), first.ID)
+	if err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if tested.Status != "ok" || tested.DetectedVersion != "8.16.3" || tested.TestedAt.IsZero() {
+		t.Fatalf("test result = %+v", tested)
+	}
+	if notifier.count() != 0 {
+		t.Fatalf("notifications after test = %d, want 0", notifier.count())
+	}
+	persistedAfterTest, err := repo.GetBackend(context.Background(), first.ID)
+	if err != nil {
+		t.Fatalf("GetBackend after Test: %v", err)
+	}
+	if persistedAfterTest.Status != logsmodel.BackendStatusSaved || persistedAfterTest.DetectedVersion != "" || persistedAfterTest.LastTestAt != nil {
+		t.Fatalf("test mutated saved backend = %+v", persistedAfterTest)
 	}
 
 	distributing, err := svc.Apply(context.Background(), first.ID)
@@ -370,6 +419,14 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	}
 	if active.Status != logsmodel.BackendStatusActive || active.CutoverAt == nil || notifier.count() != 2 {
 		t.Fatalf("active after fleet real probes = %+v notifications=%d", active, notifier.count())
+	}
+	select {
+	case config := <-grafanaSyncer.elasticsearch:
+		if config.URL != es.URL || config.IndexPattern != "logs-ongrid.*.otel-prod" || config.APIKey != "query-key" {
+			t.Fatalf("Grafana Elasticsearch config = %+v", config)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Grafana Elasticsearch sync was not triggered")
 	}
 	if err := repo.SetRolloutBackendState(context.Background(), first.ID, logsmodel.BackendStatusDegraded, "8.16.3", "late probe", time.Now().UTC()); !errors.Is(err, errs.ErrConflict) {
 		t.Fatalf("late rollout state update error = %v, want conflict", err)
@@ -472,6 +529,11 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	if rolledBack.Status != logsmodel.BackendStatusRolledBack || rolledBack.EndedAt == nil || notifier.count() != 4 {
 		t.Fatalf("completed rollback = status %q notifications %d", rolledBack.Status, notifier.count())
 	}
+	select {
+	case <-grafanaSyncer.loki:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Grafana Loki sync was not triggered after rollback")
+	}
 	runtime, err = svc.ActiveRuntime(context.Background())
 	if err != nil {
 		t.Fatalf("ActiveRuntime after rollback: %v", err)
@@ -485,6 +547,13 @@ func TestServiceRevisionApplySecretAndRollback(t *testing.T) {
 	}
 	if idempotent.Status != logsmodel.BackendStatusRolledBack || notifier.count() != 4 {
 		t.Fatalf("idempotent rollback = %+v notifications=%d", idempotent, notifier.count())
+	}
+	reapplying, err := svc.Apply(context.Background(), first.ID)
+	if err != nil {
+		t.Fatalf("Apply(already saved rolled-back configuration): %v", err)
+	}
+	if reapplying.Status != logsmodel.BackendStatusDistributing || reapplying.ID != first.ID || reapplying.Generation != first.Generation || notifier.count() != 5 {
+		t.Fatalf("direct reapply = %+v notifications=%d", reapplying, notifier.count())
 	}
 }
 
@@ -525,6 +594,26 @@ func TestServiceHistogramUsesOneGlobalExactBucketGrid(t *testing.T) {
 		Start: start, End: start.Add(501 * time.Second), Limit: 1,
 	}, time.Second); err == nil || !strings.Contains(err.Error(), "exceeds 500 buckets") {
 		t.Fatalf("oversized histogram error = %v", err)
+	}
+}
+
+func TestServiceHistogramFoldsInclusiveEndBoundaryIntoFinalBucket(t *testing.T) {
+	repo := logsstore.NewRepo(openTestDB(t))
+	searcher := &histogramCountingSearcher{includeEndBucket: true}
+	svc := bizlogs.NewService(repo, nil, searcher)
+	start := time.Date(2026, 8, 21, 2, 30, 55, 0, time.UTC)
+
+	buckets, err := svc.Histogram(context.Background(), logquery.SearchRequest{
+		Start: start, End: start.Add(2 * time.Minute), Limit: 1,
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("Histogram: %v", err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("bucket count = %d, want 2: %#v", len(buckets), buckets)
+	}
+	if buckets[0].Count != 120 || buckets[1].Count != 127 {
+		t.Fatalf("bucket counts = [%d %d], want [120 127]", buckets[0].Count, buckets[1].Count)
 	}
 }
 

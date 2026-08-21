@@ -222,6 +222,15 @@ func (s *Service) Histogram(ctx context.Context, req logquery.SearchRequest, int
 			return nil, fmt.Errorf("logquery: backend histogram bucket %s is not aligned to request start %s", bucket.Start, req.Start)
 		}
 		index := int(delta / interval)
+		// Search/count phases own (start, end]. Elasticsearch date_histogram
+		// buckets are left-closed, so a record exactly at an interval-aligned
+		// request end is returned in a bucket whose key equals end. Fold that
+		// boundary bucket into the final product bucket to preserve the inclusive
+		// end without growing the requested grid by one bucket.
+		if index == len(out) && bucket.Start.Equal(req.End) {
+			out[len(out)-1].Count += bucket.Count
+			continue
+		}
 		if index >= len(out) {
 			return nil, fmt.Errorf("logquery: backend histogram bucket %s is outside the request window", bucket.Start)
 		}

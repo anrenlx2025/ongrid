@@ -45,6 +45,7 @@ import {
   getLogBackend,
   rollbackLogBackend,
   saveLogBackend,
+  testLogBackend,
   type LogBackend,
   type LogBackendKind,
   type SaveLogBackendInput,
@@ -531,11 +532,10 @@ function GrafanaCard() {
       </div>
       <p className="mb-4 text-[11px] text-zinc-500">
         {tr(
-          '填 Grafana 根地址 + Service Account Token，「测试」验通，「同步」自动把 ',
-          'Fill in the Grafana root URL + Service Account Token. "Test" verifies the connection; "Sync" pushes ',
+          '填 Grafana 根地址 + Service Account Token，「测试」验通，「同步」自动把托管数据源和默认 dashboard 推到 Grafana 的 ',
+          'Fill in the Grafana root URL + Service Account Token. "Test" verifies the connection; "Sync" pushes managed datasources and default dashboards into the Grafana ',
         )}
-        <code className="mx-1 font-mono text-zinc-400">ongrid-prometheus</code>
-        {tr(' 数据源和默认 dashboard 推到 Grafana 的 ', ' datasource and default dashboards into the Grafana ')}<code className="mx-1 font-mono text-zinc-400">ongrid</code>
+        <code className="mx-1 font-mono text-zinc-400">ongrid</code>
         {tr(' 文件夹。跳转过去仍然由用户在 Grafana 那边登录（Ongrid 不代登录）。', ' folder. Jumping to Grafana still requires the user to sign in there (Ongrid does not impersonate).')}
       </p>
 
@@ -606,7 +606,7 @@ function GrafanaCard() {
           className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-700/60 bg-emerald-900/20 px-3 py-1.5 text-sm text-emerald-300 transition-colors hover:bg-emerald-900/40 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {status.kind === 'syncing' ? <Loader2 size={14} className="animate-spin" /> : <Cloud size={14} />}
-          <span>{tr('同步 dashboard', 'Sync dashboard')}</span>
+          <span>{tr('同步 Grafana', 'Sync Grafana')}</span>
         </button>
         <button
           type="button"
@@ -726,7 +726,7 @@ function StatusLine({ status, dirty }: { status: SyncStatus; dirty: boolean }) {
         <p className="mt-3 text-xs text-emerald-400">
           {tr('✓ 已同步到文件夹 ', '✓ Synced to folder ')}
           <code className="font-mono">{status.res.folder}</code>{tr(' · 数据源 ', ' · datasource ')}
-          <code className="font-mono">{status.res.datasource}</code>{tr(` · ${status.res.dashboards.length} 个 dashboard`, ` · ${status.res.dashboards.length} dashboard(s)`)}
+          <code className="font-mono">{(status.res.datasources?.length ? status.res.datasources : [status.res.datasource]).join(', ')}</code>{tr(` · ${status.res.dashboards.length} 个 dashboard`, ` · ${status.res.dashboards.length} dashboard(s)`)}
           {status.res.dashboards.length > 0 && (
             <span className="text-zinc-500">{tr('：', ': ')}{status.res.dashboards.join(tr('、', ', '))}</span>
           )}
@@ -739,14 +739,14 @@ function StatusLine({ status, dirty }: { status: SyncStatus; dirty: boolean }) {
   }
 }
 
-// ---------- Loki / Tempo cards (read-only status, jump to Grafana) ----
+// ---------- Loki / Elasticsearch / Tempo Grafana Explore links ----
 
 // useGrafanaExploreLink builds a Grafana Explore deep-link for one of
 // the built-in datasources. It mirrors lib/drilldown.ts's behaviour:
 //   1. Pull root_url from system_settings.grafana
 //   2. Reject docker-internal hosts (loki:3100 / grafana:3000) the
 //      browser can't reach — fall back to same-origin /grafana.
-//   3. Build /explore?left={"datasource":...,"queries":[{"expr":...}]}
+//   3. Build Grafana 11's /explore?schemaVersion=1&panes=... URL.
 // Returns null while the root URL is still being fetched so the button
 // renders disabled rather than pointing at the wrong place.
 function useGrafanaExploreLink(datasource: string, expr: string): string | null {
@@ -775,16 +775,22 @@ function useGrafanaExploreLink(datasource: string, expr: string): string | null 
     };
   }, []);
   if (!root) return null;
-  // datasource string is the provisioned uid (ongrid-loki / ongrid-tempo
-  // / ongrid-prometheus); derive the engine type from it for the v11
+  // datasource string is the managed uid (ongrid-loki / ongrid-tempo /
+  // ongrid-prometheus / ongrid-elasticsearch); derive the engine type for the v11
   // panes schema.
   const dsType = datasource.includes('tempo')
     ? 'tempo'
     : datasource.includes('loki')
       ? 'loki'
-      : 'prometheus';
+      : datasource.includes('elasticsearch')
+        ? 'elasticsearch'
+        : 'prometheus';
   const query =
-    dsType === 'tempo' ? { query: expr, queryType: 'traceql' } : { expr };
+    dsType === 'tempo'
+      ? { query: expr, queryType: 'traceql' }
+      : dsType === 'elasticsearch'
+        ? { query: expr, metrics: [{ id: '1', type: 'logs' }] }
+        : { expr };
   return buildExploreUrl({
     base: root,
     dsType,
@@ -885,6 +891,10 @@ function LogsIntegrationCard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const current = currentLogBackend(backend);
+  const exploreUrl = useGrafanaExploreLink(
+    selected === 'elasticsearch' ? 'ongrid-elasticsearch' : 'ongrid-loki',
+    selected === 'elasticsearch' ? '*' : '{ongrid_source=~".+"}',
+  );
 
   const refresh = useCallback(async (initial = false) => {
     try {
@@ -981,16 +991,16 @@ function LogsIntegrationCard() {
 
       <div className="p-5" role="tabpanel">
         {selected === 'elasticsearch' ? (
-          <ElasticsearchLogsCard current={current === 'elasticsearch'} onBackendChange={setBackend} />
+          <ElasticsearchLogsCard current={current === 'elasticsearch'} exploreUrl={exploreUrl} onBackendChange={setBackend} />
         ) : (
-          <LokiCard current={current === 'loki'} backend={backend} onBackendChange={setBackend} />
+          <LokiCard current={current === 'loki'} backend={backend} exploreUrl={exploreUrl} onBackendChange={setBackend} />
         )}
       </div>
     </Card>
   );
 }
 
-function ElasticsearchLogsCard({ current, onBackendChange }: { current: boolean; onBackendChange: (backend: LogBackend) => void }) {
+function ElasticsearchLogsCard({ current, exploreUrl, onBackendChange }: { current: boolean; exploreUrl: string | null; onBackendChange: (backend: LogBackend) => void }) {
   const { tr } = useI18n();
   const [backend, setBackend] = useState<LogBackend | null>(null);
   const [form, setForm] = useState<ElasticsearchLogsForm>(emptyElasticsearchLogsForm);
@@ -1103,7 +1113,7 @@ function ElasticsearchLogsCard({ current, onBackendChange }: { current: boolean;
   };
 
   const applyElasticsearch = async () => {
-    if (!backend || dirty || !['saved', 'degraded'].includes(backend.status)) return;
+    if (!backend || dirty || !['saved', 'degraded', 'rolled_back'].includes(backend.status)) return;
     setBusy('apply');
     setMessage(null);
     try {
@@ -1126,11 +1136,35 @@ function ElasticsearchLogsCard({ current, onBackendChange }: { current: boolean;
     }
   };
 
+  const testElasticsearch = async () => {
+    if (!backend || dirty) return;
+    setBusy('test');
+    setMessage(null);
+    try {
+      const result = await testLogBackend(backend.id);
+      const version = result.detected_version
+        ? tr(`（Elasticsearch ${result.detected_version}）`, ` (Elasticsearch ${result.detected_version})`)
+        : '';
+      setMessage({
+        ok: true,
+        text: tr(
+          `连接测试通过；查询/写入端点及 API Key 权限有效${version}。`,
+          `Connection test passed. Query/write endpoints and API key privileges are valid${version}.`,
+        ),
+      });
+    } catch (error) {
+      setMessage({ ok: false, text: integrationError(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const canEdit = !backend || ['saved', 'active', 'degraded', 'rolled_back'].includes(backend.status);
   const editingCurrent = current && backend?.status === 'active';
   const fleetConverging = backend != null && (backend.status === 'distributing' || backend.status === 'verifying');
-  const canSave = canEdit && (dirty || backend?.status === 'rolled_back');
-  const canApply = backend != null && !dirty && ['saved', 'degraded'].includes(backend.status) && !fleetConverging;
+  const canSave = canEdit && dirty;
+  const canTest = backend != null && !dirty && ['saved', 'active', 'degraded', 'rolled_back'].includes(backend.status) && !fleetConverging;
+  const canApply = backend != null && !dirty && ['saved', 'degraded', 'rolled_back'].includes(backend.status) && !fleetConverging;
 
   return (
     <section aria-label={tr('Elasticsearch 日志后端配置', 'Elasticsearch log backend configuration')}>
@@ -1209,7 +1243,22 @@ function ElasticsearchLogsCard({ current, onBackendChange }: { current: boolean;
 
           <div className="mt-5 flex flex-wrap items-end gap-3 border-t border-zinc-800/70 pt-4">
             <Button onClick={() => void save()} disabled={!canSave || busy !== null} variant="primary">{busy === 'save' ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}<span>{tr('保存', 'Save')}</span></Button>
+            <Button onClick={() => void testElasticsearch()} disabled={!canTest || busy !== null} variant="ghost">{busy === 'test' ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />}<span>{tr('测试连接', 'Test connection')}</span></Button>
             <Button onClick={() => void applyElasticsearch()} disabled={!canApply || busy !== null} variant="primary">{busy === 'apply' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}<span>{tr('应用', 'Apply')}</span></Button>
+            <button
+              type="button"
+              disabled={!current || !exploreUrl}
+              onClick={() => current && exploreUrl && void openObservabilityUrl(exploreUrl)}
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm transition-colors',
+                current && exploreUrl
+                  ? 'border-zinc-700 text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800'
+                  : 'cursor-not-allowed border-zinc-800 text-zinc-600'
+              )}
+            >
+              <ExternalLink size={14} />
+              <span>{tr('在 Grafana 中查看日志', 'Open logs in Grafana')}</span>
+            </button>
             {fleetConverging && <span className="inline-flex h-8 items-center gap-2 rounded-md border border-sky-500/20 bg-sky-500/5 px-3 text-xs text-sky-300"><Loader2 size={13} className="animate-spin" />{tr('正在验证并应用 Elasticsearch 配置', 'Validating and applying the Elasticsearch configuration')}</span>}
           </div>
 
@@ -1240,12 +1289,8 @@ const LOKI_KEYS: (keyof LokiForm)[] = ['url', 'basic_user', 'basic_password', 't
 const LOKI_SENSITIVE: Set<keyof LokiForm> = new Set(['basic_password']);
 const emptyLokiForm: LokiForm = { url: '', basic_user: '', basic_password: '', tls_insecure: '' };
 
-function LokiCard({ current, backend, onBackendChange }: { current: boolean; backend: LogBackend | null; onBackendChange: (backend: LogBackend) => void }) {
+function LokiCard({ current, backend, exploreUrl, onBackendChange }: { current: boolean; backend: LogBackend | null; exploreUrl: string | null; onBackendChange: (backend: LogBackend) => void }) {
   const { tr } = useI18n();
-  const exploreUrl = useGrafanaExploreLink(
-    'ongrid-loki',
-    '{ongrid_source=~"journald:.+|file:.+"}'
-  );
   const [server, setServer] = useState<LokiForm>(emptyLokiForm);
   const [draft, setDraft] = useState<LokiForm>(emptyLokiForm);
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
@@ -1420,7 +1465,7 @@ function LokiCard({ current, backend, onBackendChange }: { current: boolean; bac
       <div className="mt-5 flex flex-wrap items-center gap-3">
         <Button onClick={submit} disabled={!dirty || saving} variant="primary">
           {savedOk && !dirty ? <Check size={14} /> : <Save size={14} />}
-          <span>{saving ? tr('保存中…', 'Saving…') : savedOk && !dirty ? tr('已保存', 'Saved') : tr('保存', 'Save')}</span>
+          <span>{saving ? tr('保存中…', 'Saving…') : tr('保存', 'Save')}</span>
         </Button>
         <Button
           onClick={probeLoki}
@@ -1430,12 +1475,10 @@ function LokiCard({ current, backend, onBackendChange }: { current: boolean; bac
           {probe.kind === 'testing' ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />}
           <span>{tr('测试连接', 'Test connection')}</span>
         </Button>
-        {!current && (
-          <Button onClick={() => void switchToLoki()} disabled={!backend || switching || dirty || probe.kind === 'testing' || (rollbackConverging && !rollbackHasFailures)} variant="primary">
-            {switching || (rollbackConverging && !rollbackHasFailures) ? <Loader2 size={14} className="animate-spin" /> : rollbackHasFailures ? <RefreshCw size={14} /> : <Check size={14} />}
-            <span>{rollbackHasFailures ? tr('重试 Loki 切换验证', 'Retry Loki switch verification') : rollbackConverging ? tr('切换验证中', 'Switch verification in progress') : tr('验证并设为当前后端', 'Verify and set as active')}</span>
-          </Button>
-        )}
+        <Button onClick={() => void switchToLoki()} disabled={current || !backend || switching || dirty || probe.kind === 'testing' || (rollbackConverging && !rollbackHasFailures)} variant="primary">
+          {switching || (rollbackConverging && !rollbackHasFailures) ? <Loader2 size={14} className="animate-spin" /> : rollbackHasFailures ? <RefreshCw size={14} /> : <Check size={14} />}
+          <span>{tr('应用', 'Apply')}</span>
+        </Button>
         <button
           type="button"
           disabled={!exploreUrl}

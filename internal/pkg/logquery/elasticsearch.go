@@ -582,13 +582,28 @@ func decodeElasticsearchRecord(id string, raw json.RawMessage) (Record, error) {
 	observed, _ := parseElasticsearchTime(lookupPath(source, "observed_timestamp"))
 	attrs := scalarMap(lookupPath(source, "attributes"))
 	resources := scalarMap(lookupPath(source, "resource.attributes"))
+	message := stringify(lookupPath(source, "body.text"))
+	severityText := normalizeLevel(firstNonEmpty(
+		stringify(lookupPath(source, "severity_text")),
+		attrs["level"],
+		attrs["severity"],
+		attrs["severity_text"],
+		resources["level"],
+	))
+	if severityText == "" {
+		severityText = detectLevel(message)
+	}
+	severityNumber := int32Value(lookupPath(source, "severity_number"))
+	if severityNumber == 0 {
+		severityNumber = severityNumberForLevel(severityText)
+	}
 	return Record{
 		ID:                 id,
 		Timestamp:          timestamp,
 		ObservedTimestamp:  observed,
-		Message:            stringify(lookupPath(source, "body.text")),
-		SeverityText:       firstNonEmpty(stringify(lookupPath(source, "severity_text")), resources["level"]),
-		SeverityNumber:     int32Value(lookupPath(source, "severity_number")),
+		Message:            message,
+		SeverityText:       severityText,
+		SeverityNumber:     severityNumber,
 		Backend:            elasticsearchBackendName,
 		Attributes:         attrs,
 		ResourceAttributes: resources,

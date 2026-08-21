@@ -24,6 +24,7 @@ import (
 
 	model "github.com/ongridio/ongrid/internal/manager/model/logs"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
+	pkggrafana "github.com/ongridio/ongrid/internal/pkg/grafana"
 	"github.com/ongridio/ongrid/internal/pkg/logquery"
 )
 
@@ -79,6 +80,14 @@ type ManagedSecretStore interface {
 
 type RolloutNotifier interface {
 	NotifyLogsBackendChanged(ctx context.Context) error
+}
+
+// GrafanaSyncer is an optional, best-effort observer of authoritative log
+// backend changes. Grafana failures must never roll back a verified Edge data
+// path cutover.
+type GrafanaSyncer interface {
+	SyncElasticsearch(ctx context.Context, config pkggrafana.ElasticsearchDatasourceConfig) error
+	SyncLoki(ctx context.Context) error
 }
 
 type HostDeviceResolver interface {
@@ -142,6 +151,12 @@ type BackendView struct {
 	UpdatedAt          time.Time                  `json:"updated_at"`
 }
 
+type BackendTestResult struct {
+	Status          string    `json:"status"`
+	DetectedVersion string    `json:"detected_version"`
+	TestedAt        time.Time `json:"tested_at"`
+}
+
 // RuntimeConfig is the non-sensitive overlay merged into the Edge logs plugin
 // snapshot. APIKeyFile is added locally by Edge after secret materialization.
 type RuntimeConfig struct {
@@ -170,6 +185,7 @@ type Service struct {
 	lifecycleMu sync.Mutex
 	mu          sync.RWMutex
 	notifier    RolloutNotifier
+	grafana     GrafanaSyncer
 	devices     HostDeviceResolver
 	inventory   RolloutEdgeInventory
 	applyGuard  func(context.Context) error
@@ -189,6 +205,12 @@ func (s *Service) SetRolloutNotifier(notifier RolloutNotifier) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.notifier = notifier
+}
+
+func (s *Service) SetGrafanaSyncer(syncer GrafanaSyncer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.grafana = syncer
 }
 
 func (s *Service) SetHostDeviceResolver(resolver HostDeviceResolver) {
@@ -384,6 +406,34 @@ func (s *Service) Get(ctx context.Context) (*BackendView, error) {
 	return s.view(ctx, backend)
 }
 
+// Test validates the saved Elasticsearch query/write endpoints and their API
+// key privileges without distributing configuration to Edge or changing the
+// active log backend. Apply repeats these checks before starting the real-write
+// fleet verification and cutover.
+func (s *Service) Test(ctx context.Context, id uint64) (*BackendTestResult, error) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	backend, err := s.repo.GetBackend(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	switch backend.Status {
+	case model.BackendStatusSaved, model.BackendStatusActive, model.BackendStatusDegraded, model.BackendStatusRolledBack:
+	default:
+		return nil, fmt.Errorf("%w: wait for the current log backend operation to finish", errs.ErrConflict)
+	}
+	version, err := s.probeBackend(ctx, backend)
+	if err != nil {
+		return nil, err
+	}
+	return &BackendTestResult{
+		Status:          "ok",
+		DetectedVersion: version,
+		TestedAt:        time.Now().UTC(),
+	}, nil
+}
+
 func (s *Service) Apply(ctx context.Context, id uint64) (*BackendView, error) {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
@@ -395,10 +445,7 @@ func (s *Service) Apply(ctx context.Context, id uint64) (*BackendView, error) {
 	if backend.Status == model.BackendStatusActive {
 		return s.view(ctx, backend)
 	}
-	if backend.Status == model.BackendStatusRolledBack {
-		return nil, fmt.Errorf("%w: save the Elasticsearch configuration before applying it", errs.ErrConflict)
-	}
-	if backend.Status != model.BackendStatusSaved && backend.Status != model.BackendStatusDegraded {
+	if backend.Status != model.BackendStatusSaved && backend.Status != model.BackendStatusDegraded && backend.Status != model.BackendStatusRolledBack {
 		return nil, fmt.Errorf("%w: only a saved Elasticsearch configuration can be applied", errs.ErrConflict)
 	}
 	active, activeErr := s.repo.ActiveBackend(ctx)
@@ -541,6 +588,20 @@ func (s *Service) ActiveRuntime(ctx context.Context) (*RuntimeConfig, error) {
 		return nil, err
 	}
 	return runtimeConfig(backend)
+}
+
+// ActiveElasticsearchDatasource returns the active generation's Grafana
+// query configuration. A nil result means Loki is authoritative. Only the
+// read-only query API key is resolved.
+func (s *Service) ActiveElasticsearchDatasource(ctx context.Context) (*pkggrafana.ElasticsearchDatasourceConfig, error) {
+	backend, err := s.repo.ActiveBackend(ctx)
+	if errors.Is(err, errs.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.elasticsearchDatasourceConfig(ctx, backend)
 }
 
 // PluginRuntimeOverlay implements edge.PluginRuntimeOverlayProvider without
@@ -985,6 +1046,7 @@ func (s *Service) promoteVerifiedRollout(ctx context.Context, backend *model.Bac
 		return err
 	}
 	s.invalidateCache()
+	s.syncGrafanaElasticsearchAsync(ctx, backend)
 	if err := s.notify(ctx); err != nil {
 		return fmt.Errorf("activate backend notification: %w", err)
 	}
@@ -1004,10 +1066,83 @@ func (s *Service) completeVerifiedRollback(ctx context.Context, backend *model.B
 		return err
 	}
 	s.invalidateCache()
+	s.syncGrafanaLokiAsync(ctx)
 	if err := s.notify(ctx); err != nil {
 		return fmt.Errorf("complete backend rollback notification: %w", err)
 	}
 	return nil
+}
+
+func (s *Service) elasticsearchDatasourceConfig(ctx context.Context, backend *model.Backend) (*pkggrafana.ElasticsearchDatasourceConfig, error) {
+	if backend == nil {
+		return nil, errors.New("active Elasticsearch backend is nil")
+	}
+	queryKey, err := s.apiKey(ctx, backend.QueryCredentialRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Elasticsearch query credential for Grafana: %w", err)
+	}
+	endpoints, err := decodeEndpoints(backend.WriteEndpointsJSON)
+	if err != nil {
+		return nil, err
+	}
+	return &pkggrafana.ElasticsearchDatasourceConfig{
+		// QueryEndpoint is explicitly Manager-scoped and may be a loopback
+		// address. Grafana runs in a separate process/container, so point it at
+		// the first endpoint already verified for direct Edge access instead.
+		URL:          endpoints[0],
+		IndexPattern: backend.IndexPattern,
+		APIKey:       queryKey,
+		CAPEM:        backend.CAPEM,
+		TLSInsecure:  backend.TLSInsecure,
+	}, nil
+}
+
+func (s *Service) syncGrafanaElasticsearchAsync(ctx context.Context, backend *model.Backend) {
+	s.mu.RLock()
+	syncer := s.grafana
+	s.mu.RUnlock()
+	if syncer == nil || backend == nil {
+		return
+	}
+	backendCopy := *backend
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				s.log.Error("Grafana Elasticsearch datasource sync panicked", slog.Any("panic", recovered))
+			}
+		}()
+		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		defer cancel()
+		config, err := s.elasticsearchDatasourceConfig(syncCtx, &backendCopy)
+		if err == nil {
+			err = syncer.SyncElasticsearch(syncCtx, *config)
+		}
+		if err != nil {
+			s.log.WarnContext(syncCtx, "Grafana Elasticsearch datasource sync failed; log backend remains active",
+				slog.Uint64("backend_id", backendCopy.ID), slog.Any("error", err))
+		}
+	}()
+}
+
+func (s *Service) syncGrafanaLokiAsync(ctx context.Context) {
+	s.mu.RLock()
+	syncer := s.grafana
+	s.mu.RUnlock()
+	if syncer == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				s.log.Error("Grafana Loki datasource sync panicked", slog.Any("panic", recovered))
+			}
+		}()
+		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		defer cancel()
+		if err := syncer.SyncLoki(syncCtx); err != nil {
+			s.log.WarnContext(syncCtx, "Grafana Loki datasource sync failed; Loki remains active", slog.Any("error", err))
+		}
+	}()
 }
 
 func normalizeEdgeIDs(input []uint64) ([]uint64, error) {

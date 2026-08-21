@@ -41,7 +41,6 @@ limits_config:
             - ongrid_source
             - namespace
             - service_name
-            - level
         - action: structured_metadata
           attributes:
             - workload

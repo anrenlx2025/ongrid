@@ -83,12 +83,12 @@ export function searchLogs(input: LogSearchRequest, signal?: AbortSignal) {
   return request<APIEnvelope<LogSearchResult>>('POST', '/logs/search', input, { signal }).then((r) => r.data);
 }
 
-export function listLogFields(params?: { start?: string; end?: string }) {
+export function listLogFields(params?: { start?: string; end?: string }, signal?: AbortSignal) {
   const qs = new URLSearchParams();
   if (params?.start) qs.set('start', params.start);
   if (params?.end) qs.set('end', params.end);
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
-  return request<APIEnvelope<LogField[]>>('GET', `/logs/fields${suffix}`).then((r) => r.data);
+  return request<APIEnvelope<LogField[]>>('GET', `/logs/fields${suffix}`, undefined, { signal }).then((r) => r.data);
 }
 
 export function listLogFieldValues(input: {
@@ -97,21 +97,12 @@ export function listLogFieldValues(input: {
   end: string;
   scope?: LogScope;
   limit?: number;
-}) {
-  return request<APIEnvelope<string[]>>('POST', '/logs/field-values', input).then((r) => r.data);
+}, signal?: AbortSignal) {
+  return request<APIEnvelope<string[]>>('POST', '/logs/field-values', input, { signal }).then((r) => r.data);
 }
 
 export function getLogHistogram(search: LogSearchRequest, interval: string, signal?: AbortSignal) {
   return request<APIEnvelope<LogHistogramBucket[]>>('POST', '/logs/histogram', { search, interval }, { signal }).then((r) => r.data);
-}
-
-export function getLogContext(input: {
-  timestamp: string;
-  scope?: LogScope;
-  before?: number;
-  after?: number;
-}, signal?: AbortSignal) {
-  return request<APIEnvelope<LogRecord[]>>('POST', '/logs/context', input, { signal }).then((r) => r.data);
 }
 
 export type LogBackendAssignment = {
@@ -184,6 +175,16 @@ export function getLogBackend() {
 
 export function saveLogBackend(input: SaveLogBackendInput) {
   return request<APIEnvelope<LogBackend>>('PUT', '/logs/backend', input).then((r) => r.data);
+}
+
+export type LogBackendTestResult = {
+  status: 'ok';
+  detected_version: string;
+  tested_at: string;
+};
+
+export function testLogBackend(id: number) {
+  return request<APIEnvelope<LogBackendTestResult>>('POST', `/logs/backend/${id}/test`).then((r) => r.data);
 }
 
 export function applyLogBackend(id: number) {

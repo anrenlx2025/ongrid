@@ -1103,6 +1103,26 @@ func main() {
 	logsBackendSvc := managerbizlogs.NewService(logsBackendRepo, secretUC, lokiLogClient, log.With(slog.String("comp", "logs-backend")))
 	logsBackendSvc.SetHostDeviceResolver(edgeDeviceRepo)
 	logsBackendSvc.SetRolloutEdgeInventory(logsRolloutEdgeInventory{edges: edgeUC, configs: pluginConfigUC})
+	logsBackendSvc.SetGrafanaSyncer(grafanaSvc)
+	grafanaSvc.SetLogsDatasourceProvider(logsBackendSvc.ActiveElasticsearchDatasource)
+	go func() {
+		// Reconcile an already-active generation after upgrades. Wait until the
+		// embedded Grafana bootstrap has had a chance to persist its SA token.
+		timer := time.NewTimer(15 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-rootCtx.Done():
+			return
+		case <-timer.C:
+		}
+		syncCtx, cancel := context.WithTimeout(rootCtx, 20*time.Second)
+		defer cancel()
+		if err := grafanaSvc.SyncLogsDatasource(syncCtx); err != nil {
+			log.Warn("logs: initial grafana datasource sync failed (retry from integrations)", slog.Any("err", err))
+		} else {
+			log.Info("logs: active grafana datasource synced at boot")
+		}
+	}()
 	logsBackendSvc.SetApplyGuard(func(ctx context.Context) error {
 		rules, err := alertRepo.ListAllEnabledRules(ctx)
 		if err != nil {

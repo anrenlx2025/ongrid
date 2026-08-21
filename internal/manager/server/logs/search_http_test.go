@@ -33,10 +33,11 @@ func (idleStructuredSearcher) Histogram(context.Context, logquery.SearchRequest,
 	return nil, nil
 }
 
-func TestStructuredLogEndpointsShareConcurrencyLimit(t *testing.T) {
+func TestExpensiveStructuredLogEndpointsShareConcurrencyLimit(t *testing.T) {
 	handler := NewHandlerWithSearcher(nil, idleStructuredSearcher{})
+	handler.searchWait = 5 * time.Millisecond
 	for range maxConcurrentStructuredSearches {
-		if !handler.acquireSearchSlot() {
+		if !handler.acquireSearchSlot(context.Background()) {
 			t.Fatal("failed to reserve search slot")
 		}
 	}
@@ -55,7 +56,6 @@ func TestStructuredLogEndpointsShareConcurrencyLimit(t *testing.T) {
 		body   string
 	}{
 		{name: "search", method: http.MethodPost, path: "/v1/logs/search", body: search},
-		{name: "fields", method: http.MethodGet, path: "/v1/logs/fields"},
 		{name: "field values", method: http.MethodPost, path: "/v1/logs/field-values", body: `{}`},
 		{name: "histogram", method: http.MethodPost, path: "/v1/logs/histogram", body: `{"search":` + search + `,"interval":"1m"}`},
 		{name: "context", method: http.MethodPost, path: "/v1/logs/context", body: `{"timestamp":"` + end.Format(time.RFC3339Nano) + `"}`},
@@ -73,5 +73,48 @@ func TestStructuredLogEndpointsShareConcurrencyLimit(t *testing.T) {
 				t.Fatalf("headers=%v body=%s", rec.Header(), rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestFieldsDoesNotConsumeStructuredSearchSlot(t *testing.T) {
+	handler := NewHandlerWithSearcher(nil, idleStructuredSearcher{})
+	for range maxConcurrentStructuredSearches {
+		if !handler.acquireSearchSlot(context.Background()) {
+			t.Fatal("failed to reserve search slot")
+		}
+	}
+	t.Cleanup(func() {
+		for range maxConcurrentStructuredSearches {
+			handler.releaseSearchSlot()
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs/fields", nil)
+	rec := httptest.NewRecorder()
+	backendTestRouter(handler).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSearchWaitsForAvailableSlot(t *testing.T) {
+	handler := NewHandlerWithSearcher(nil, idleStructuredSearcher{})
+	handler.searchSlots = make(chan struct{}, 1)
+	handler.searchWait = 100 * time.Millisecond
+	if !handler.acquireSearchSlot(context.Background()) {
+		t.Fatal("failed to reserve search slot")
+	}
+	timer := time.AfterFunc(10*time.Millisecond, handler.releaseSearchSlot)
+	t.Cleanup(func() { timer.Stop() })
+
+	end := time.Now().UTC()
+	body := `{"start":"` + end.Add(-time.Hour).Format(time.RFC3339Nano) + `","end":"` + end.Format(time.RFC3339Nano) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs/search", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	backendTestRouter(handler).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }

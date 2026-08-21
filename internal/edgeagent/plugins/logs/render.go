@@ -148,20 +148,19 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	guardStatements := []string{
+	guardStatements := append(levelDetectionStatements(),
 		fmt.Sprintf(`replace_pattern(log.body, %s, "$1=<redacted>") where IsString(log.body)`, strconv.Quote(sensitiveBodyPattern)),
 		fmt.Sprintf(`delete_matching_keys(log.attributes, %s)`, strconv.Quote(sensitiveAttributeKeyPattern)),
 		fmt.Sprintf(`delete_matching_keys(resource.attributes, %s)`, strconv.Quote(sensitiveAttributeKeyPattern)),
 		`limit(log.attributes, 64, ["log.file.path", "systemd.unit", "ongrid.probe_id"])`,
 		`truncate_all(log.attributes, 4096)`,
 		`set(log.attributes["systemd.unit"], log.attributes["_SYSTEMD_UNIT"]) where log.attributes["_SYSTEMD_UNIT"] != nil`,
-	}
+	)
 	// Preserve stable product dimensions for Loki. Keeping the aliases on ES
 	// records as well makes a bounded rollout fan-out deterministic and gives
 	// both adapters the same document vocabulary.
 	guardStatements = append(guardStatements,
-		`set(log.severity_text, log.attributes["level"]) where (log.severity_text == nil or log.severity_text == "") and log.attributes["level"] != nil`,
-		`set(resource.attributes["level"], log.severity_text) where log.severity_text != nil and log.severity_text != ""`,
+		`set(log.attributes["level"], log.severity_text)`,
 		`set(resource.attributes["filename"], log.attributes["log.file.path"]) where log.attributes["log.file.path"] != nil`,
 		`set(resource.attributes["unit"], log.attributes["systemd.unit"]) where log.attributes["systemd.unit"] != nil`,
 		`set(resource.attributes["namespace"], resource.attributes["k8s.namespace.name"]) where resource.attributes["k8s.namespace.name"] != nil`,
@@ -302,6 +301,50 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 		return nil, fmt.Errorf("logs plugin: encode otelcol config: %w", err)
 	}
 	return append([]byte("# Rendered by ongrid-edge logs plugin. DO NOT EDIT.\n"), body...), nil
+}
+
+func levelDetectionStatements() []string {
+	emptySeverity := `(log.severity_text == nil or log.severity_text == "")`
+	jsonBodyPattern := strconv.Quote(`^\s*\{`)
+	textLevelPattern := strconv.Quote(`(?i)(?:^|[^[:alpha:]])(?P<level>trace|debug|info(?:rmation)?|notice|warn(?:ing)?|error|err|critical|crit|fatal|panic)(?:[^[:alpha:]]|$)`)
+	statements := []string{
+		`set(log.severity_text, log.attributes["level"]) where ` + emptySeverity + ` and log.attributes["level"] != nil`,
+		`set(log.severity_text, log.attributes["severity"]) where ` + emptySeverity + ` and log.attributes["severity"] != nil`,
+		`set(log.severity_text, log.attributes["severity_text"]) where ` + emptySeverity + ` and log.attributes["severity_text"] != nil`,
+		fmt.Sprintf(`merge_maps(log.cache, ParseJSON(log.body), "upsert") where %s and IsString(log.body) and IsMatch(log.body, %s)`, emptySeverity, jsonBodyPattern),
+		`set(log.severity_text, log.cache["level"]) where ` + emptySeverity + ` and log.cache["level"] != nil`,
+		`set(log.severity_text, log.cache["severity"]) where ` + emptySeverity + ` and log.cache["severity"] != nil`,
+		`set(log.severity_text, log.cache["severity_text"]) where ` + emptySeverity + ` and log.cache["severity_text"] != nil`,
+		`set(log.severity_text, "info") where ` + emptySeverity + ` and IsString(log.body) and IsMatch(log.body, "^\\s*I\\d{4}\\s")`,
+		`set(log.severity_text, "warn") where ` + emptySeverity + ` and IsString(log.body) and IsMatch(log.body, "^\\s*W\\d{4}\\s")`,
+		`set(log.severity_text, "error") where ` + emptySeverity + ` and IsString(log.body) and IsMatch(log.body, "^\\s*E\\d{4}\\s")`,
+		`set(log.severity_text, "fatal") where ` + emptySeverity + ` and IsString(log.body) and IsMatch(log.body, "^\\s*F\\d{4}\\s")`,
+		fmt.Sprintf(`merge_maps(log.cache, ExtractPatterns(log.body, %s), "upsert") where %s and IsString(log.body)`, textLevelPattern, emptySeverity),
+		`set(log.severity_text, log.cache["level"]) where ` + emptySeverity + ` and log.cache["level"] != nil`,
+		`set(log.severity_text, ToLowerCase(log.severity_text)) where log.severity_text != nil and log.severity_text != ""`,
+		`set(log.severity_text, "info") where log.severity_text == "information"`,
+		`set(log.severity_text, "warn") where log.severity_text == "warning"`,
+		`set(log.severity_text, "error") where log.severity_text == "err"`,
+		`set(log.severity_text, "critical") where log.severity_text == "crit"`,
+		`set(log.severity_text, "unknown") where ` + emptySeverity,
+	}
+	for _, severity := range []struct {
+		text   string
+		number string
+	}{
+		{text: "trace", number: "SEVERITY_NUMBER_TRACE"},
+		{text: "debug", number: "SEVERITY_NUMBER_DEBUG"},
+		{text: "info", number: "SEVERITY_NUMBER_INFO"},
+		{text: "notice", number: "SEVERITY_NUMBER_INFO"},
+		{text: "warn", number: "SEVERITY_NUMBER_WARN"},
+		{text: "error", number: "SEVERITY_NUMBER_ERROR"},
+		{text: "critical", number: "SEVERITY_NUMBER_FATAL"},
+		{text: "fatal", number: "SEVERITY_NUMBER_FATAL"},
+		{text: "panic", number: "SEVERITY_NUMBER_FATAL"},
+	} {
+		statements = append(statements, fmt.Sprintf(`set(log.severity_number, %s) where log.severity_text == %q`, severity.number, severity.text))
+	}
+	return statements
 }
 
 func journaldReceiver(spec map[string]interface{}, edgeID uint64, startAt string) map[string]interface{} {

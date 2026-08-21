@@ -42,10 +42,15 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResult, 
 		}
 		point := time.Unix(0, cursor.Timestamp)
 		if req.Direction == SortBackward && point.Before(req.End) {
-			req.End = point
+			// Loki's log range end is exclusive. Keep the cursor timestamp in
+			// the next query so Skip can remove records already returned at that
+			// timestamp without dropping the remaining records there.
+			req.End = point.Add(time.Nanosecond)
 		}
 		if req.Direction == SortForward && point.After(req.Start) {
-			req.Start = point
+			// Apply the same one-nanosecond overlap at the exclusive start edge
+			// for forward pagination.
+			req.Start = point.Add(-time.Nanosecond)
 		}
 	}
 
@@ -289,11 +294,26 @@ func (c *Client) Histogram(ctx context.Context, req SearchRequest, interval time
 		if err != nil {
 			return nil, err
 		}
-		metricQuery := fmt.Sprintf("sum(count_over_time(%s[%s]))", query, logQLDuration(interval))
+		// Loki aligns query_range evaluation timestamps to the epoch-based step
+		// grid even when start carries seconds or milliseconds. Evaluate at the
+		// next aligned point and offset the range selector backwards so every
+		// count still owns the exact product bucket (req.Start+i*interval,
+		// req.Start+(i+1)*interval].
+		firstBucketEnd := req.Start.Add(interval)
+		evaluationStart := firstBucketEnd.Truncate(interval)
+		if evaluationStart.Before(firstBucketEnd) {
+			evaluationStart = evaluationStart.Add(interval)
+		}
+		evaluationOffset := evaluationStart.Sub(firstBucketEnd)
+		offsetClause := ""
+		if evaluationOffset > 0 {
+			offsetClause = " offset " + logQLDuration(evaluationOffset)
+		}
+		metricQuery := fmt.Sprintf("sum(count_over_time(%s[%s]%s))", query, logQLDuration(interval), offsetClause)
 		out, err := c.QueryRange(ctx, QueryRangeOptions{
 			Query: metricQuery,
-			Start: req.Start.Add(interval),
-			End:   req.Start.Add(time.Duration(fullBucketCount) * interval),
+			Start: evaluationStart,
+			End:   evaluationStart.Add(time.Duration(fullBucketCount-1) * interval),
 			Step:  interval,
 			Limit: MaxSearchLimit,
 		})
@@ -305,7 +325,7 @@ func (c *Client) Histogram(ctx context.Context, req SearchRequest, interval time
 			return nil, err
 		}
 		for i := range fullBuckets {
-			fullBuckets[i].Start = fullBuckets[i].Start.Add(-interval).UTC()
+			fullBuckets[i].Start = fullBuckets[i].Start.Add(-interval - evaluationOffset).UTC()
 		}
 		buckets = append(buckets, fullBuckets...)
 	}
@@ -532,11 +552,16 @@ func decodeLokiRecords(result *QueryRangeResult) ([]Record, error) {
 			if clusterName := labels["cluster_name"]; clusterName != "" {
 				resources["cluster_name"] = clusterName
 			}
+			severityText := normalizeLevel(firstNonEmpty(labels["level"], labels["detected_level"]))
+			if severityText == "" {
+				severityText = detectLevel(message)
+			}
 			records = append(records, Record{
 				ID:                 stableLokiRecordID(rawTimestamp, labels, message),
 				Timestamp:          time.Unix(0, nanos).UTC(),
 				Message:            message,
-				SeverityText:       labels["level"],
+				SeverityText:       severityText,
+				SeverityNumber:     severityNumberForLevel(severityText),
 				Backend:            lokiBackendName,
 				Attributes:         attrs,
 				ResourceAttributes: resources,

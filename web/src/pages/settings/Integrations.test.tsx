@@ -4,7 +4,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import SettingsIntegrations from './Integrations';
-import { applyLogBackend, getLogBackend, rollbackLogBackend, saveLogBackend, type LogBackend } from '@/api/logs';
+import { applyLogBackend, getLogBackend, rollbackLogBackend, saveLogBackend, testLogBackend, type LogBackend } from '@/api/logs';
+import { openObservabilityUrl } from '@/lib/drilldown';
 
 vi.mock('@/api/settings', () => ({
   listSettings: vi.fn(async () => ({ items: [], total: 0 })),
@@ -26,6 +27,15 @@ vi.mock('@/api/logs', async (importOriginal) => {
     getLogBackend: vi.fn(),
     rollbackLogBackend: vi.fn(),
     saveLogBackend: vi.fn(async () => ({})),
+    testLogBackend: vi.fn(),
+  };
+});
+
+vi.mock('@/lib/drilldown', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/drilldown')>();
+  return {
+    ...actual,
+    openObservabilityUrl: vi.fn(async () => undefined),
   };
 });
 
@@ -65,6 +75,11 @@ function backend(status: LogBackend['status'], lastError = '', currentBackend: L
 describe('SettingsIntegrations log backend presentation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(testLogBackend).mockResolvedValue({
+      status: 'ok',
+      detected_version: '8.16.3',
+      tested_at: '2026-08-21T00:00:00Z',
+    });
     localStorage.setItem('ongrid-locale', 'zh-CN');
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
@@ -94,12 +109,13 @@ describe('SettingsIntegrations log backend presentation', () => {
     const user = userEvent.setup();
     const lokiTab = await screen.findByRole('tab', { name: /Loki/ });
     await act(async () => user.click(lokiTab));
-    await act(async () => user.click(screen.getByRole('button', { name: '验证并设为当前后端' })));
+    const loki = screen.getByRole('region', { name: 'Loki 日志后端配置' });
+    await act(async () => user.click(within(loki).getByRole('button', { name: '应用' })));
 
     expect(await screen.findByText('Loki 实写验证失败，Elasticsearch 仍是当前后端。请重试切换验证。')).toBeVisible();
     expect(screen.getByText(rollbackFailure)).toBeVisible();
     expect(screen.getByRole('tab', { name: /Loki/ })).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByRole('button', { name: '重试 Loki 切换验证' })).toBeEnabled();
+    expect(within(loki).getByRole('button', { name: '应用' })).toBeEnabled();
 
     await act(async () => user.click(screen.getByRole('tab', { name: /Elasticsearch/ })));
     await screen.findByRole('heading', { name: 'Elasticsearch 配置' });
@@ -116,12 +132,10 @@ describe('SettingsIntegrations log backend presentation', () => {
     expect(screen.getByRole('textbox', { name: /环境标识/ })).toHaveValue('prod');
   });
 
-  it('requires saving a rolled-back Elasticsearch configuration before applying it again', async () => {
+  it('applies an already-saved rolled-back Elasticsearch configuration directly', async () => {
     const rolledBack = backend('rolled_back', '', 'loki');
-    const saved = { ...backend('saved', '', 'loki'), id: 8, generation: 2 };
-    const applying = { ...saved, status: 'distributing' as const };
+    const applying = { ...rolledBack, status: 'distributing' as const };
     vi.mocked(getLogBackend).mockResolvedValue(rolledBack);
-    vi.mocked(saveLogBackend).mockResolvedValue(saved);
     vi.mocked(applyLogBackend).mockResolvedValue(applying);
 
     render(
@@ -136,22 +150,11 @@ describe('SettingsIntegrations log backend presentation', () => {
     const elasticsearch = screen.getByRole('region', { name: 'Elasticsearch 日志后端配置' });
     expect(screen.queryByRole('combobox', { name: '真实写探针 Edge' })).not.toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: '仅灰度，不自动全量' })).not.toBeInTheDocument();
-    expect(within(elasticsearch).getByRole('button', { name: '应用' })).toBeDisabled();
-    await act(async () => user.click(within(elasticsearch).getByRole('button', { name: '保存' })));
-
-    await waitFor(() => expect(saveLogBackend).toHaveBeenCalledOnce());
-    expect(saveLogBackend).toHaveBeenCalledWith(expect.objectContaining({
-      write_endpoints: ['https://es.example.com:9200'],
-      query_endpoint: 'https://es.example.com:9200',
-      dataset: 'ongrid.system',
-      namespace: 'prod',
-      write_credential_ref: 'write-key',
-      query_credential_ref: 'query-key',
-      tls_insecure: false,
-    }));
+    expect(within(elasticsearch).getByRole('button', { name: '保存' })).toBeDisabled();
+    expect(within(elasticsearch).getByRole('button', { name: '应用' })).toBeEnabled();
     await act(async () => user.click(within(elasticsearch).getByRole('button', { name: '应用' })));
-    await waitFor(() => expect(applyLogBackend).toHaveBeenCalledWith(8));
-    expect(applyLogBackend).not.toHaveBeenCalledWith(7);
+    await waitFor(() => expect(applyLogBackend).toHaveBeenCalledWith(7));
+    expect(saveLogBackend).not.toHaveBeenCalled();
   });
 
   it('replaces the switching message after polling observes Elasticsearch is active', async () => {
@@ -161,18 +164,16 @@ describe('SettingsIntegrations log backend presentation', () => {
       return pollCallbacks.length;
     }) as typeof window.setInterval);
     const rolledBack = backend('rolled_back', '', 'loki');
-    const saved = { ...backend('saved', '', 'loki'), id: 8, generation: 2 };
-    const applying = { ...saved, status: 'distributing' as const };
+    const applying = { ...rolledBack, status: 'distributing' as const };
     const active = {
-      ...saved,
+      ...rolledBack,
       status: 'active' as const,
       current_backend: 'elasticsearch' as const,
-      current_backend_id: 8,
+      current_backend_id: 7,
       cutover_at: '2026-08-20T01:00:00Z',
     };
     let currentBackend = rolledBack;
     vi.mocked(getLogBackend).mockImplementation(async () => currentBackend);
-    vi.mocked(saveLogBackend).mockResolvedValue(saved);
     vi.mocked(applyLogBackend).mockImplementation(async () => {
       currentBackend = active;
       return applying;
@@ -187,7 +188,6 @@ describe('SettingsIntegrations log backend presentation', () => {
     const user = userEvent.setup();
     await act(async () => user.click(await screen.findByRole('tab', { name: /Elasticsearch/ })));
     const elasticsearch = await screen.findByRole('region', { name: 'Elasticsearch 日志后端配置' });
-    await act(async () => user.click(within(elasticsearch).getByRole('button', { name: '保存' })));
     await act(async () => user.click(within(elasticsearch).getByRole('button', { name: '应用' })));
     expect(screen.getByText(/正在验证 Elasticsearch 和全部日志采集 Edge/)).toBeVisible();
     await waitFor(() => expect(pollCallbacks.length).toBeGreaterThan(0));
@@ -201,7 +201,50 @@ describe('SettingsIntegrations log backend presentation', () => {
     expect(screen.queryByText(/正在验证 Elasticsearch 和全部日志采集 Edge/)).not.toBeInTheDocument();
   });
 
-  it('exposes only save and apply for Elasticsearch configuration changes', async () => {
+  it('opens the active Elasticsearch datasource in Grafana Explore', async () => {
+    vi.mocked(getLogBackend).mockResolvedValue(backend('active'));
+
+    render(
+      <MemoryRouter initialEntries={['/settings/integrations?focus=logs']}>
+        <SettingsIntegrations />
+      </MemoryRouter>,
+    );
+
+    const elasticsearch = await screen.findByRole('region', { name: 'Elasticsearch 日志后端配置' });
+    const openButton = within(elasticsearch).getByRole('button', { name: '在 Grafana 中查看日志' });
+    await waitFor(() => expect(openButton).toBeEnabled());
+    await act(async () => userEvent.click(openButton));
+
+    await waitFor(() => expect(openObservabilityUrl).toHaveBeenCalledOnce());
+    const target = new URL(vi.mocked(openObservabilityUrl).mock.calls[0][0]);
+    const panes = JSON.parse(target.searchParams.get('panes') ?? '{}');
+    expect(panes.og.datasource).toBe('ongrid-elasticsearch');
+    expect(panes.og.queries[0].datasource).toEqual({ type: 'elasticsearch', uid: 'ongrid-elasticsearch' });
+  });
+
+  it('opens all Loki log sources in Grafana Explore', async () => {
+    vi.mocked(getLogBackend).mockResolvedValue(backend('rolled_back', '', 'loki'));
+
+    render(
+      <MemoryRouter initialEntries={['/settings/integrations?focus=logs']}>
+        <SettingsIntegrations />
+      </MemoryRouter>,
+    );
+
+    const loki = await screen.findByRole('region', { name: 'Loki 日志后端配置' });
+    const openButton = within(loki).getByRole('button', { name: '在 Grafana 中查看日志' });
+    await waitFor(() => expect(openButton).toBeEnabled());
+    await act(async () => userEvent.click(openButton));
+
+    await waitFor(() => expect(openObservabilityUrl).toHaveBeenCalledOnce());
+    const target = new URL(vi.mocked(openObservabilityUrl).mock.calls[0][0]);
+    const panes = JSON.parse(target.searchParams.get('panes') ?? '{}');
+    expect(panes.og.datasource).toBe('ongrid-loki');
+    expect(panes.og.queries[0].datasource).toEqual({ type: 'loki', uid: 'ongrid-loki' });
+    expect(panes.og.queries[0].expr).toBe('{ongrid_source=~".+"}');
+  });
+
+  it('tests a saved Elasticsearch configuration without applying it', async () => {
     vi.mocked(getLogBackend).mockResolvedValue(backend('saved', '', 'loki'));
 
     render(
@@ -213,9 +256,34 @@ describe('SettingsIntegrations log backend presentation', () => {
     const user = userEvent.setup();
     await act(async () => user.click(await screen.findByRole('tab', { name: /Elasticsearch/ })));
     const elasticsearch = await screen.findByRole('region', { name: 'Elasticsearch 日志后端配置' });
-    expect(within(elasticsearch).getByRole('button', { name: '保存' })).toBeInTheDocument();
-    expect(within(elasticsearch).getByRole('button', { name: '应用' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '测试端点与认证' })).not.toBeInTheDocument();
-    expect(screen.queryByText(/草稿/)).not.toBeInTheDocument();
+    await act(async () => user.click(within(elasticsearch).getByRole('button', { name: '测试连接' })));
+
+    await waitFor(() => expect(testLogBackend).toHaveBeenCalledWith(7));
+    expect(applyLogBackend).not.toHaveBeenCalled();
+    expect(screen.getByText(/连接测试通过；查询\/写入端点及 API Key 权限有效（Elasticsearch 8\.16\.3）/)).toBeVisible();
+  });
+
+  it('uses the same four log backend actions in the same order', async () => {
+    vi.mocked(getLogBackend).mockResolvedValue(backend('saved', '', 'loki'));
+
+    render(
+      <MemoryRouter initialEntries={['/settings/integrations?focus=logs']}>
+        <SettingsIntegrations />
+      </MemoryRouter>,
+    );
+
+    const expected = ['保存', '测试连接', '应用', '在 Grafana 中查看日志'];
+    const actionOrder = (region: HTMLElement) => within(region)
+      .getAllByRole('button')
+      .map((button) => button.textContent?.trim() ?? '')
+      .filter((label) => expected.includes(label));
+
+    const loki = await screen.findByRole('region', { name: 'Loki 日志后端配置' });
+    expect(actionOrder(loki)).toEqual(expected);
+
+    const user = userEvent.setup();
+    await act(async () => user.click(screen.getByRole('tab', { name: /Elasticsearch/ })));
+    const elasticsearch = await screen.findByRole('region', { name: 'Elasticsearch 日志后端配置' });
+    expect(actionOrder(elasticsearch)).toEqual(expected);
   });
 });

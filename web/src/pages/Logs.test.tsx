@@ -44,6 +44,13 @@ const records = [
       'k8s.pod.uid': 'internal-pod-uid',
       'ongrid.backend': 'elasticsearch',
       'ongrid.backend_generation': 3,
+      k8s_container_name: 'payments',
+      k8s_container_restart_count: 2,
+      k8s_namespace_name: 'production',
+      k8s_pod_uid: 'internal-pod-uid',
+      log_file_path: '/var/log/containers/payments.log',
+      ongrid_backend: 'elasticsearch',
+      ongrid_backend_generation: 3,
     },
     resource_attributes: { device_id: '42', cluster_id: '7', cluster_name: 'kind-local', level: 'INFO', 'k8s.namespace.name': 'production' },
   },
@@ -133,7 +140,6 @@ describe('LogsPage', () => {
           { start: '2026-08-19T01:01:00.000Z', count: 3 },
         ],
       })),
-      http.post('/api/v1/logs/context', () => HttpResponse.json({ code: 0, message: '', data: records })),
     );
   });
 
@@ -142,7 +148,7 @@ describe('LogsPage', () => {
 
     await waitForInitialLogs();
     expect(screen.getByText('payment request completed')).toBeInTheDocument();
-    expect(screen.getByText('payment request completed').closest('button')).toHaveTextContent('设备:checkout-host (#42)');
+    expect(screen.getByText('payment request completed').closest('[role="listitem"]')).toHaveTextContent('设备:checkout-host (#42)');
     expect(screen.getAllByText('elasticsearch')).toHaveLength(1);
     expect(screen.getAllByText('kind-local (#7)')).not.toHaveLength(0);
     expect(screen.getByRole('checkbox', { name: /级别.*level/i })).toBeChecked();
@@ -154,6 +160,13 @@ describe('LogsPage', () => {
     expect(screen.queryByText('k8s.pod.uid')).not.toBeInTheDocument();
     expect(screen.queryByText('ongrid.backend')).not.toBeInTheDocument();
     expect(screen.queryByText('ongrid.backend_generation')).not.toBeInTheDocument();
+    expect(screen.queryByText('k8s_container_name')).not.toBeInTheDocument();
+    expect(screen.queryByText('k8s_container_restart_count')).not.toBeInTheDocument();
+    expect(screen.queryByText('k8s_namespace_name')).not.toBeInTheDocument();
+    expect(screen.queryByText('k8s_pod_uid')).not.toBeInTheDocument();
+    expect(screen.queryByText('log_file_path')).not.toBeInTheDocument();
+    expect(screen.queryByText('ongrid_backend')).not.toBeInTheDocument();
+    expect(screen.queryByText('ongrid_backend_generation')).not.toBeInTheDocument();
     expect(screen.getByText('日志总数', { exact: false })).toHaveTextContent('5');
     expect(screen.getByText('已加载', { exact: false })).toHaveTextContent('2');
     expect(screen.getByText('耗时', { exact: false })).toHaveTextContent('27 ms');
@@ -163,6 +176,28 @@ describe('LogsPage', () => {
     expect(screen.getByRole('link', { name: /采集与后端配置/ })).toHaveAttribute('href', '/settings/integrations?focus=logs');
     expect(screen.queryByText('日志检索')).not.toBeInTheDocument();
     expect(screen.queryByText('采集配置')).not.toBeInTheDocument();
+  });
+
+  it('resolves a cluster name from topology when logs contain only cluster_id', async () => {
+    const recordsWithoutClusterName = records.map((record) => ({
+      ...record,
+      resource_attributes: { ...record.resource_attributes, cluster_name: undefined },
+    }));
+    server.use(http.post('/api/v1/logs/search', () => HttpResponse.json({
+      code: 0,
+      message: '',
+      data: { records: recordsWithoutClusterName, has_more: false, took_ms: 27, backends: ['elasticsearch'] },
+    })));
+
+    const user = userEvent.setup();
+    render(<MemoryRouter><LogsPage /></MemoryRouter>);
+    await waitForInitialLogs();
+
+    const rawRow = screen.getByText('payment request completed').closest('[role="listitem"]');
+    await waitFor(() => expect(rawRow).toHaveTextContent('集群:kind-local (#7)'));
+
+    await user.click(screen.getByRole('button', { name: /表格/ }));
+    expect(screen.getByText('payment request completed').closest('tr')).toHaveTextContent('kind-local (#7)');
   });
 
   it('uses fields API metadata when the current query has no records', async () => {
@@ -187,6 +222,64 @@ describe('LogsPage', () => {
     expect(screen.getByRole('checkbox', { name: /Trace ID.*trace_id/i })).not.toBeChecked();
     expect(screen.queryByRole('checkbox', { name: /设备.*device_id/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: /message/i })).not.toBeInTheDocument();
+  });
+
+  it('loads advanced facet values on demand with bounded concurrency', async () => {
+    const user = userEvent.setup();
+    let started = 0;
+    let completed = 0;
+    let active = 0;
+    let maxActive = 0;
+    server.use(http.post('/api/v1/logs/field-values', async () => {
+      started++;
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active--;
+      completed++;
+      return HttpResponse.json({ code: 0, message: '', data: [] });
+    }));
+
+    render(<MemoryRouter><LogsPage /></MemoryRouter>);
+    await waitForInitialLogs();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(started).toBe(0);
+
+    await user.click(screen.getByRole('button', { name: /更多筛选/ }));
+
+    await waitFor(() => expect(completed).toBe(3));
+    expect(started).toBe(3);
+    expect(maxActive).toBeLessThanOrEqual(2);
+  });
+
+  it('aborts stale facet requests when advanced filters are closed', async () => {
+    const user = userEvent.setup();
+    let started = 0;
+    let aborted = 0;
+    server.use(http.post('/api/v1/logs/field-values', async ({ request }) => {
+      started++;
+      await new Promise<void>((resolve) => {
+        const onAbort = () => {
+          aborted++;
+          resolve();
+        };
+        if (request.signal.aborted) onAbort();
+        else request.signal.addEventListener('abort', onAbort, { once: true });
+      });
+      return HttpResponse.json({ code: 0, message: '', data: [] });
+    }));
+
+    render(<MemoryRouter><LogsPage /></MemoryRouter>);
+    await waitForInitialLogs();
+    const advancedToggle = screen.getByRole('button', { name: /更多筛选/ });
+    await user.click(advancedToggle);
+    await waitFor(() => expect(started).toBe(2));
+
+    await user.click(advancedToggle);
+
+    await waitFor(() => expect(aborted).toBe(2));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(started).toBe(2);
   });
 
   it('lists registered clusters and refreshes immediately with the selected cluster scope', async () => {
@@ -254,51 +347,31 @@ describe('LogsPage', () => {
     await waitFor(() => expect(searchRequests.at(-1)?.scope?.levels).toEqual(['ERROR']));
   });
 
-  it('switches to the table view and opens log context', async () => {
+  it('keeps raw and table log text directly selectable without context interaction', async () => {
     const user = userEvent.setup();
     render(<MemoryRouter><LogsPage /></MemoryRouter>);
     await waitForInitialLogs();
+
+    const rawMessage = screen.getByText('upstream timeout while calling inventory');
+    const rawRow = rawMessage.closest('[role="listitem"]');
+    expect(rawRow).toHaveClass('select-text', 'cursor-text');
+    expect(rawMessage.closest('button')).toBeNull();
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(rawMessage);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    expect(selection?.toString()).toBe('upstream timeout while calling inventory');
 
     await user.click(screen.getByRole('button', { name: /表格/ }));
     expect(screen.getByRole('columnheader', { name: '日志正文' })).toBeInTheDocument();
     const row = screen.getByText('upstream timeout while calling inventory').closest('tr');
     expect(row).not.toBeNull();
     expect(row).toHaveTextContent('checkout-host (#42)');
-    await user.click(row!);
-
-    const context = await screen.findByText('上下文日志');
-    const aside = context.closest('aside');
-    expect(aside).not.toBeNull();
-    await waitFor(() => expect(within(aside!).getAllByText('payment request completed')).toHaveLength(1));
-    await waitFor(() => expect(within(aside!).queryByText('读取前后文…')).not.toBeInTheDocument());
-  });
-
-  it('keeps the newest log context when an older request finishes later', async () => {
-    const user = userEvent.setup();
-    let releaseFirst!: () => void;
-    const firstResponse = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    server.use(http.post('/api/v1/logs/context', async ({ request }) => {
-      const input = await request.json() as { timestamp: string };
-      if (input.timestamp === records[0].timestamp) {
-        await firstResponse;
-        return HttpResponse.json({ code: 0, message: '', data: [{ ...records[0], id: 'context-first', message: 'older context result' }] });
-      }
-      return HttpResponse.json({ code: 0, message: '', data: [{ ...records[1], id: 'context-second', message: 'newest context result' }] });
-    }));
-
-    render(<MemoryRouter><LogsPage /></MemoryRouter>);
-    await waitForInitialLogs();
-
-    await user.click(screen.getByText('payment request completed').closest('button')!);
-    await user.click(screen.getByText('upstream timeout while calling inventory').closest('button')!);
-    const aside = (await screen.findByText('上下文日志')).closest('aside');
-    expect(aside).not.toBeNull();
-    await within(aside!).findByText('newest context result');
-
-    releaseFirst();
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    expect(within(aside!).queryByText('older context result')).not.toBeInTheDocument();
-    expect(within(aside!).getByText('newest context result')).toBeInTheDocument();
+    expect(row).toHaveClass('select-text', 'cursor-text');
+    expect(row).not.toHaveAttribute('role', 'button');
+    expect(row).not.toHaveAttribute('tabindex');
+    expect(screen.queryByText('上下文日志')).not.toBeInTheDocument();
   });
 
   it('keeps unwrapped raw and table logs horizontally scrollable', async () => {
@@ -316,7 +389,7 @@ describe('LogsPage', () => {
     expect(dense).toHaveAttribute('aria-pressed', 'true');
 
     const rawMessage = screen.getByText('upstream timeout while calling inventory');
-    const rawRow = rawMessage.closest('button');
+    const rawRow = rawMessage.closest('[role="listitem"]');
     expect(rawMessage.parentElement).toHaveClass('whitespace-nowrap');
     expect(rawMessage.parentElement).not.toHaveClass('truncate');
     expect(rawRow).toHaveClass('w-max', 'min-w-full');

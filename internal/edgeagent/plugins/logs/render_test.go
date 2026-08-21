@@ -235,7 +235,16 @@ func TestRenderHostAddsManagerClusterAndNormalizesLevel(t *testing.T) {
 	assertStringListContains(t, statements, fmt.Sprintf(`delete_matching_keys(log.attributes, %s)`, strconv.Quote(sensitiveAttributeKeyPattern)))
 	assertStringListContains(t, statements, fmt.Sprintf(`delete_matching_keys(resource.attributes, %s)`, strconv.Quote(sensitiveAttributeKeyPattern)))
 	assertStringListContains(t, statements, `set(log.severity_text, log.attributes["level"]) where (log.severity_text == nil or log.severity_text == "") and log.attributes["level"] != nil`)
-	assertStringListContains(t, statements, `set(resource.attributes["level"], log.severity_text) where log.severity_text != nil and log.severity_text != ""`)
+	assertStringListContains(t, statements, `set(log.severity_text, "info") where (log.severity_text == nil or log.severity_text == "") and IsString(log.body) and IsMatch(log.body, "^\\s*I\\d{4}\\s")`)
+	assertStringListContains(t, statements, `set(log.severity_text, "error") where (log.severity_text == nil or log.severity_text == "") and IsString(log.body) and IsMatch(log.body, "^\\s*E\\d{4}\\s")`)
+	assertStringListContains(t, statements, `set(log.severity_text, "unknown") where (log.severity_text == nil or log.severity_text == "")`)
+	assertStringListContains(t, statements, `set(log.severity_number, SEVERITY_NUMBER_ERROR) where log.severity_text == "error"`)
+	assertStringListContains(t, statements, `set(log.attributes["level"], log.severity_text)`)
+	for _, statement := range statements {
+		if statement == `set(resource.attributes["level"], log.severity_text)` {
+			t.Fatal("per-record level must not be written into shared resource attributes")
+		}
+	}
 }
 
 func TestSensitivePatternsCoverJSONBodiesAndStructuredKeys(t *testing.T) {
