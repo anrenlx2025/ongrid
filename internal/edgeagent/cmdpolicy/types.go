@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package cmdpolicy is the policy + sandbox layer that gates which
 // shell commands the edge will execute on behalf of an LLM-driven tool
 // (currently the bash skill — internal/edgeagent/bash). The policy is

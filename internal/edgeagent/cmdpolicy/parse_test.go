@@ -1,3 +1,5 @@
+//go:build linux
+
 package cmdpolicy
 
 import (
@@ -43,8 +45,8 @@ func TestSplitPipes_ForbiddenChars(t *testing.T) {
 		"echo a &",
 		"diff <(ls) <(ls)",
 		"echo ${HOME}",
-		"echo |",      // empty trailing segment
-		"| ps",        // empty leading segment
+		"echo |",       // empty trailing segment
+		"| ps",         // empty leading segment
 		`echo "unterm`, // unterminated quote
 		`echo \`,       // trailing backslash
 	}

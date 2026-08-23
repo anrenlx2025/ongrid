@@ -45,6 +45,15 @@ type ClientConfig struct {
 	TLSCAFile string
 	// TLSCA is a legacy alias for TLSCAFile (Phase 1 naming).
 	TLSCA string
+	// TLSServerName overrides the TLS SNI / cert verification name.
+	// Empty = use the host part of ServerAddr. Set when dialing by IP
+	// but the broker cert's CN/SAN uses a DNS name.
+	TLSServerName string
+	// TLSRequired makes an empty CA config a hard error instead of a
+	// silent plaintext fallback. The installer sets it whenever TLS was
+	// configured at install time, so a lost / corrupted CA env var can
+	// never silently downgrade the credential channel to cleartext.
+	TLSRequired bool
 	// Log is optional; a default discard-style logger is used when nil.
 	Log *slog.Logger
 }

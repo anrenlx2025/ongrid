@@ -33,10 +33,10 @@ func isAdmin() bool {
 	return cmd.Run() == nil
 }
 
-// TestApplySecretACL_RestrictsToSystemAndAdmins 验证 ApplySecretACL 后：
-//   - SYSTEM:(F) 出现在 icacls 输出
-//   - Administrators:(F) 出现
-//   - BUILTIN\Users 不出现
+// TestApplySecretACL_RestrictsToSystemAndAdmins 验证 ApplySecretACL 后
+// DACL 是严格白名单（SYSTEM + Administrators allow-full，无其他 trustee）。
+// 用 VerifySecretACL（原生 API / SID 级）而非 icacls 文本输出做断言 —
+// 文本输出里的账户名会随系统语言本地化，断言不可靠。
 //
 // 需要 Administrator 身份（icacls 修改 ACL 需要文件所有权或 SeTakeOwnershipPrivilege）。
 func TestApplySecretACL_RestrictsToSystemAndAdmins(t *testing.T) {
@@ -53,21 +53,116 @@ func TestApplySecretACL_RestrictsToSystemAndAdmins(t *testing.T) {
 	if err := ApplySecretACL(path); err != nil {
 		t.Fatalf("ApplySecretACL: %v", err)
 	}
+	if err := VerifySecretACL(path); err != nil {
+		t.Errorf("VerifySecretACL after Apply should pass (strict whitelist), got: %v", err)
+	}
+}
 
-	out, err := exec.Command("icacls", path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("icacls read: %v (output: %s)", err, out)
-	}
-	output := string(out)
+// --- 正向白名单（strict verify）---
 
-	if !strings.Contains(output, "NT AUTHORITY\\SYSTEM:(F)") {
-		t.Errorf("SYSTEM:(F) missing in ACL: %s", output)
+// TestVerifyDirACL_RejectsDefaultTempACL 验证正向白名单语义（无需 admin）：
+// t.TempDir 的默认 ACL 含当前用户等额外 trustee → 必须拒绝。
+// 黑名单式检查（只查 Users/Everyone）检不出这种"具体用户 ACE"，
+// 这正是预植目录攻击（install 前给自己授予显式 ACE）的形态。
+func TestVerifyDirACL_RejectsDefaultTempACL(t *testing.T) {
+	if err := VerifyDirACL(t.TempDir()); err == nil {
+		t.Fatal("VerifyDirACL should reject default TempDir ACL (extra trustees present)")
 	}
-	if !strings.Contains(output, "BUILTIN\\Administrators:(F)") {
-		t.Errorf("Administrators:(F) missing in ACL: %s", output)
+}
+
+// TestVerifyTreeACL_MissingRoot 验证 root 不存在时显式报错（fail-closed）。
+func TestVerifyTreeACL_MissingRoot(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-dir")
+	if err := VerifyTreeACL(missing); err == nil {
+		t.Fatal("VerifyTreeACL should fail on non-existent root")
 	}
-	if strings.Contains(output, "BUILTIN\\Users:") {
-		t.Errorf("forbidden Users ACE present: %s", output)
+}
+
+// TestVerifyTreeACL_PassesAfterApplyDirACL 验证 ApplyDirACL 后整棵子树
+// （子目录 + 文件，经 (OI)(CI) 继承）通过严格白名单。需要 Administrator。
+func TestVerifyTreeACL_PassesAfterApplyDirACL(t *testing.T) {
+	if !isAdmin() {
+		t.Skip("requires Administrator")
+	}
+	root := t.TempDir()
+	sub := filepath.Join(root, "incoming")
+	if err := os.MkdirAll(sub, 0o750); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pending"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write pending: %v", err)
+	}
+	if err := ApplyDirACL(root); err != nil {
+		t.Fatalf("ApplyDirACL: %v", err)
+	}
+	if err := VerifyTreeACL(root); err != nil {
+		t.Errorf("VerifyTreeACL after ApplyDirACL should pass for inherited subtree, got: %v", err)
+	}
+}
+
+// --- EnsureSecureDir 归档重建（预植目录防御）---
+
+// TestEnsureSecureDir_ArchivesPrePlantedInsecureDir 验证：已存在但 ACL
+// 不合规的目录（模拟 install 前预植）被归档改名，原位全新重建且新目录
+// 无预植内容、ACL 严格通过。需要 Administrator（ApplyDirACL + 归档后的访问）。
+func TestEnsureSecureDir_ArchivesPrePlantedInsecureDir(t *testing.T) {
+	if !isAdmin() {
+		t.Skip("requires Administrator")
+	}
+	base := t.TempDir()
+	dir := filepath.Join(base, "upgrade")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir pre-planted: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "attacker-file"), []byte("evil"), 0o644); err != nil {
+		t.Fatalf("write pre-planted file: %v", err)
+	}
+
+	if err := EnsureSecureDir(dir); err != nil {
+		t.Fatalf("EnsureSecureDir: %v", err)
+	}
+
+	// 新目录不含预植内容
+	if _, err := os.Stat(filepath.Join(dir, "attacker-file")); !os.IsNotExist(err) {
+		t.Errorf("pre-planted file must not survive into the rebuilt dir, got err: %v", err)
+	}
+	// 归档产物存在且包含预植文件（数据保留，路径脱离信任根）
+	archives, err := filepath.Glob(filepath.Join(base, "upgrade.preexisting-*"))
+	if err != nil || len(archives) != 1 {
+		t.Fatalf("expected exactly one archive, got %v (err: %v)", archives, err)
+	}
+	if _, err := os.Stat(filepath.Join(archives[0], "attacker-file")); err != nil {
+		t.Errorf("archive should retain pre-planted file: %v", err)
+	}
+	// 重建后的目录 ACL 严格通过
+	if err := VerifyDirACL(dir); err != nil {
+		t.Errorf("rebuilt dir should pass strict whitelist, got: %v", err)
+	}
+}
+
+// TestEnsureSecureDir_IdempotentKeepsSecureDir 验证幂等重入：已合规目录
+// 不归档、内容保留。需要 Administrator。
+func TestEnsureSecureDir_IdempotentKeepsSecureDir(t *testing.T) {
+	if !isAdmin() {
+		t.Skip("requires Administrator")
+	}
+	base := t.TempDir()
+	dir := filepath.Join(base, "data")
+	if err := EnsureSecureDir(dir); err != nil {
+		t.Fatalf("first EnsureSecureDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secrets.enc"), []byte("dummy"), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	if err := EnsureSecureDir(dir); err != nil {
+		t.Fatalf("second EnsureSecureDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "secrets.enc")); err != nil {
+		t.Errorf("existing content must survive idempotent re-run: %v", err)
+	}
+	archives, _ := filepath.Glob(filepath.Join(base, "data.preexisting-*"))
+	if len(archives) != 0 {
+		t.Errorf("secure dir must not be archived on re-run, got: %v", archives)
 	}
 }
 

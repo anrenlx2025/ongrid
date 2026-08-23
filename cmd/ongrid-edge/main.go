@@ -29,10 +29,9 @@ import (
 	"github.com/ongridio/ongrid/internal/pkg/prom"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 
-	edgebash "github.com/ongridio/ongrid/internal/edgeagent/bash"
 	edgebiz "github.com/ongridio/ongrid/internal/edgeagent/biz"
 	edgecollector "github.com/ongridio/ongrid/internal/edgeagent/collector"
-	edgehostfiles "github.com/ongridio/ongrid/internal/edgeagent/host_files"
+	edgeconfig "github.com/ongridio/ongrid/internal/edgeagent/config"
 	edgek8s "github.com/ongridio/ongrid/internal/edgeagent/k8s"
 	edgeoperator "github.com/ongridio/ongrid/internal/edgeagent/operator"
 	edgeplugins "github.com/ongridio/ongrid/internal/edgeagent/plugins"
@@ -43,7 +42,6 @@ import (
 	edgepluginmetrics "github.com/ongridio/ongrid/internal/edgeagent/plugins/metrics"
 	edgepluginprocmetrics "github.com/ongridio/ongrid/internal/edgeagent/plugins/procmetrics"
 	edgeplugintraces "github.com/ongridio/ongrid/internal/edgeagent/plugins/traces"
-	edgerestartservice "github.com/ongridio/ongrid/internal/edgeagent/restart_service"
 	edgesvc "github.com/ongridio/ongrid/internal/edgeagent/service"
 	edgestreamrouter "github.com/ongridio/ongrid/internal/edgeagent/streamrouter"
 	edgewebshell "github.com/ongridio/ongrid/internal/edgeagent/webshell"
@@ -116,6 +114,26 @@ func main() {
 		slog.String("version", version),
 	)
 
+	// Load the DPAPI-encrypted broker token. Prefer secrets.enc; fall
+	// back to the env var when the file is missing or fails to decrypt.
+	secretsPath := cfg.Edge.SecretsFile
+	if secretsPath == "" {
+		secretsPath = defaultSecretsFile()
+	}
+	if secretsPath != "" {
+		if token, err := edgeconfig.LoadSecrets(secretsPath); err == nil {
+			cfg.Edge.SecretKey = token
+			log.Info("loaded broker token from secrets.enc",
+				slog.String("path", secretsPath))
+		} else {
+			// A missing file is the normal pre-install state (the env
+			// var is used); a decrypt failure is not.
+			log.Warn("secrets.enc load failed, using env var fallback",
+				slog.String("path", secretsPath),
+				slog.String("err", err.Error()))
+		}
+	}
+
 	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	if handled, err := runK8sDataPlaneMode(rootCtx, strings.TrimSpace(os.Getenv("ONGRID_EDGE_MODE")), log); handled {
@@ -137,16 +155,24 @@ func main() {
 
 	// Tunnel client.
 	client := tunnel.NewClient(tunnel.ClientConfig{
-		CloudAddr: cfg.Edge.CloudAddr,
-		AccessKey: cfg.Edge.AccessKey,
-		SecretKey: cfg.Edge.SecretKey,
-		Log:       log,
+		CloudAddr:     cfg.Edge.CloudAddr,
+		AccessKey:     cfg.Edge.AccessKey,
+		SecretKey:     cfg.Edge.SecretKey,
+		TLSCAFile:     cfg.Edge.TLSCAFile,
+		TLSServerName: cfg.Edge.TLSServerName,
+		TLSRequired:   cfg.Edge.TLSRequired,
+		Log:           log,
 	})
 
 	eg, egCtx := errgroup.WithContext(rootCtx)
 	if isK8sController(k8sInfo) && strings.TrimSpace(os.Getenv("ONGRID_K8S_TELEMETRY_SECRET")) != "" {
 		eg.Go(func() error { return runK8sTelemetryConfigSync(egCtx, cfg, k8sInfo, log) })
 	}
+
+	// Heartbeat writer (Windows only, no-op stub on Linux) so
+	// supervisor.exe can monitor this worker process via the
+	// health.json IPC.
+	eg.Go(func() error { return startHeartbeatWriter(egCtx, log) })
 
 	// Build the collector based on configured mode.
 	collector, scraperRunner, err := buildCollector(egCtx, cfg, log, eg)
@@ -158,37 +184,14 @@ func main() {
 
 	edgesvc.RegisterWithCollector(client, collector, log)
 
-	// host_files plugin (PR-8 + PR-N of): register the three
-	// filesystem inspection handlers (find_large_files / du_summary /
-	// stat_file). Real shell-out gated by SandboxConfig — failure to
-	// validate the sandbox (no allowed paths, missing find/du in PATH)
-	// is non-fatal: the edge boots without the host_files capability
-	// and operators see the warning in the journal.
+	// Platform-specific capabilities (host_files / restart_service /
+	// bash on Linux; host_files only on Windows — see
+	// capabilities_{linux,windows}.go). All Register calls are
+	// soft-fail: the edge boots and the operator sees a warning in the
+	// log when a capability is disabled. Kubernetes controllers skip
+	// host handlers; node-mode agents and standalone hosts keep them.
 	if k8sInfo == nil || isK8sNode(k8sInfo) {
-		if err := edgehostfiles.Register(client, log); err != nil {
-			log.Warn("host_files register failed; capability disabled", slog.Any("err", err))
-		}
-
-		// restart_service plugin (/ first MUTATING skill).
-		// Mocked posture in PR-7: handler returns Mocked=true without
-		// shelling out. SandboxConfig.Validate enforces a non-empty
-		// allow-list; on failure we boot without the capability so the
-		// edge can still scrape metrics / read files.
-		if err := edgerestartservice.Register(client, log); err != nil {
-			log.Warn("restart_service register failed; capability disabled", slog.Any("err", err))
-		}
-
-		// bash skill: generic read-only shell-execution gated by
-		// internal/edgeagent/cmdpolicy. The cmdpolicy package owns the
-		// rules (binary classes / arg matchers / path + network
-		// allowlists); this Register call wires the cmdpolicy.Sandbox to
-		// the host_files path validator and installs the handler. Boot
-		// continues on any soft failure (operator yaml override parse
-		// error, missing binaries) — cmdpolicy.Sandbox.Decide just
-		// rejects calls cleanly with a Reason the LLM can read.
-		if err := edgebash.Register(client, log); err != nil {
-			log.Warn("bash register failed; capability disabled", slog.Any("err", err))
-		}
+		registerEdgeCapabilities(client, log)
 		operatorLog := log.With(slog.String("comp", "operator"))
 		edgeoperator.Register(client, operatorLog)
 
@@ -212,12 +215,13 @@ func main() {
 		)
 	}
 
-	// UpgradeStageDir defaults to the systemd-install layout
-	// /var/lib/ongrid-edge/.upgrade. Empty disables agent_upgrade entirely
-	// (dev / non-systemd); set OVERRIDE via env to relocate for tests.
+	// UpgradeStageDir defaults to the platform-specific staging
+	// directory (see paths_{linux,windows}.go). Empty disables
+	// agent_upgrade entirely (dev / non-systemd); set OVERRIDE via env
+	// to relocate for tests.
 	stageDir := os.Getenv("ONGRID_EDGE_UPGRADE_STAGE_DIR")
 	if stageDir == "" {
-		stageDir = "/var/lib/ongrid-edge/.upgrade"
+		stageDir = defaultStageDir()
 	}
 	agent := edgebiz.NewAgent(client, collector, edgebiz.Config{
 		MetricsInterval:          cfg.Edge.CollectorInterval,
@@ -228,6 +232,7 @@ func main() {
 		UpgradeStageDir:          stageDir,
 		PacketCaptureDir:         envOr("ONGRID_PACKET_CAPTURE_DIR", "/var/lib/ongrid-edge/pcap"),
 	}, log)
+
 	if isK8sController(k8sInfo) {
 		inventoryInterval := parseDurationEnv("ONGRID_K8S_INVENTORY_INTERVAL", 10*time.Minute)
 		inventoryWatch := parseBoolEnv("ONGRID_K8S_INVENTORY_WATCH", true)
@@ -310,8 +315,8 @@ func main() {
 		// goroutine (in-process) or supervised subprocess. Kubernetes
 		// controllers do not run this host-oriented plugin set; node-mode
 		// DaemonSet agents keep it so they can reuse edge host capability.
-		pluginBinDir := envOr("ONGRID_EDGE_PLUGIN_BIN_DIR", "/usr/local/lib/ongrid-edge")
-		pluginWorkDir := envOr("ONGRID_EDGE_PLUGIN_WORK_DIR", "/var/lib/ongrid-edge/plugins")
+		pluginBinDir := envOr("ONGRID_EDGE_PLUGIN_BIN_DIR", defaultPluginBinDir())
+		pluginWorkDir := envOr("ONGRID_EDGE_PLUGIN_WORK_DIR", defaultPluginWorkDir())
 		pluginLog := log.With(slog.String("comp", "plugins"))
 
 		var registered []edgeplugins.Plugin
