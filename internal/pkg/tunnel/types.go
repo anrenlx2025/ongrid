@@ -45,6 +45,15 @@ type ClientConfig struct {
 	TLSCAFile string
 	// TLSCA is a legacy alias for TLSCAFile (Phase 1 naming).
 	TLSCA string
+	// TLSServerName overrides the TLS SNI / cert verification name.
+	// Empty = use the host part of ServerAddr. Set when dialing by IP
+	// but the broker cert's CN/SAN uses a DNS name.
+	TLSServerName string
+	// TLSRequired makes an empty CA config a hard error instead of a
+	// silent plaintext fallback. The installer sets it whenever TLS was
+	// configured at install time, so a lost / corrupted CA env var can
+	// never silently downgrade the credential channel to cleartext.
+	TLSRequired bool
 	// Log is optional; a default discard-style logger is used when nil.
 	Log *slog.Logger
 }
@@ -102,6 +111,15 @@ type Client interface {
 	OnReconnect(fn func())
 	// Close terminates the connection and stops further retries.
 	Close() error
+	// UpdateCredentials updates the AccessKey / SecretKey pair used for
+	// tunnel authentication on subsequent reconnects. The current
+	// session stays authenticated via the old credentials until the
+	// connection drops; the manager-side grace period (previous-hash
+	// window) covers this transition.
+	//
+	// Used by the edge agent after a successful MethodRotateToken RPC
+	// to ensure the next reconnect uses the new token.
+	UpdateCredentials(accessKey, secretKey string)
 }
 
 // StreamConn is the narrow contract a tunnel-opened stream exposes —

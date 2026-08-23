@@ -86,6 +86,14 @@ const (
 	// tells the manager "swap is happening now, watch for the new
 	// agent_version on next register".
 	MethodApplyPackage = "apply_package"
+
+	// MethodRotateToken (edge → manager): the edge requests a rotation
+	// of its broker token. The manager verifies the current identity,
+	// generates a new SecretKey, and keeps the old hash for a grace
+	// period (so a network drop mid-rotation cannot deadlock
+	// authentication). The edge atomically writes the new token to
+	// secrets.enc and updates the tunnel meta.
+	MethodRotateToken = "rotate_token"
 )
 
 // ---------------------------------------------------------------------
@@ -887,5 +895,23 @@ type ApplyPackageResponse struct {
 // on connect; the server decodes it before calling AuthFunc.
 type Meta struct {
 	AccessKey string `json:"access_key"`
+	SecretKey string `json:"secret_key"`
+}
+
+// ---------------------------------------------------------------------
+// rotate_token (edge -> cloud)
+// ---------------------------------------------------------------------
+
+// RotateTokenRequest is empty — the edge's identity is already established
+// via the authenticated tunnel session. The manager resolves the edge ID
+// from the session, generates a new SecretKey, and stores the old hash as
+// a grace-period previous hash before returning the new key.
+type RotateTokenRequest struct{}
+
+// RotateTokenResponse carries the freshly minted SecretKey. The AccessKey
+// does not change during rotation. The edge MUST persist this to
+// secrets.enc (atomic write) and call Client.UpdateCredentials before the
+// next reconnect to avoid authentication failure.
+type RotateTokenResponse struct {
 	SecretKey string `json:"secret_key"`
 }

@@ -30,6 +30,7 @@ func (f *fakeClient) Dial(_ context.Context) error                     { return 
 func (f *fakeClient) Call(_ context.Context, _ string, _, _ any) error { return nil }
 func (f *fakeClient) OnReconnect(_ func())                             {}
 func (f *fakeClient) Close() error                                     { return nil }
+func (f *fakeClient) UpdateCredentials(_, _ string)                    {}
 func (f *fakeClient) AcceptStream() (tunnel.StreamConn, error)         { return nil, nil }
 func (f *fakeClient) RegisterHandler(method string, h tunnel.Handler) {
 	f.mu.Lock()

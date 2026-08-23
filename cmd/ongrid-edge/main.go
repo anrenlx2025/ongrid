@@ -29,10 +29,10 @@ import (
 	"github.com/ongridio/ongrid/internal/pkg/prom"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 
-	edgebash "github.com/ongridio/ongrid/internal/edgeagent/bash"
 	edgebiz "github.com/ongridio/ongrid/internal/edgeagent/biz"
 	edgecollector "github.com/ongridio/ongrid/internal/edgeagent/collector"
-	edgehostfiles "github.com/ongridio/ongrid/internal/edgeagent/host_files"
+	edgeconfig "github.com/ongridio/ongrid/internal/edgeagent/config"
+	"github.com/ongridio/ongrid/internal/edgeagent/install"
 	edgek8s "github.com/ongridio/ongrid/internal/edgeagent/k8s"
 	edgeoperator "github.com/ongridio/ongrid/internal/edgeagent/operator"
 	edgeplugins "github.com/ongridio/ongrid/internal/edgeagent/plugins"
@@ -43,7 +43,6 @@ import (
 	edgepluginmetrics "github.com/ongridio/ongrid/internal/edgeagent/plugins/metrics"
 	edgepluginprocmetrics "github.com/ongridio/ongrid/internal/edgeagent/plugins/procmetrics"
 	edgeplugintraces "github.com/ongridio/ongrid/internal/edgeagent/plugins/traces"
-	edgerestartservice "github.com/ongridio/ongrid/internal/edgeagent/restart_service"
 	edgesvc "github.com/ongridio/ongrid/internal/edgeagent/service"
 	edgestreamrouter "github.com/ongridio/ongrid/internal/edgeagent/streamrouter"
 	edgewebshell "github.com/ongridio/ongrid/internal/edgeagent/webshell"
@@ -116,6 +115,39 @@ func main() {
 		slog.String("version", version),
 	)
 
+	// Load the DPAPI-encrypted broker token. Prefer secrets.enc; fall
+	// back to the env var when the file is missing or fails to decrypt.
+	secretsPath := cfg.Edge.SecretsFile
+	if secretsPath == "" {
+		secretsPath = defaultSecretsFile()
+	}
+	rotationNeeded := false
+	if secretsPath != "" {
+		if token, err := edgeconfig.LoadSecrets(secretsPath); err == nil {
+			cfg.Edge.SecretKey = token
+			log.Info("loaded broker token from secrets.enc",
+				slog.String("path", secretsPath))
+
+			// Check token rotation; token age is derived from the
+			// secrets.enc file modification time.
+			if info, statErr := os.Stat(secretsPath); statErr == nil {
+				tokenAge := time.Since(info.ModTime())
+				if edgeconfig.CheckTokenRotation(tokenAge, cfg.Edge.TokenRotationDays) {
+					log.Warn("token rotation needed — token age exceeds rotation period",
+						slog.Duration("token_age", tokenAge),
+						slog.Int("rotation_days", cfg.Edge.TokenRotationDays))
+					rotationNeeded = true
+				}
+			}
+		} else {
+			// A missing file is the normal pre-install state (the env
+			// var is used); a decrypt failure is not.
+			log.Warn("secrets.enc load failed, using env var fallback",
+				slog.String("path", secretsPath),
+				slog.String("err", err.Error()))
+		}
+	}
+
 	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	if handled, err := runK8sDataPlaneMode(rootCtx, strings.TrimSpace(os.Getenv("ONGRID_EDGE_MODE")), log); handled {
@@ -137,16 +169,24 @@ func main() {
 
 	// Tunnel client.
 	client := tunnel.NewClient(tunnel.ClientConfig{
-		CloudAddr: cfg.Edge.CloudAddr,
-		AccessKey: cfg.Edge.AccessKey,
-		SecretKey: cfg.Edge.SecretKey,
-		Log:       log,
+		CloudAddr:     cfg.Edge.CloudAddr,
+		AccessKey:     cfg.Edge.AccessKey,
+		SecretKey:     cfg.Edge.SecretKey,
+		TLSCAFile:     cfg.Edge.TLSCAFile,
+		TLSServerName: cfg.Edge.TLSServerName,
+		TLSRequired:   cfg.Edge.TLSRequired,
+		Log:           log,
 	})
 
 	eg, egCtx := errgroup.WithContext(rootCtx)
 	if isK8sController(k8sInfo) && strings.TrimSpace(os.Getenv("ONGRID_K8S_TELEMETRY_SECRET")) != "" {
 		eg.Go(func() error { return runK8sTelemetryConfigSync(egCtx, cfg, k8sInfo, log) })
 	}
+
+	// Heartbeat writer (Windows only, no-op stub on Linux) so
+	// supervisor.exe can monitor this worker process via the
+	// health.json IPC.
+	eg.Go(func() error { return startHeartbeatWriter(egCtx, log) })
 
 	// Build the collector based on configured mode.
 	collector, scraperRunner, err := buildCollector(egCtx, cfg, log, eg)
@@ -158,37 +198,14 @@ func main() {
 
 	edgesvc.RegisterWithCollector(client, collector, log)
 
-	// host_files plugin (PR-8 + PR-N of): register the three
-	// filesystem inspection handlers (find_large_files / du_summary /
-	// stat_file). Real shell-out gated by SandboxConfig — failure to
-	// validate the sandbox (no allowed paths, missing find/du in PATH)
-	// is non-fatal: the edge boots without the host_files capability
-	// and operators see the warning in the journal.
+	// Platform-specific capabilities (host_files / restart_service /
+	// bash on Linux; host_files only on Windows — see
+	// capabilities_{linux,windows}.go). All Register calls are
+	// soft-fail: the edge boots and the operator sees a warning in the
+	// log when a capability is disabled. Kubernetes controllers skip
+	// host handlers; node-mode agents and standalone hosts keep them.
 	if k8sInfo == nil || isK8sNode(k8sInfo) {
-		if err := edgehostfiles.Register(client, log); err != nil {
-			log.Warn("host_files register failed; capability disabled", slog.Any("err", err))
-		}
-
-		// restart_service plugin (/ first MUTATING skill).
-		// Mocked posture in PR-7: handler returns Mocked=true without
-		// shelling out. SandboxConfig.Validate enforces a non-empty
-		// allow-list; on failure we boot without the capability so the
-		// edge can still scrape metrics / read files.
-		if err := edgerestartservice.Register(client, log); err != nil {
-			log.Warn("restart_service register failed; capability disabled", slog.Any("err", err))
-		}
-
-		// bash skill: generic read-only shell-execution gated by
-		// internal/edgeagent/cmdpolicy. The cmdpolicy package owns the
-		// rules (binary classes / arg matchers / path + network
-		// allowlists); this Register call wires the cmdpolicy.Sandbox to
-		// the host_files path validator and installs the handler. Boot
-		// continues on any soft failure (operator yaml override parse
-		// error, missing binaries) — cmdpolicy.Sandbox.Decide just
-		// rejects calls cleanly with a Reason the LLM can read.
-		if err := edgebash.Register(client, log); err != nil {
-			log.Warn("bash register failed; capability disabled", slog.Any("err", err))
-		}
+		registerEdgeCapabilities(client, log)
 		operatorLog := log.With(slog.String("comp", "operator"))
 		edgeoperator.Register(client, operatorLog)
 
@@ -212,12 +229,13 @@ func main() {
 		)
 	}
 
-	// UpgradeStageDir defaults to the systemd-install layout
-	// /var/lib/ongrid-edge/.upgrade. Empty disables agent_upgrade entirely
-	// (dev / non-systemd); set OVERRIDE via env to relocate for tests.
+	// UpgradeStageDir defaults to the platform-specific staging
+	// directory (see paths_{linux,windows}.go). Empty disables
+	// agent_upgrade entirely (dev / non-systemd); set OVERRIDE via env
+	// to relocate for tests.
 	stageDir := os.Getenv("ONGRID_EDGE_UPGRADE_STAGE_DIR")
 	if stageDir == "" {
-		stageDir = "/var/lib/ongrid-edge/.upgrade"
+		stageDir = defaultStageDir()
 	}
 	agent := edgebiz.NewAgent(client, collector, edgebiz.Config{
 		MetricsInterval:          cfg.Edge.CollectorInterval,
@@ -228,6 +246,62 @@ func main() {
 		UpgradeStageDir:          stageDir,
 		PacketCaptureDir:         envOr("ONGRID_PACKET_CAPTURE_DIR", "/var/lib/ongrid-edge/pcap"),
 	}, log)
+
+	// Token rotation: once rotation is due and register_edge has
+	// completed, call MethodRotateToken → atomically rewrite
+	// secrets.enc → update the tunnel credentials used by the next
+	// reconnect.
+	if rotationNeeded {
+		eg.Go(func() error {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-egCtx.Done():
+					return nil
+				case <-ticker.C:
+				}
+				if agent.EdgeID() == 0 {
+					continue // register_edge not finished yet
+				}
+				rctx, cancel := context.WithTimeout(egCtx, 30*time.Second)
+				var resp tunnel.RotateTokenResponse
+				if err := client.Call(rctx, tunnel.MethodRotateToken,
+					tunnel.RotateTokenRequest{}, &resp); err != nil {
+					cancel()
+					log.Warn("token rotation RPC failed; will retry on next boot",
+						slog.Any("err", err))
+					return nil
+				}
+				cancel()
+				// 防御：manager 异常返回空 SecretKey 时绝不能落盘或更新内存凭证 —
+				// 空 token 一旦写入 secrets.enc，后续所有拨号（含重启后重新加载）
+				// 都将永久失败，只能人工介入重装凭证。
+				if resp.SecretKey == "" {
+					log.Error("token rotation RPC returned empty secret key; ignoring (manager-side anomaly)",
+						slog.String("path", secretsPath))
+					return nil
+				}
+				// Atomically rewrite secrets.enc (tmp → rename).
+				ss := install.NewSecretStore(secretsPath)
+				if err := ss.Rotate([]byte(resp.SecretKey)); err != nil {
+					// 落盘失败不能就此放弃：manager 侧旧 token 已轮换，超出 grace
+					// period 后旧凭证将无法再次完成 RotateToken，edge 被永久锁在外面。
+					// 留在循环内重试（RPC 在 grace period 窗口内可重放）。
+					log.Error("rotate secrets.enc failed; will retry",
+						slog.String("path", secretsPath),
+						slog.Any("err", err))
+					continue
+				}
+				// Update the tunnel credentials so the next reconnect
+				// uses the new token.
+				client.UpdateCredentials(cfg.Edge.AccessKey, resp.SecretKey)
+				log.Info("token rotation completed",
+					slog.String("path", secretsPath))
+				return nil
+			}
+		})
+	}
 	if isK8sController(k8sInfo) {
 		inventoryInterval := parseDurationEnv("ONGRID_K8S_INVENTORY_INTERVAL", 10*time.Minute)
 		inventoryWatch := parseBoolEnv("ONGRID_K8S_INVENTORY_WATCH", true)
@@ -310,8 +384,8 @@ func main() {
 		// goroutine (in-process) or supervised subprocess. Kubernetes
 		// controllers do not run this host-oriented plugin set; node-mode
 		// DaemonSet agents keep it so they can reuse edge host capability.
-		pluginBinDir := envOr("ONGRID_EDGE_PLUGIN_BIN_DIR", "/usr/local/lib/ongrid-edge")
-		pluginWorkDir := envOr("ONGRID_EDGE_PLUGIN_WORK_DIR", "/var/lib/ongrid-edge/plugins")
+		pluginBinDir := envOr("ONGRID_EDGE_PLUGIN_BIN_DIR", defaultPluginBinDir())
+		pluginWorkDir := envOr("ONGRID_EDGE_PLUGIN_WORK_DIR", defaultPluginWorkDir())
 		pluginLog := log.With(slog.String("comp", "plugins"))
 
 		var registered []edgeplugins.Plugin

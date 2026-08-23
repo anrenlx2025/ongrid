@@ -443,4 +443,6 @@ func (f *fakeTunnelClient) AcceptStream() (tunnel.StreamConn, error) { return ni
 
 func (f *fakeTunnelClient) OnReconnect(func()) {}
 
+func (f *fakeTunnelClient) UpdateCredentials(accessKey, secretKey string) {}
+
 func (f *fakeTunnelClient) Close() error { return nil }

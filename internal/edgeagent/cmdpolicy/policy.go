@@ -1,3 +1,5 @@
+//go:build linux
+
 package cmdpolicy
 
 import (
@@ -35,11 +37,11 @@ const (
 // counts. Operators extend via LoadFromYAML.
 func DefaultReadOnly() *Policy {
 	p := &Policy{
-		bins:        map[string]*BinaryPolicy{},
-		StdoutCap:   defaultStdoutCap,
-		StderrCap:   defaultStderrCap,
-		Timeout:     defaultTimeout,
-		MaxArgs:     defaultMaxArgs,
+		bins:      map[string]*BinaryPolicy{},
+		StdoutCap: defaultStdoutCap,
+		StderrCap: defaultStderrCap,
+		Timeout:   defaultTimeout,
+		MaxArgs:   defaultMaxArgs,
 		PathAllowlist: []string{
 			"/var", "/opt", "/home", "/tmp", "/srv", "/data",
 		},
@@ -552,11 +554,11 @@ func discoverBin(name string) string {
 // to add / replace; everything else is taken from base.
 type yamlPolicy struct {
 	Binaries []struct {
-		Name             string         `yaml:"name"`
-		Class            string         `yaml:"class"`
-		ReadOnlyMatchers []yamlMatcher  `yaml:"read_only_matchers"`
-		WriteMatchers    []yamlMatcher  `yaml:"write_matchers"`
-		DeniedArgs       []string       `yaml:"denied_args"`
+		Name             string        `yaml:"name"`
+		Class            string        `yaml:"class"`
+		ReadOnlyMatchers []yamlMatcher `yaml:"read_only_matchers"`
+		WriteMatchers    []yamlMatcher `yaml:"write_matchers"`
+		DeniedArgs       []string      `yaml:"denied_args"`
 	} `yaml:"binaries"`
 	NetworkHostAllowlist []string `yaml:"network_host_allowlist"`
 	StdoutCapBytes       int      `yaml:"stdout_cap_bytes"`

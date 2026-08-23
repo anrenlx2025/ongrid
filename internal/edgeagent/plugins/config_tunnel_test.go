@@ -39,6 +39,8 @@ func (f *fakeTunnelClient) AcceptStream() (tunnel.StreamConn, error) {
 
 func (f *fakeTunnelClient) OnReconnect(func()) {}
 
+func (f *fakeTunnelClient) UpdateCredentials(accessKey, secretKey string) {}
+
 func (f *fakeTunnelClient) Close() error { return nil }
 
 func TestTunnelConfigFetcherAppliesKubernetesLogsDefaults(t *testing.T) {

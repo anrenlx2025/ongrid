@@ -102,6 +102,10 @@ func (f *fakeClient) AcceptStream() (tunnel.StreamConn, error) {
 
 func (f *fakeClient) Close() error { f.closed.Store(true); return nil }
 
+// UpdateCredentials satisfies the Client interface; token-rotation
+// behavior is exercised in the tunnel package's own tests.
+func (f *fakeClient) UpdateCredentials(_, _ string) {}
+
 func (f *fakeClient) countOf(method string) int32 {
 	f.mu.Lock()
 	defer f.mu.Unlock()

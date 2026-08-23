@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package bash registers the edge-side handler for MethodBashExec
 // (internal/pkg/tunnel/bash.go). The handler is a thin shim over
 // cmdpolicy.Sandbox: parse the wire request, call sandbox.Exec,
