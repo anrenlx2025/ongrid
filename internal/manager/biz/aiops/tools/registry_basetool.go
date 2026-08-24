@@ -98,7 +98,7 @@ func (r *Registry) BuildBaseTools() *ToolBag {
 	// 4: query_logql — the stable log-query tool. Its implementation routes
 	// through the selected Loki or Elasticsearch backend.
 	if r.logQuery != nil {
-		out = append(out, NewQueryLogQLTool(r.logQuery, r.log))
+		out = append(out, NewQueryLogQLTool(r.logQuery))
 	}
 	// 5: query_traceql — gated on Tempo client.
 	if r.traceQuery != nil {

@@ -75,7 +75,6 @@ type ScopeKey =
   | 'pods'
   | 'containers'
   | 'nodes'
-  | 'service_names'
   | 'source_ids'
   | 'levels'
   | 'files'
@@ -99,14 +98,12 @@ type HistogramDrag = {
 type DisplayField = string;
 type DisplayFieldOption = { key: DisplayField; zh: string; en: string };
 
-// The backend owns the field set. This map supplies product copy for known
-// canonical names; unknown business fields remain available under their raw
-// name, while collector/backend implementation metadata is hidden below.
+// The log query API owns this canonical product field set. Backend-native
+// metadata is normalized by the adapter and is never offered as a UI column.
 const DISPLAY_FIELD_LABELS: Record<string, { zh: string; en: string }> = {
   level: { zh: '级别', en: 'Level' },
   cluster_id: { zh: '集群', en: 'Cluster' },
   device_id: { zh: '设备', en: 'Device' },
-  service_name: { zh: '服务', en: 'Service' },
   namespace: { zh: 'Namespace', en: 'Namespace' },
   workload: { zh: 'Workload', en: 'Workload' },
   pod: { zh: 'Pod', en: 'Pod' },
@@ -122,91 +119,11 @@ const DISPLAY_FIELD_LABELS: Record<string, { zh: string; en: string }> = {
 const DEFAULT_VISIBLE_FIELDS: DisplayField[] = ['level', 'cluster_id', 'device_id', 'pod', 'source_id'];
 const NO_SELECTED_DEVICE_IDS: number[] = [];
 
-const DISPLAY_FIELD_ALIASES: Record<string, DisplayField> = {
-  cluster_name: 'cluster_id',
-  detected_level: 'level',
-  severity_text: 'level',
-  'service.name': 'service_name',
-  'k8s.namespace.name': 'namespace',
-  k8s_namespace_name: 'namespace',
-  'k8s.deployment.name': 'workload',
-  k8s_deployment_name: 'workload',
-  'k8s.statefulset.name': 'workload',
-  k8s_statefulset_name: 'workload',
-  'k8s.daemonset.name': 'workload',
-  k8s_daemonset_name: 'workload',
-  'k8s.job.name': 'workload',
-  k8s_job_name: 'workload',
-  'k8s.cronjob.name': 'workload',
-  k8s_cronjob_name: 'workload',
-  'k8s.pod.name': 'pod',
-  k8s_pod_name: 'pod',
-  'k8s.container.name': 'container',
-  k8s_container_name: 'container',
-  'k8s.node.name': 'node',
-  k8s_node_name: 'node',
-  ongrid_source: 'source_id',
-  filename: 'file',
-  'log.file.path': 'file',
-  log_file_path: 'file',
-  'systemd.unit': 'unit',
-  systemd_unit: 'unit',
-  _SYSTEMD_UNIT: 'unit',
-};
-
-const HIDDEN_DISPLAY_FIELDS = new Set([
-  'backend',
-  'message',
-  'log_iostream',
-  'logtag',
-  'observed_timestamp',
-  'severity_number',
-  'service_name',
-]);
-
-function canonicalDisplayField(name: string): DisplayField | null {
-  // Loki appends `_extracted` when parsed or structured metadata collides
-  // with an existing stream label. Treat that backend-specific suffix as an
-  // alias so canonical hidden fields (for example service_name) cannot leak
-  // back into the display-field catalog under a derived name.
-  const canonicalName = name.endsWith('_extracted') ? name.slice(0, -'_extracted'.length) : name;
-  const alias = DISPLAY_FIELD_ALIASES[canonicalName];
-  if (alias) return HIDDEN_DISPLAY_FIELDS.has(alias) ? null : alias;
-  if (
-    canonicalName.startsWith('k8s.')
-    || canonicalName.startsWith('k8s_')
-    || canonicalName.startsWith('ongrid.')
-    || canonicalName.startsWith('ongrid_')
-    || canonicalName.startsWith('data_stream.')
-    || canonicalName.startsWith('data_stream_')
-    || canonicalName.startsWith('attributes_')
-    || canonicalName.startsWith('resource_attributes_')
-  ) return null;
-  return HIDDEN_DISPLAY_FIELDS.has(canonicalName) ? null : canonicalName;
-}
-
 function buildDisplayFields(fields: LogField[], records: LogRecord[]): DisplayFieldOption[] {
-  const apiOrder = Array.from(new Set(fields
-    .map((field) => canonicalDisplayField(field.name))
-    .filter((name): name is DisplayField => name != null)));
-  const discovered = new Set<DisplayField>();
-  for (const record of records) {
-    if (record.severity_text) discovered.add('level');
-    if (record.trace_id) discovered.add('trace_id');
-    if (record.span_id) discovered.add('span_id');
-    for (const name of [...Object.keys(record.resource_attributes ?? {}), ...Object.keys(record.attributes ?? {})]) {
-      const field = canonicalDisplayField(name);
-      if (field) discovered.add(field);
-    }
-  }
-
-  // With results, display the dimensions that actually occur in the current
-  // page. For an empty result set, retain the API field metadata so the panel
-  // remains useful for constructing the next query.
-  const names = records.length > 0 ? discovered : new Set(apiOrder);
-  const ordered = apiOrder.filter((name) => names.has(name));
-  const extras = Array.from(names).filter((name) => !ordered.includes(name)).sort();
-  return ordered.concat(extras).map((key) => ({ key, ...(DISPLAY_FIELD_LABELS[key] ?? { zh: key, en: key }) }));
+  return Array.from(new Set(fields.map((field) => field.name)))
+    .filter((name) => DISPLAY_FIELD_LABELS[name] != null)
+    .filter((name) => records.length === 0 || records.some((record) => displayFieldValue(record, name) !== ''))
+    .map((key) => ({ key, ...DISPLAY_FIELD_LABELS[key] }));
 }
 
 const EMPTY_SCOPE: ScopeDraft = {
@@ -215,7 +132,6 @@ const EMPTY_SCOPE: ScopeDraft = {
   pods: '',
   containers: '',
   nodes: '',
-  service_names: '',
   source_ids: '',
   levels: '',
   files: '',
@@ -317,7 +233,7 @@ function displayFieldValue(
 ): string {
   switch (field) {
     case 'level':
-      return record.severity_text || scopeValue(record, 'level', 'detected_level');
+      return record.severity_text || scopeValue(record, 'level');
     case 'cluster_id': {
       const id = scopeValue(record, 'cluster_id');
       const name = scopeValue(record, 'cluster_name');
@@ -327,24 +243,22 @@ function displayFieldValue(
       const id = scopeValue(record, 'device_id');
       return deviceLabels?.get(id) ?? id;
     }
-    case 'service_name':
-      return scopeValue(record, 'service.name', 'service_name');
     case 'namespace':
-      return scopeValue(record, 'k8s.namespace.name', 'k8s_namespace_name', 'namespace');
+      return scopeValue(record, 'namespace');
     case 'workload':
-      return scopeValue(record, 'workload', 'k8s.deployment.name', 'k8s_deployment_name', 'k8s.statefulset.name', 'k8s_statefulset_name', 'k8s.daemonset.name', 'k8s_daemonset_name', 'k8s.job.name', 'k8s_job_name', 'k8s.cronjob.name', 'k8s_cronjob_name');
+      return scopeValue(record, 'workload');
     case 'pod':
-      return scopeValue(record, 'k8s.pod.name', 'k8s_pod_name', 'pod');
+      return scopeValue(record, 'pod');
     case 'container':
-      return scopeValue(record, 'k8s.container.name', 'k8s_container_name', 'container');
+      return scopeValue(record, 'container');
     case 'node':
-      return scopeValue(record, 'k8s.node.name', 'k8s_node_name', 'node');
+      return scopeValue(record, 'node');
     case 'source_id':
-      return scopeValue(record, 'ongrid_source', 'source_id');
+      return scopeValue(record, 'source_id');
     case 'file':
-      return scopeValue(record, 'filename', 'file', 'log.file.path', 'log_file_path');
+      return scopeValue(record, 'file');
     case 'unit':
-      return scopeValue(record, 'unit', 'systemd.unit', 'systemd_unit', '_SYSTEMD_UNIT');
+      return scopeValue(record, 'unit');
     case 'trace_id':
       return record.trace_id ?? '';
     case 'span_id':
@@ -713,7 +627,7 @@ export default function LogsPage() {
     if (deviceID) items.push({ label: 'device_id', value: deviceID });
     const labels: Record<ScopeKey, string> = {
       cluster_ids: 'cluster_id', workloads: 'workload', pods: 'pod',
-      containers: 'container', nodes: 'node', service_names: 'service_name', source_ids: 'source_id',
+      containers: 'container', nodes: 'node', source_ids: 'source_id',
       levels: 'level', files: 'file', units: 'unit',
     };
     for (const key of Object.keys(committedScope) as ScopeKey[]) {

@@ -292,13 +292,13 @@ func TestDecodeLokiRecords_ProducesStableRecord(t *testing.T) {
 		"values": []any{[]any{
 			"1787054400000000000", "connection refused",
 			map[string]string{
-				"filename":                 "/var/log/app.log",
-				"trace_id":                 "abc123",
-				"severity_text":            "ERROR",
-				"severity_number":          "17",
-				"service_name":             "unknown_service",
-				"attributes_device_id":     "42",
-				"attributes_ongrid_source": "journald",
+				"filename":        "/var/log/app.log",
+				"trace_id":        "abc123",
+				"severity_text":   "ERROR",
+				"severity_number": "17",
+				"service_name":    "unknown_service",
+				"device_id":       "42",
+				"ongrid_source":   "journald",
 			},
 		}},
 	}})
@@ -332,7 +332,7 @@ func TestDecodeLokiRecords_ProducesStableRecord(t *testing.T) {
 	if _, ok := first[0].Attributes["severity_number"]; ok {
 		t.Fatalf("severity_number leaked into attributes: %#v", first[0].Attributes)
 	}
-	for _, name := range []string{"service_name", "attributes_device_id", "attributes_ongrid_source"} {
+	for _, name := range []string{"service_name"} {
 		if _, ok := first[0].Attributes[name]; ok {
 			t.Fatalf("internal Loki field %q leaked into attributes: %#v", name, first[0].Attributes)
 		}
@@ -342,11 +342,11 @@ func TestDecodeLokiRecords_ProducesStableRecord(t *testing.T) {
 	}
 }
 
-func TestDecodeLokiRecordsFallsBackToDetectedAndBodyLevels(t *testing.T) {
+func TestDecodeLokiRecordsUsesCanonicalAndBodyLevels(t *testing.T) {
 	raw, err := json.Marshal([]map[string]any{
 		{
 			"stream": map[string]string{"device_id": "42"},
-			"values": []any{[]any{"1787054400000000000", "probe", map[string]string{"detected_level": "WARN"}}},
+			"values": []any{[]any{"1787054400000000000", "probe", map[string]string{"level": "WARN"}}},
 		},
 		{
 			"stream": map[string]string{"device_id": "43"},

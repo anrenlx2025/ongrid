@@ -108,8 +108,6 @@ describe('SettingsIntegrations log backend presentation', () => {
       status: 'unselected' as const,
       current_backend: 'loki' as const,
       current_backend_id: 0,
-      ended_at: '2026-08-21T00:00:00Z',
-      assignments: [],
     };
     vi.mocked(getLogBackend).mockImplementation(async () => currentBackend);
     vi.mocked(selectLokiLogBackend).mockImplementation(async () => {
@@ -203,7 +201,6 @@ describe('SettingsIntegrations log backend presentation', () => {
       status: 'selected' as const,
       current_backend: 'elasticsearch' as const,
       current_backend_id: 7,
-      cutover_at: '2026-08-20T01:00:00Z',
     };
     let currentBackend = unselected;
     vi.mocked(getLogBackend).mockImplementation(async () => currentBackend);

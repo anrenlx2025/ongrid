@@ -1090,11 +1090,10 @@ func main() {
 	}
 	metricHandler := managerservermetric.NewPromHandler(metricPromQuerier, hostDeviceResolverAdapter{edgeDeviceRepo})
 
-	// Log control/query plane. Loki remains the built-in default. When an
-	// external Elasticsearch configuration is selected, the planner selects
-	// ES for the complete query window. Log payloads never
-	// traverse this service; Edge collectors still write directly to the
-	// selected data-plane endpoint.
+	// Log control/query plane. Loki remains the built-in default; selecting an
+	// external Elasticsearch configuration routes every log query directly to
+	// Elasticsearch. Log payloads never traverse this service; Edge collectors
+	// still write directly to the selected data-plane endpoint.
 	var lokiLogClient *pkglogquery.Client
 	if cfg.Logs.URL != "" {
 		lokiLogClient = pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "logquery")))
@@ -1123,30 +1122,6 @@ func main() {
 			log.Info("logs: selected grafana datasource synced at boot")
 		}
 	}()
-	logsBackendSvc.SetSelectGuard(func(ctx context.Context) error {
-		rules, err := alertRepo.ListAllEnabledRules(ctx)
-		if err != nil {
-			return fmt.Errorf("inspect enabled log alert rules: %w", err)
-		}
-		blockers := make([]string, 0)
-		for _, rule := range rules {
-			if rule == nil || (rule.Kind != managermodelalert.RuleKindLogMatch && rule.Kind != managermodelalert.RuleKindLogVolume) {
-				continue
-			}
-			name := strings.TrimSpace(rule.RuleKey)
-			if name == "" {
-				name = strings.TrimSpace(rule.Name)
-			}
-			blockers = append(blockers, name)
-			if len(blockers) == 10 {
-				break
-			}
-		}
-		if len(blockers) > 0 {
-			return fmt.Errorf("enabled Loki-only alert rules must be disabled or migrated first: %s", strings.Join(blockers, ", "))
-		}
-		return nil
-	})
 	pluginConfigUC.SetRuntimeOverlayProvider(logsRuntimeOverlayProvider{
 		base: logsBackendSvc, hosts: edgeDeviceRepo, devices: deviceUC, clusters: topologyUC,
 	})

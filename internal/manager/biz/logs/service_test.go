@@ -842,25 +842,6 @@ func TestServiceNewGenerationRetainsManagedCredentialsNeededBySelectedBackend(t 
 	}
 }
 
-func TestServiceCanReuseWriteAPIKeyWithoutSharingCredentialReference(t *testing.T) {
-	secrets := newManagedSecrets()
-	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
-
-	backend, err := svc.Save(context.Background(), bizlogs.SaveInput{
-		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
-		Dataset: "ongrid.system", WriteAPIKey: "encoded-shared", ReuseWriteAPIKey: true,
-	})
-	if err != nil {
-		t.Fatalf("Save(reuse write key): %v", err)
-	}
-	if backend.WriteCredentialRef == backend.QueryCredentialRef {
-		t.Fatalf("reuse mode shared a credential reference: %+v", backend)
-	}
-	if write, query := secrets.apiKey(backend.WriteCredentialRef), secrets.apiKey(backend.QueryCredentialRef); write != "encoded-shared" || query != write {
-		t.Fatalf("stored reuse keys = write %q query %q", write, query)
-	}
-}
-
 func TestServiceRejectsSharedDirectKeyBeforeWritingManagedCredentials(t *testing.T) {
 	secrets := newManagedSecrets()
 	svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), secrets, nil)
@@ -869,8 +850,8 @@ func TestServiceRejectsSharedDirectKeyBeforeWritingManagedCredentials(t *testing
 		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
 		Dataset: "ongrid.system", WriteAPIKey: "encoded-shared", QueryAPIKey: "encoded-shared",
 	})
-	if err == nil || !strings.Contains(err.Error(), "reuse_write_api_key") {
-		t.Fatalf("Save error = %v, want explicit reuse-mode validation", err)
+	if err == nil || !strings.Contains(err.Error(), "must differ") {
+		t.Fatalf("Save error = %v, want distinct-key validation", err)
 	}
 	if secrets.createCount() != 0 {
 		t.Fatalf("rejected request created %d managed credentials", secrets.createCount())
@@ -934,7 +915,7 @@ func TestServiceRejectsUnsafeBackendInput(t *testing.T) {
 		in   bizlogs.SaveInput
 	}{
 		{
-			name: "plain HTTP without explicit compatibility switch",
+			name: "plain HTTP without explicit test-environment switch",
 			in: bizlogs.SaveInput{WriteEndpoints: []string{"http://es.example"}, QueryEndpoint: "http://es.example",
 				Dataset: "ongrid.system", WriteCredentialRef: "shared", QueryCredentialRef: "query"},
 		},
@@ -953,11 +934,6 @@ func TestServiceRejectsUnsafeBackendInput(t *testing.T) {
 			in: bizlogs.SaveInput{WriteEndpoints: []string{"https://es.example"}, QueryEndpoint: "https://es.example",
 				Dataset: "ongrid.system", WriteAPIKey: "encoded write", QueryAPIKey: "encoded-query"},
 		},
-		{
-			name: "query API key supplied in reuse mode",
-			in: bizlogs.SaveInput{WriteEndpoints: []string{"https://es.example"}, QueryEndpoint: "https://es.example",
-				Dataset: "ongrid.system", WriteAPIKey: "encoded-write", QueryAPIKey: "encoded-query", ReuseWriteAPIKey: true},
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -965,32 +941,6 @@ func TestServiceRejectsUnsafeBackendInput(t *testing.T) {
 				t.Fatal("Save succeeded, want validation error")
 			}
 		})
-	}
-}
-
-func TestServiceSelectGuardBlocksSelection(t *testing.T) {
-	db := openTestDB(t)
-	svc := bizlogs.NewService(logsstore.NewRepo(db), mapSecrets{
-		"write": {"api_key": "write-key"},
-		"query": {"api_key": "query-key"},
-	}, nil)
-	backend, err := svc.Save(context.Background(), bizlogs.SaveInput{
-		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
-		Dataset: "ongrid.system", WriteCredentialRef: "write", QueryCredentialRef: "query",
-	})
-	if err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	svc.SetSelectGuard(func(context.Context) error { return errors.New("legacy-log-rule") })
-	if _, err := svc.Select(context.Background(), backend.ID); !errors.Is(err, errs.ErrConflict) {
-		t.Fatalf("Select error = %v, want conflict", err)
-	}
-	latest, err := svc.Get(context.Background())
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if latest.Status != logsmodel.BackendStatusUnselected {
-		t.Fatalf("status = %q, want unselected", latest.Status)
 	}
 }
 

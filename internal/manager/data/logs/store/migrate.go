@@ -23,13 +23,6 @@ func Migrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(&model.Backend{}, &model.BackendAssignment{}); err != nil {
 		return err
 	}
-	// Selection is the only persisted backend state. Unknown values are not
-	// interpreted as lifecycle states; they are simply not selected.
-	if err := db.Model(&model.Backend{}).
-		Where("status NOT IN ?", []model.BackendStatus{model.BackendStatusSelected, model.BackendStatusUnselected}).
-		Update("status", model.BackendStatusUnselected).Error; err != nil {
-		return err
-	}
 	if err := dbx.BackfillDeleteMarker(db, model.Backend{}.TableName()); err != nil {
 		return err
 	}

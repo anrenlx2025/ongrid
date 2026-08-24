@@ -157,27 +157,33 @@ const queryLogqlCallTimeout = 30 * time.Second
 // executeQueryLogQL runs the query against the selected backend and hands its
 // compact backend-specific result shape back to the LLM via ResultJSON.
 func (r *Registry) executeQueryLogQL(ctx context.Context, args json.RawMessage) (ExecuteResult, error) {
-	if r.logQuery == nil {
-		// Should not happen — when logQuery is nil at NewRegistry the
-		// tool is never registered. Defensive guard.
-		return ExecuteResult{}, fmt.Errorf("query_logql: log query client not configured")
+	out, err := runQueryLogQL(ctx, r.logQuery, args)
+	if err != nil {
+		return ExecuteResult{}, err
+	}
+	return ExecuteResult{ResultJSON: out}, nil
+}
+
+func runQueryLogQL(ctx context.Context, querier LogQuerier, args []byte) ([]byte, error) {
+	if querier == nil {
+		return nil, fmt.Errorf("query_logql: log query client not configured")
 	}
 	var in QueryLogQLArgs
 	if err := json.Unmarshal(args, &in); err != nil {
-		return ExecuteResult{}, fmt.Errorf("query_logql: bad args: %w", err)
+		return nil, fmt.Errorf("query_logql: bad args: %w", err)
 	}
 	if strings.TrimSpace(in.Query) == "" {
-		return ExecuteResult{}, fmt.Errorf("query_logql: query required")
+		return nil, fmt.Errorf("query_logql: query required")
 	}
 	query := in.Query
 	if in.DeviceID != nil {
 		if *in.DeviceID == 0 {
-			return ExecuteResult{}, fmt.Errorf("query_logql: device_id must be greater than zero")
+			return nil, fmt.Errorf("query_logql: device_id must be greater than zero")
 		}
 		var err error
 		query, err = scopeLogQLToDevice(in.Query, *in.DeviceID)
 		if err != nil {
-			return ExecuteResult{}, err
+			return nil, err
 		}
 	}
 
@@ -186,14 +192,14 @@ func (r *Registry) executeQueryLogQL(ctx context.Context, args json.RawMessage) 
 	if in.End != "" {
 		t, err := parseLogQLTime(in.End, end)
 		if err != nil {
-			return ExecuteResult{}, fmt.Errorf("query_logql: parse end: %w", err)
+			return nil, fmt.Errorf("query_logql: parse end: %w", err)
 		}
 		end = t
 	}
 	if in.Start != "" {
 		t, err := parseLogQLTime(in.Start, start)
 		if err != nil {
-			return ExecuteResult{}, fmt.Errorf("query_logql: parse start: %w", err)
+			return nil, fmt.Errorf("query_logql: parse start: %w", err)
 		}
 		start = t
 	} else if in.End != "" {
@@ -214,7 +220,7 @@ func (r *Registry) executeQueryLogQL(ctx context.Context, args json.RawMessage) 
 	callCtx, cancel := context.WithTimeout(ctx, queryLogqlCallTimeout)
 	defer cancel()
 
-	res, err := r.logQuery.QueryLogQL(callCtx, logquery.QueryRangeOptions{
+	res, err := querier.QueryLogQL(callCtx, logquery.QueryRangeOptions{
 		Query:     query,
 		Start:     start,
 		End:       end,
@@ -222,13 +228,13 @@ func (r *Registry) executeQueryLogQL(ctx context.Context, args json.RawMessage) 
 		Direction: direction,
 	})
 	if err != nil {
-		return ExecuteResult{}, fmt.Errorf("query_logql: dispatch: %w", err)
+		return nil, fmt.Errorf("query_logql: dispatch: %w", err)
 	}
 	out, err := marshalQueryLogQLToolResult(res)
 	if err != nil {
-		return ExecuteResult{}, fmt.Errorf("query_logql: marshal response: %w", err)
+		return nil, fmt.Errorf("query_logql: marshal response: %w", err)
 	}
-	return ExecuteResult{ResultJSON: out}, nil
+	return out, nil
 }
 
 // LogQuerier is the narrow surface the query_logql executor needs from the

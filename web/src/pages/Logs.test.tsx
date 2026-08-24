@@ -58,7 +58,10 @@ const records = [
       ongrid_backend: 'elasticsearch',
       ongrid_backend_generation: 3,
     },
-    resource_attributes: { device_id: '42', cluster_id: '7', cluster_name: 'kind-local', level: 'INFO', 'k8s.namespace.name': 'production' },
+    resource_attributes: {
+      device_id: '42', cluster_id: '7', cluster_name: 'kind-local', level: 'INFO',
+      namespace: 'production', pod: 'payments-7d4', source_id: 'k8s',
+    },
   },
   {
     id: 'log-2',
@@ -67,7 +70,10 @@ const records = [
     severity_text: 'ERROR',
     backend: 'elasticsearch',
     attributes: { ongrid_source: 'k8s', 'k8s.pod.name': 'gateway-22b', 'service.name': 'gateway' },
-    resource_attributes: { device_id: '42', cluster_id: '7', cluster_name: 'kind-local', level: 'ERROR', 'k8s.namespace.name': 'production' },
+    resource_attributes: {
+      device_id: '42', cluster_id: '7', cluster_name: 'kind-local', level: 'ERROR',
+      namespace: 'production', pod: 'gateway-22b', source_id: 'k8s',
+    },
   },
 ];
 
@@ -161,7 +167,7 @@ describe('LogsPage', () => {
     expect(screen.getAllByText('kind-local (#7)')).not.toHaveLength(0);
     expect(screen.getByRole('checkbox', { name: /级别.*level/i })).toBeChecked();
     expect(screen.getByRole('checkbox', { name: /集群.*cluster_id/i })).toBeChecked();
-    expect(screen.getByRole('checkbox', { name: /comp/i })).not.toBeChecked();
+    expect(screen.queryByRole('checkbox', { name: /comp/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: /Workload.*workload/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: /后端.*backend/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: /服务.*service_name/i })).not.toBeInTheDocument();

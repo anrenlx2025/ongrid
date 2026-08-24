@@ -45,7 +45,7 @@ func marshalQueryLogQLToolResult(result logquery.QueryLogQLResult) ([]byte, erro
 	switch typed := result.(type) {
 	case *logquery.SearchResult:
 		if typed == nil {
-			return logquery.MarshalQueryLogQLResult(result)
+			return nil, fmt.Errorf("query_logql: Elasticsearch query result is nil")
 		}
 		compact := queryLogQLToolSearchResult{
 			Records:  make([]queryLogQLToolRecord, 0, len(typed.Records)),
@@ -58,8 +58,11 @@ func marshalQueryLogQLToolResult(result logquery.QueryLogQLResult) ([]byte, erro
 		}
 		return json.Marshal(compact)
 	case *logquery.QueryRangeResult:
-		if typed == nil || typed.ResultType != "streams" {
-			return logquery.MarshalQueryLogQLResult(result)
+		if typed == nil {
+			return nil, fmt.Errorf("query_logql: Loki query result is nil")
+		}
+		if typed.ResultType != "streams" {
+			return json.Marshal(typed)
 		}
 		compactResult, err := compactQueryLogQLLokiStreams(typed.Result)
 		if err != nil {
@@ -70,7 +73,7 @@ func marshalQueryLogQLToolResult(result logquery.QueryLogQLResult) ([]byte, erro
 			Result:     compactResult,
 		})
 	default:
-		return logquery.MarshalQueryLogQLResult(result)
+		return nil, fmt.Errorf("query_logql: unsupported result type %T", result)
 	}
 }
 
@@ -86,8 +89,8 @@ func compactQueryLogQLToolRecord(record logquery.Record) queryLogQLToolRecord {
 		Pod:          queryLogQLRecordField(record, "pod"),
 		Container:    queryLogQLRecordField(record, "container"),
 		Node:         queryLogQLRecordField(record, "node"),
-		SourceID:     queryLogQLRecordField(record, "ongrid_source", "source_id"),
-		File:         queryLogQLRecordField(record, "filename", "file"),
+		SourceID:     queryLogQLRecordField(record, "source_id"),
+		File:         queryLogQLRecordField(record, "file"),
 		Unit:         queryLogQLRecordField(record, "unit"),
 		TraceID:      record.TraceID,
 	}
@@ -151,19 +154,6 @@ func compactQueryLogQLLokiDimensions(input map[string]string) map[string]string 
 	} {
 		if value := input[name]; value != "" {
 			out[name] = value
-		}
-	}
-	for _, alias := range []struct {
-		name      string
-		canonical string
-	}{
-		{name: "attributes_device_id", canonical: "device_id"},
-		{name: "attributes_cluster_id", canonical: "cluster_id"},
-		{name: "attributes_ongrid_source", canonical: "ongrid_source"},
-		{name: "attributes_level", canonical: "level"},
-	} {
-		if out[alias.canonical] == "" && input[alias.name] != "" {
-			out[alias.canonical] = input[alias.name]
 		}
 	}
 	return out

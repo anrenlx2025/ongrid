@@ -17,15 +17,11 @@ type lokiRangeQuerier interface {
 // backend. Loki receives the original expression and returns QueryRangeResult;
 // Elasticsearch receives the safe log-search subset and returns SearchResult.
 func (s *Service) QueryLogQL(ctx context.Context, opts logquery.QueryRangeOptions) (logquery.QueryLogQLResult, error) {
-	phases, _, err := s.plan(ctx, opts.Start, opts.End, logquery.SortDirection(opts.Direction))
+	backend, err := s.selectedBackend(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(phases) != 1 {
-		return nil, errors.New("logquery: query_logql requires exactly one selected backend")
-	}
-	phase := phases[0]
-	if phase.backend == nil {
+	if backend == nil {
 		querier, ok := s.loki.(lokiRangeQuerier)
 		if !ok || querier == nil {
 			return nil, errors.New("current Loki backend does not support LogQL range queries")
@@ -37,7 +33,7 @@ func (s *Service) QueryLogQL(ctx context.Context, opts logquery.QueryRangeOption
 	if err != nil {
 		return nil, err
 	}
-	searcher, err := s.searcherForPhase(ctx, phase)
+	searcher, err := s.elasticsearchClient(ctx, backend)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +67,9 @@ func searchLogQLPages(ctx context.Context, searcher logquery.Searcher, req logqu
 			return nil, errors.New("logquery: Elasticsearch returned more records than requested")
 		}
 		combined.Records = append(combined.Records, page.Records...)
-		combined.Backends = appendUnique(combined.Backends, page.Backends...)
+		if len(combined.Backends) == 0 {
+			combined.Backends = append(combined.Backends, page.Backends...)
+		}
 		if !page.HasMore {
 			break
 		}

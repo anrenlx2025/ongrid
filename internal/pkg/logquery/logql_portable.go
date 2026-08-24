@@ -122,7 +122,7 @@ func compileLogQLSelector(selector string) ([]FieldFilter, error) {
 		if len(match) != 4 {
 			return nil, fmt.Errorf("logquery: unsupported LogQL label matcher %q", strings.TrimSpace(part))
 		}
-		field, ok := compatibleLogQLField(match[1])
+		field, ok := portableLogQLField(match[1])
 		if !ok {
 			return nil, fmt.Errorf("logquery: LogQL label %q is not available on the selected Elasticsearch backend", match[1])
 		}
@@ -198,17 +198,14 @@ func splitLogQLMatchers(selector string) ([]string, error) {
 	return append(parts, part), nil
 }
 
-func compatibleLogQLField(label string) (string, bool) {
+func portableLogQLField(label string) (string, bool) {
 	switch label {
-	case "edge_id":
-		// Older incident workflows used edge_id for the host Device ID.
-		return "device_id", true
 	case "ongrid_source":
+		// Loki and the product search API expose the same dimension under
+		// different canonical names.
 		return "source_id", true
 	case "filename":
 		return "file", true
-	case "severity_text", "detected_level":
-		return "level", true
 	default:
 		_, ok := LookupField(label)
 		return label, ok && label != "message"

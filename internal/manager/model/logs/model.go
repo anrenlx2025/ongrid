@@ -54,7 +54,6 @@ type AssignmentStatus string
 
 const (
 	AssignmentStatusPending  AssignmentStatus = "pending"
-	AssignmentStatusApplied  AssignmentStatus = "applied"
 	AssignmentStatusVerified AssignmentStatus = "verified"
 	AssignmentStatusFailed   AssignmentStatus = "failed"
 )

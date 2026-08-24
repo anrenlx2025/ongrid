@@ -77,7 +77,7 @@ func TestQueryLogQLTool_WhenLokiSelected_PreservesNativeLogQLAndResponse(t *test
 
 	loki := logquery.NewWithHTTPClient(server.URL, server.Client(), slog.Default())
 	service := managerlogs.NewService(queryLogQLSelectionRepo{err: errs.ErrNotFound}, nil, loki)
-	tool := aiopstools.NewQueryLogQLTool(service, slog.Default())
+	tool := aiopstools.NewQueryLogQLTool(service)
 	out, err := tool.InvokableRun(t.Context(), mustQueryLogQLArgs(t, map[string]any{
 		"query": query, "start": start.Format(time.RFC3339), "end": end.Format(time.RFC3339),
 		"limit": 37, "direction": "forward",
@@ -160,7 +160,7 @@ func TestQueryLogQLTool_WhenElasticsearchSelected_CompilesPortableQueryAndReturn
 		queryLogQLSecretResolver{"query-ref": {"api_key": "query-key"}},
 		nil,
 	)
-	tool := aiopstools.NewQueryLogQLTool(service, slog.Default())
+	tool := aiopstools.NewQueryLogQLTool(service)
 	out, err := tool.InvokableRun(t.Context(), mustQueryLogQLArgs(t, map[string]any{
 		"query": `{namespace="prod"} |~ "(?i)(error|panic)" != "health"`, "device_id": 42,
 		"start": start.Format(time.RFC3339), "end": end.Format(time.RFC3339),
@@ -204,7 +204,7 @@ func TestQueryLogQLTool_WhenElasticsearchSelected_CompilesPortableQueryAndReturn
 func TestQueryLogQLTool_WhenElasticsearchSelected_RejectsLokiOnlySyntaxClearly(t *testing.T) {
 	backend := &logsmodel.Backend{ID: 7, Generation: 2, Type: logsmodel.BackendTypeElasticsearch}
 	service := managerlogs.NewService(queryLogQLSelectionRepo{selected: backend}, nil, nil)
-	tool := aiopstools.NewQueryLogQLTool(service, slog.Default())
+	tool := aiopstools.NewQueryLogQLTool(service)
 
 	tests := []struct {
 		name  string

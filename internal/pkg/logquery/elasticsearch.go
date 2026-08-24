@@ -581,14 +581,28 @@ func decodeElasticsearchRecord(id string, raw json.RawMessage) (Record, error) {
 	}
 	observed, _ := parseElasticsearchTime(lookupPath(source, "observed_timestamp"))
 	attrs := scalarMap(lookupPath(source, "attributes"))
-	resources := scalarMap(lookupPath(source, "resource.attributes"))
+	rawResources := scalarMap(lookupPath(source, "resource.attributes"))
+	resources := make(map[string]string)
+	for _, logical := range []string{
+		"device_id", "cluster_id", "namespace", "workload", "pod", "container",
+		"node", "source_id", "file", "unit",
+	} {
+		def, _ := LookupField(logical)
+		name := strings.TrimPrefix(def.ElasticsearchPath, "resource.attributes.")
+		if value := rawResources[name]; value != "" {
+			resources[logical] = value
+		}
+	}
+	if clusterName := rawResources["cluster_name"]; clusterName != "" {
+		resources["cluster_name"] = clusterName
+	}
 	message := stringify(lookupPath(source, "body.text"))
 	severityText := normalizeLevel(firstNonEmpty(
 		stringify(lookupPath(source, "severity_text")),
 		attrs["level"],
 		attrs["severity"],
 		attrs["severity_text"],
-		resources["level"],
+		rawResources["level"],
 	))
 	if severityText == "" {
 		severityText = detectLevel(message)

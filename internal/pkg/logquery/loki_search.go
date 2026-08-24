@@ -545,24 +545,10 @@ func decodeLokiRecords(result *QueryRangeResult) ([]Record, error) {
 					labels[key] = item
 				}
 			}
-			for _, alias := range []struct {
-				canonical string
-				legacy    string
-			}{
-				{canonical: "device_id", legacy: "attributes_device_id"},
-				{canonical: "cluster_id", legacy: "attributes_cluster_id"},
-				{canonical: "ongrid_source", legacy: "attributes_ongrid_source"},
-				{canonical: "level", legacy: "attributes_level"},
-			} {
-				if labels[alias.canonical] == "" {
-					labels[alias.canonical] = labels[alias.legacy]
-				}
-			}
 			attrs := cloneStringMap(labels)
-			// Loki exposes the intrinsic OTel severity fields as structured
-			// metadata and older OTLP payloads may contain an attributes_ prefix.
-			// These implementation fields must not leak into the backend-neutral
-			// attribute/display-field namespace.
+			// Loki exposes intrinsic OTel severity and transport metadata beside
+			// product fields. Keep those implementation details out of the
+			// backend-neutral attribute namespace.
 			delete(attrs, "severity_text")
 			delete(attrs, "severity_number")
 			for key := range attrs {
@@ -583,7 +569,7 @@ func decodeLokiRecords(result *QueryRangeResult) ([]Record, error) {
 			if clusterName := labels["cluster_name"]; clusterName != "" {
 				resources["cluster_name"] = clusterName
 			}
-			severityText := normalizeLevel(firstNonEmpty(labels["level"], labels["detected_level"], labels["severity_text"]))
+			severityText := normalizeLevel(firstNonEmpty(labels["level"], labels["severity_text"]))
 			if severityText == "" {
 				severityText = detectLevel(message)
 			}
@@ -707,7 +693,7 @@ func logQLDuration(d time.Duration) string {
 		return strconv.FormatInt(int64(d/time.Second), 10) + "s"
 	}
 	// Loki range selectors accept integer duration components, but Go's
-	// Duration.String emits fractional seconds for cutover-split buckets
+	// Duration.String emits fractional seconds for sub-second buckets
 	// (for example, "1.337s"). Loki rejects that form with
 	// `unknown unit "."`. Product query boundaries are millisecond-aligned;
 	// round any finer caller input up to Loki's minimum supported unit so the

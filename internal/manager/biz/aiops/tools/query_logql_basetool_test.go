@@ -12,7 +12,7 @@ import (
 )
 
 func TestQueryLogQLTool_Info(t *testing.T) {
-	tool := NewQueryLogQLTool(&fakeLogQuerier{}, nil)
+	tool := NewQueryLogQLTool(&fakeLogQuerier{})
 	info, err := tool.Info(context.Background())
 	if err != nil {
 		t.Fatalf("Info: %v", err)
@@ -32,16 +32,16 @@ func TestQueryLogQLTool_RoundTrip(t *testing.T) {
 	lq := &fakeLogQuerier{
 		resp: &logquery.QueryRangeResult{
 			ResultType: "streams",
-			Result:     json.RawMessage(`[{"stream":{"edge_id":"1"},"values":[["1700000000000000000","oops"]]}]`),
+			Result:     json.RawMessage(`[{"stream":{"device_id":"1"},"values":[["1700000000000000000","oops"]]}]`),
 		},
 	}
-	tool := NewQueryLogQLTool(lq, nil)
+	tool := NewQueryLogQLTool(lq)
 	out, err := tool.InvokableRun(context.Background(),
-		`{"query":"{edge_id=\"1\"} |= \"error\"","limit":50,"direction":"forward"}`)
+		`{"query":"{device_id=\"1\"} |= \"error\"","limit":50,"direction":"forward"}`)
 	if err != nil {
 		t.Fatalf("InvokableRun: %v", err)
 	}
-	if lq.got.Query != `{edge_id="1"} |= "error"` {
+	if lq.got.Query != `{device_id="1"} |= "error"` {
 		t.Errorf("Query = %q", lq.got.Query)
 	}
 	if lq.got.Limit != 50 {
@@ -62,7 +62,7 @@ func TestQueryLogQLTool_RoundTrip(t *testing.T) {
 
 func TestQueryLogQLTool_DeviceIDScopesQuery(t *testing.T) {
 	lq := &fakeLogQuerier{resp: &logquery.QueryRangeResult{ResultType: "streams", Result: json.RawMessage("[]")}}
-	tool := NewQueryLogQLTool(lq, nil)
+	tool := NewQueryLogQLTool(lq)
 	if _, err := tool.InvokableRun(context.Background(), `{"query":"{} |= \"error\"","device_id":24}`); err != nil {
 		t.Fatalf("InvokableRun: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestQueryLogQLTool_DeviceIDScopesQuery(t *testing.T) {
 }
 
 func TestQueryLogQLTool_BadArgs(t *testing.T) {
-	tool := NewQueryLogQLTool(&fakeLogQuerier{}, nil)
+	tool := NewQueryLogQLTool(&fakeLogQuerier{})
 	if _, err := tool.InvokableRun(context.Background(), `not json`); err == nil {
 		t.Errorf("expected error for non-JSON")
 	}
@@ -86,7 +86,7 @@ func TestQueryLogQLTool_BadArgs(t *testing.T) {
 }
 
 func TestQueryLogQLTool_NilQuerier(t *testing.T) {
-	tool := NewQueryLogQLTool(nil, nil)
+	tool := NewQueryLogQLTool(nil)
 	_, err := tool.InvokableRun(context.Background(), `{"query":"{a=\"b\"}"}`)
 	if err == nil {
 		t.Errorf("expected error when logQuery nil")
@@ -94,7 +94,7 @@ func TestQueryLogQLTool_NilQuerier(t *testing.T) {
 }
 
 func TestQueryLogQLTool_DispatchError(t *testing.T) {
-	tool := NewQueryLogQLTool(&fakeLogQuerier{err: errors.New("loki 5xx")}, nil)
+	tool := NewQueryLogQLTool(&fakeLogQuerier{err: errors.New("loki 5xx")})
 	_, err := tool.InvokableRun(context.Background(), `{"query":"{a=\"b\"}"}`)
 	if err == nil || !strings.Contains(err.Error(), "loki 5xx") {
 		t.Errorf("expected wrapped dispatch error, got %v", err)

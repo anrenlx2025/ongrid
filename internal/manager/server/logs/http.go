@@ -74,8 +74,8 @@ func NewHandler(q Querier) *Handler {
 	return h
 }
 
-// NewHandlerWithSearcher wires a backend-neutral search implementation while
-// optionally retaining a Loki querier for the legacy LogQL endpoints.
+// NewHandlerWithSearcher wires a backend-neutral search implementation and an
+// optional native Loki querier.
 func NewHandlerWithSearcher(q Querier, searcher logquery.Searcher) *Handler {
 	return newHandler(q, searcher, nil)
 }

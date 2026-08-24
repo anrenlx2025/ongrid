@@ -845,7 +845,6 @@ type ElasticsearchLogsForm = {
   queryEndpoint: string;
   writeAPIKey: string;
   queryAPIKey: string;
-  reuseWriteAPIKey: boolean;
   writeCredentialRef: string;
   queryCredentialRef: string;
   tlsInsecure: boolean;
@@ -860,7 +859,6 @@ const emptyElasticsearchLogsForm: ElasticsearchLogsForm = {
   queryEndpoint: '',
   writeAPIKey: '',
   queryAPIKey: '',
-  reuseWriteAPIKey: false,
   writeCredentialRef: '',
   queryCredentialRef: '',
   tlsInsecure: false,
@@ -877,7 +875,6 @@ function backendToForm(backend: LogBackend): ElasticsearchLogsForm {
     queryEndpoint: backend.query_endpoint,
     writeAPIKey: '',
     queryAPIKey: '',
-    reuseWriteAPIKey: false,
     writeCredentialRef: backend.write_credential_ref,
     queryCredentialRef: backend.query_credential_ref,
     tlsInsecure: backend.tls_insecure,
@@ -1113,11 +1110,11 @@ function ElasticsearchLogsCard({ current, exploreUrl, onBackendChange }: { curre
       setMessage({ ok: false, text: tr('请直接粘贴 ES 写入 API Key。', 'Paste an ES write API key.') });
       return null;
     }
-    if (!form.reuseWriteAPIKey && !queryAPIKey && !form.queryCredentialRef) {
-      setMessage({ ok: false, text: tr('请粘贴只读查询 API Key，或明确勾选复用写入 Key。', 'Paste a read-only query API key or explicitly reuse the write key.') });
+    if (!queryAPIKey && !form.queryCredentialRef) {
+      setMessage({ ok: false, text: tr('请粘贴只读查询 API Key。', 'Paste a read-only query API key.') });
       return null;
     }
-    if (!form.reuseWriteAPIKey && !writeAPIKey && !queryAPIKey && form.writeCredentialRef === form.queryCredentialRef) {
+    if (!writeAPIKey && !queryAPIKey && form.writeCredentialRef === form.queryCredentialRef) {
       setMessage({ ok: false, text: tr('写入 API Key 和只读查询 API Key 必须是两个不同凭证。', 'Write and read-only query API keys must use different credentials.') });
       return null;
     }
@@ -1130,8 +1127,7 @@ function ElasticsearchLogsCard({ current, exploreUrl, onBackendChange }: { curre
       write_credential_ref: form.writeCredentialRef || undefined,
       query_credential_ref: form.queryCredentialRef || undefined,
       write_api_key: writeAPIKey || undefined,
-      query_api_key: form.reuseWriteAPIKey ? undefined : queryAPIKey || undefined,
-      reuse_write_api_key: form.reuseWriteAPIKey || undefined,
+      query_api_key: queryAPIKey || undefined,
       preserve_ca: Boolean(backend?.has_custom_ca),
       kibana_url: backend?.kibana_url || undefined,
       tls_insecure: form.tlsInsecure,
@@ -1256,22 +1252,15 @@ function ElasticsearchLogsCard({ current, exploreUrl, onBackendChange }: { curre
             />
             <PromField
               label={tr('ES 只读查询 Encoded API Key', 'ES read-only query Encoded API Key')}
-              hint={form.reuseWriteAPIKey
-                ? tr('将复制写入 Key 到独立的查询凭证引用；仅建议用于兼容测试。', 'The write key will be copied into a separate query credential reference; use this only for compatibility testing.')
-                : tr('建议仅授予目标 data stream 的读取、字段与聚合权限。', 'Grant only read, field, and aggregation access to the target data stream.')}
+              hint={tr('建议仅授予目标 data stream 的读取、字段与聚合权限。', 'Grant only read, field, and aggregation access to the target data stream.')}
               value={form.queryAPIKey}
               onChange={(value) => update('queryAPIKey', value)}
               placeholder={backend ? tr('已安全保存；留空保持不变', 'Stored securely; leave blank to keep') : 'ZXlKaGJHY2lPaUpJVXpJMU5pSjkuLi4='}
               sensitive
               revealed={revealedKeys.query}
               onToggleReveal={() => setRevealedKeys((current) => ({ ...current, query: !current.query }))}
-              disabled={form.reuseWriteAPIKey}
             />
-            <label className="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-xs text-zinc-300 md:col-span-2">
-              <input type="checkbox" checked={form.reuseWriteAPIKey} onChange={(event) => update('reuseWriteAPIKey', event.target.checked)} className="mt-0.5 accent-amber-500" />
-              <span><span className="block text-amber-300">{tr('兼容模式：查询复用写入 Key', 'Compatibility mode: reuse the write key for queries')}</span><span className="mt-0.5 block text-[11px] leading-5 text-zinc-500">{tr('可以只配置一个 Key，但它必须同时具备写入和查询权限；生产环境仍推荐两个最小权限 Key。', 'This allows a single key, but it must have both write and query privileges; two least-privilege keys remain recommended for production.')}</span></span>
-            </label>
-            <label className="flex items-center gap-2 text-xs text-zinc-300 md:col-span-2"><input type="checkbox" checked={form.tlsInsecure} onChange={(event) => update('tlsInsecure', event.target.checked)} className="accent-amber-500" />{tr('兼容测试：允许 HTTP / 跳过 TLS 校验', 'Compatibility testing: allow HTTP / skip TLS verification')}</label>
+            <label className="flex items-center gap-2 text-xs text-zinc-300 md:col-span-2"><input type="checkbox" checked={form.tlsInsecure} onChange={(event) => update('tlsInsecure', event.target.checked)} className="accent-amber-500" />{tr('测试环境：允许 HTTP / 跳过 TLS 校验', 'Test environments: allow HTTP / skip TLS verification')}</label>
           </fieldset>
 
           {editingCurrent && <p className="mt-3 text-[11px] leading-5 text-zinc-500">{tr('保存不会影响当前日志链路；点击“设为当前”会在 Manager 连接与权限测试通过后切换，设备同步可另行检查。', 'Saving does not affect the current log pipeline. Selecting switches after Manager connectivity and privilege checks; device convergence can be checked separately.')}</p>}

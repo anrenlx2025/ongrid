@@ -113,7 +113,6 @@ type SaveInput struct {
 	QueryCredentialRef string   `json:"query_credential_ref,omitempty"`
 	WriteAPIKey        string   `json:"write_api_key,omitempty"`
 	QueryAPIKey        string   `json:"query_api_key,omitempty"`
-	ReuseWriteAPIKey   bool     `json:"reuse_write_api_key,omitempty"`
 	CAPEM              string   `json:"ca_pem,omitempty"`
 	PreserveCA         bool     `json:"preserve_ca,omitempty"`
 	KibanaURL          string   `json:"kibana_url,omitempty"`
@@ -153,11 +152,10 @@ type BackendTestResult struct {
 type ConnectionStatus string
 
 const (
-	ConnectionStatusNotChecked ConnectionStatus = "not_checked"
-	ConnectionStatusPending    ConnectionStatus = "pending"
-	ConnectionStatusVerified   ConnectionStatus = "verified"
-	ConnectionStatusFailed     ConnectionStatus = "failed"
-	ConnectionStatusOffline    ConnectionStatus = "offline"
+	ConnectionStatusPending  ConnectionStatus = "pending"
+	ConnectionStatusVerified ConnectionStatus = "verified"
+	ConnectionStatusFailed   ConnectionStatus = "failed"
+	ConnectionStatusOffline  ConnectionStatus = "offline"
 )
 
 type EdgeConnection struct {
@@ -217,7 +215,6 @@ type Service struct {
 	grafana     GrafanaSyncer
 	devices     HostDeviceResolver
 	inventory   ConnectionEdgeInventory
-	selectGuard func(context.Context) error
 	cacheKey    string
 	cachedES    *logquery.ElasticsearchClient
 	lokiCheck   *lokiConnectionCheckSession
@@ -265,14 +262,6 @@ func (s *Service) SetConnectionEdgeInventory(inventory ConnectionEdgeInventory) 
 	s.inventory = inventory
 }
 
-// SetSelectGuard installs product-level preconditions that must pass before
-// selecting an Elasticsearch configuration as the global log backend.
-func (s *Service) SetSelectGuard(guard func(context.Context) error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.selectGuard = guard
-}
-
 func (s *Service) Save(ctx context.Context, input SaveInput) (view *BackendView, retErr error) {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
@@ -303,12 +292,11 @@ func (s *Service) Save(ctx context.Context, input SaveInput) (view *BackendView,
 	editableInPlace := false
 	if loadErr == nil {
 		generation = previous.Generation
-		switch previous.Status {
-		case model.BackendStatusUnselected:
+		if previous.Status == model.BackendStatusUnselected {
 			// An unselected configuration remains editable in place. The
 			// selected backend keeps serving reads and writes.
 			editableInPlace = true
-		default:
+		} else {
 			generation++
 		}
 	}
@@ -337,9 +325,7 @@ func (s *Service) Save(ctx context.Context, input SaveInput) (view *BackendView,
 		}
 	}
 	queryKey := normalized.QueryAPIKey
-	if normalized.ReuseWriteAPIKey {
-		queryKey = writeKey
-	} else if queryKey == "" {
+	if queryKey == "" {
 		if queryRef == "" {
 			return nil, fmt.Errorf("%w: query API key or credential ref is required", errs.ErrInvalid)
 		}
@@ -348,13 +334,11 @@ func (s *Service) Save(ctx context.Context, input SaveInput) (view *BackendView,
 			return nil, fmt.Errorf("%w: invalid query credential", errs.ErrInvalid)
 		}
 	}
-	// Resolve and compare every effective key before mutating a managed vault
-	// row. A rejected request must not rotate a credential still referenced by
-	// the currently saved configuration.
-	if !normalized.ReuseWriteAPIKey && subtle.ConstantTimeCompare([]byte(writeKey), []byte(queryKey)) == 1 {
-		return nil, fmt.Errorf("%w: write and query API keys must differ unless reuse_write_api_key is enabled", errs.ErrInvalid)
+	// The write and query principals are intentionally distinct: Edge only
+	// receives the write key, while Manager only needs read privileges.
+	if subtle.ConstantTimeCompare([]byte(writeKey), []byte(queryKey)) == 1 {
+		return nil, fmt.Errorf("%w: write and query API keys must differ", errs.ErrInvalid)
 	}
-
 	if normalized.WriteAPIKey != "" {
 		writeRef, err = s.storeManagedAPIKey(ctx, "write", writeKey, generation)
 		if err != nil {
@@ -362,7 +346,7 @@ func (s *Service) Save(ctx context.Context, input SaveInput) (view *BackendView,
 		}
 		createdManagedRefs = append(createdManagedRefs, writeRef)
 	}
-	if normalized.ReuseWriteAPIKey || normalized.QueryAPIKey != "" {
+	if normalized.QueryAPIKey != "" {
 		queryRef, err = s.storeManagedAPIKey(ctx, "query", queryKey, generation)
 		if err != nil {
 			return nil, err
@@ -437,11 +421,6 @@ func (s *Service) Test(ctx context.Context, id uint64) (*BackendTestResult, erro
 	if err != nil {
 		return nil, err
 	}
-	switch backend.Status {
-	case model.BackendStatusUnselected, model.BackendStatusSelected:
-	default:
-		return nil, fmt.Errorf("%w: wait for the current log backend operation to finish", errs.ErrConflict)
-	}
 	version, err := s.probeBackend(ctx, backend)
 	if err != nil {
 		return nil, err
@@ -463,12 +442,6 @@ func (s *Service) Select(ctx context.Context, id uint64) (*BackendView, error) {
 	}
 	if backend.Status == model.BackendStatusSelected {
 		return s.view(ctx, backend)
-	}
-	if backend.Status != model.BackendStatusUnselected {
-		return nil, fmt.Errorf("%w: Elasticsearch configuration cannot be selected", errs.ErrConflict)
-	}
-	if err := s.checkSelectGuard(ctx); err != nil {
-		return nil, err
 	}
 	version, err := s.probeBackend(ctx, backend)
 	if err != nil {
@@ -640,7 +613,7 @@ func summarizeConnectionCheck(backendID uint64, backend string, generation uint6
 	for _, edge := range edges {
 		item := EdgeConnection{
 			EdgeID: edge.EdgeID, EdgeName: edge.Name, Online: edge.Online,
-			Status: ConnectionStatusNotChecked, DesiredGeneration: generation,
+			Status: ConnectionStatusPending, DesiredGeneration: generation,
 		}
 		assignment := byEdge[edge.EdgeID]
 		if assignment != nil {
@@ -665,7 +638,7 @@ func summarizeConnectionCheck(backendID uint64, backend string, generation uint6
 			result.Online++
 			switch {
 			case assignment == nil || assignment.DesiredGeneration != generation:
-				item.Status = ConnectionStatusNotChecked
+				item.Status = ConnectionStatusPending
 				result.Pending++
 			case assignment.Status == model.AssignmentStatusFailed:
 				item.Status = ConnectionStatusFailed
@@ -791,9 +764,8 @@ func (s *Service) PluginRuntimeOverlay(ctx context.Context, edgeID uint64, plugi
 }
 
 // PluginSecretForEdge is called only from the authenticated tunnel handler.
-// During apply, only explicitly assigned Edges may obtain the saved
-// generation. Once selected, every authenticated Edge may obtain that selected
-// generation. The request can never select an arbitrary vault entry.
+// Every authenticated Edge may obtain the currently selected generation; the
+// request can never select an arbitrary vault entry.
 func (s *Service) PluginSecretForEdge(ctx context.Context, edgeID uint64, plugin, slot string, generation uint64) (*PluginSecret, error) {
 	if edgeID == 0 || plugin != "logs" || slot != SecretSlotESAPIKey {
 		return nil, errs.ErrForbidden
@@ -858,7 +830,7 @@ func (s *Service) markLokiConnectionApplied(ctx context.Context, edgeID, generat
 	}
 	now := time.Now().UTC()
 	assignment.AppliedGeneration = generation
-	assignment.Status = model.AssignmentStatusApplied
+	assignment.Status = model.AssignmentStatusPending
 	assignment.LastProbeAt = &now
 	assignment.UpdatedAt = now
 	assignment.LastError = ""
@@ -922,7 +894,7 @@ func (s *Service) MarkApplied(ctx context.Context, edgeID, generation uint64, pr
 	now := time.Now().UTC()
 	assignment.DesiredGeneration = generation
 	assignment.AppliedGeneration = generation
-	assignment.Status = model.AssignmentStatusApplied
+	assignment.Status = model.AssignmentStatusPending
 	assignment.LastProbeAt = &now
 	assignment.LastError = ""
 	if strings.TrimSpace(applyErr) != "" {
@@ -1235,28 +1207,6 @@ func (s *Service) connectionEdges(ctx context.Context) ([]ConnectionEdge, error)
 	return result, nil
 }
 
-func (s *Service) validateProbeEdges(ctx context.Context, edgeIDs []uint64) error {
-	if len(edgeIDs) == 0 {
-		return nil
-	}
-	s.mu.RLock()
-	resolver := s.devices
-	s.mu.RUnlock()
-	if resolver == nil {
-		return errors.New("host device resolver is not configured")
-	}
-	for _, edgeID := range edgeIDs {
-		deviceID, err := resolver.LookupHostDevice(ctx, edgeID)
-		if err != nil {
-			return fmt.Errorf("resolve host device for Edge %d: %w", edgeID, err)
-		}
-		if deviceID == 0 {
-			return fmt.Errorf("resolve host device for Edge %d: empty device id", edgeID)
-		}
-	}
-	return nil
-}
-
 func cloneBackendAssignment(in *model.BackendAssignment) *model.BackendAssignment {
 	if in == nil {
 		return nil
@@ -1500,19 +1450,6 @@ func (s *Service) notify(ctx context.Context) error {
 	return notifier.NotifyLogsBackendChanged(ctx)
 }
 
-func (s *Service) checkSelectGuard(ctx context.Context) error {
-	s.mu.RLock()
-	guard := s.selectGuard
-	s.mu.RUnlock()
-	if guard == nil {
-		return nil
-	}
-	if err := guard(ctx); err != nil {
-		return fmt.Errorf("%w: %v", errs.ErrConflict, err)
-	}
-	return nil
-}
-
 func (s *Service) invalidateCache() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1580,9 +1517,6 @@ func normalizeSaveInput(input SaveInput) (SaveInput, error) {
 	if err != nil {
 		return SaveInput{}, fmt.Errorf("%w: invalid query_api_key", errs.ErrInvalid)
 	}
-	if input.ReuseWriteAPIKey && input.QueryAPIKey != "" {
-		return SaveInput{}, fmt.Errorf("%w: query_api_key must be empty when reuse_write_api_key is enabled", errs.ErrInvalid)
-	}
 	input.CAPEM = strings.TrimSpace(input.CAPEM)
 	if len(input.CAPEM) > maxCAPEMBytes {
 		return SaveInput{}, fmt.Errorf("%w: CA bundle too large", errs.ErrInvalid)
@@ -1643,7 +1577,7 @@ func backendHTTPClient(backend *model.Backend) (*http.Client, error) {
 	transport.TLSClientConfig = &tls.Config{
 		MinVersion:         tls.VersionTLS12,
 		RootCAs:            pool,
-		InsecureSkipVerify: backend.TLSInsecure, //nolint:gosec // explicit admin-only compatibility switch
+		InsecureSkipVerify: backend.TLSInsecure, //nolint:gosec // explicit admin-only test-environment switch
 	}
 	return &http.Client{
 		Timeout:   15 * time.Second,

@@ -82,9 +82,9 @@ type PipelineEvaluatorOpts struct {
 	// (the cache still loads the rows so the UI can list them).
 	LogQuerier LogQuerier
 
-	// LogSearcher is the backend-neutral query planner used by log_search.
-	// It follows the same Loki/Elasticsearch cutover boundaries as the Logs
-	// UI and never accepts a backend query language from the rule.
+	// LogSearcher is the backend-neutral query service used by log_search.
+	// It queries the currently selected log backend and never accepts a
+	// backend query language from the rule.
 	LogSearcher logquery.Searcher
 
 	DeviceIdentityResolver DeviceIdentityResolver

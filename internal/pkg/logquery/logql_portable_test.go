@@ -51,7 +51,7 @@ func TestCompileLogQLSearchPreservesExactLineFilterSemantics(t *testing.T) {
 		t.Fatalf("keywords = %#v", req.Keywords)
 	}
 	if req.Filters[0].Field != "source_id" || req.Filters[1].Field != "file" {
-		t.Fatalf("alias filters = %#v", req.Filters)
+		t.Fatalf("mapped filters = %#v", req.Filters)
 	}
 }
 

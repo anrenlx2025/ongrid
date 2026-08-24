@@ -26,8 +26,8 @@ import (
 )
 
 // evaluateLogSearch runs the backend-neutral count contract. The configured
-// Searcher is the Manager query planner, so the same rule works on built-in
-// Loki, external Elasticsearch, and a cutover window spanning both.
+// Searcher resolves the currently selected backend, so the same rule works
+// with built-in Loki or external Elasticsearch.
 func (e *PipelineEvaluator) evaluateLogSearch(ctx context.Context, now time.Time) {
 	rules := e.rules.LogSearchRules()
 	if len(rules) == 0 {

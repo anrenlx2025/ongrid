@@ -25,17 +25,17 @@ func TestMarshalQueryLogQLToolResult_ElasticsearchKeepsOnlyKeyFields(t *testing.
 				"unit":   "nginx.service",
 			},
 			ResourceAttributes: map[string]string{
-				"device_id":     "123",
-				"cluster_id":    "48",
-				"namespace":     "ongrid-system",
-				"workload":      "ongrid-edge-node",
-				"pod":           "ongrid-edge-node-hgzlq",
-				"container":     "edge-node",
-				"node":          "worker1",
-				"ongrid_source": "kubernetes:pod",
-				"filename":      "/var/log/pods/edge.log",
-				"service_name":  "unknown_service",
-				"custom":        "drop-me-too",
+				"device_id":    "123",
+				"cluster_id":   "48",
+				"namespace":    "ongrid-system",
+				"workload":     "ongrid-edge-node",
+				"pod":          "ongrid-edge-node-hgzlq",
+				"container":    "edge-node",
+				"node":         "worker1",
+				"source_id":    "kubernetes:pod",
+				"file":         "/var/log/pods/edge.log",
+				"service_name": "unknown_service",
+				"custom":       "drop-me-too",
 			},
 			TraceID: "trace-1",
 			SpanID:  "span-1",
@@ -101,7 +101,7 @@ func TestMarshalQueryLogQLToolResult_LokiStreamsKeepOnlyKeyDimensions(t *testing
 		ResultType: "streams",
 		Result: json.RawMessage(`[{
 			"stream":{
-				"attributes_device_id":"123",
+				"device_id":"123",
 				"cluster_id":"48",
 				"namespace":"ongrid-system",
 				"pod":"edge-node-1",
@@ -113,7 +113,7 @@ func TestMarshalQueryLogQLToolResult_LokiStreamsKeepOnlyKeyDimensions(t *testing
 				"1700000000000000000",
 				"request timed out",
 				{
-					"attributes_ongrid_source":"kubernetes:pod",
+					"ongrid_source":"kubernetes:pod",
 					"level":"error",
 					"trace_id":"trace-1",
 					"custom":"drop-me"
@@ -144,7 +144,7 @@ func TestMarshalQueryLogQLToolResult_LokiStreamsKeepOnlyKeyDimensions(t *testing
 		streams[0].Stream["namespace"] != "ongrid-system" || streams[0].Stream["pod"] != "edge-node-1" {
 		t.Fatalf("stream dimensions = %#v", streams[0].Stream)
 	}
-	for _, field := range []string{"attributes_device_id", "service_name", "span_id", "job"} {
+	for _, field := range []string{"service_name", "span_id", "job"} {
 		if _, ok := streams[0].Stream[field]; ok {
 			t.Errorf("stream field %q was not removed: %#v", field, streams[0].Stream)
 		}
@@ -159,9 +159,6 @@ func TestMarshalQueryLogQLToolResult_LokiStreamsKeepOnlyKeyDimensions(t *testing
 	}
 	if metadata["ongrid_source"] != "kubernetes:pod" || metadata["level"] != "error" || metadata["trace_id"] != "trace-1" {
 		t.Fatalf("metadata = %#v", metadata)
-	}
-	if _, ok := metadata["attributes_ongrid_source"]; ok {
-		t.Errorf("legacy source alias was not normalized: %#v", metadata)
 	}
 	if _, ok := metadata["custom"]; ok {
 		t.Errorf("custom metadata was not removed: %#v", metadata)

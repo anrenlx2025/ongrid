@@ -145,7 +145,6 @@ export type SaveLogBackendInput = {
   query_credential_ref?: string;
   write_api_key?: string;
   query_api_key?: string;
-  reuse_write_api_key?: boolean;
   ca_pem?: string;
   preserve_ca?: boolean;
   kibana_url?: string;
@@ -174,7 +173,7 @@ export function selectLogBackend(id: number) {
   return request<APIEnvelope<LogBackend>>('POST', `/logs/backend/${id}/select`).then((r) => r.data);
 }
 
-export type LogBackendConnectionStatus = 'not_checked' | 'pending' | 'verified' | 'failed' | 'offline';
+export type LogBackendConnectionStatus = 'pending' | 'verified' | 'failed' | 'offline';
 
 export type LogBackendEdgeConnection = {
   edge_id: number;

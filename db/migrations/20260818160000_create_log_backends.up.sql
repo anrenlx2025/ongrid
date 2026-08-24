@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS log_backends (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     name VARCHAR(128) NOT NULL DEFAULT '',
     type VARCHAR(32) NOT NULL DEFAULT 'elasticsearch',
-    status VARCHAR(24) NOT NULL DEFAULT 'saved',
+    status VARCHAR(24) NOT NULL DEFAULT 'unselected',
     generation BIGINT UNSIGNED NOT NULL DEFAULT 1,
     write_endpoints_json TEXT NOT NULL,
     query_endpoint VARCHAR(2048) NOT NULL DEFAULT '',
@@ -15,10 +15,7 @@ CREATE TABLE IF NOT EXISTS log_backends (
     kibana_url VARCHAR(2048) NOT NULL DEFAULT '',
     tls_insecure BOOLEAN NOT NULL DEFAULT FALSE,
     detected_version VARCHAR(32) NOT NULL DEFAULT '',
-    cutover_at DATETIME(3) NULL,
-    ended_at DATETIME(3) NULL,
     last_test_at DATETIME(3) NULL,
-    last_error VARCHAR(1024) NOT NULL DEFAULT '',
     created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     deleted_at DATETIME(3) NULL,
@@ -26,7 +23,6 @@ CREATE TABLE IF NOT EXISTS log_backends (
     PRIMARY KEY (id),
     UNIQUE KEY uk_log_backend_name (name, generation, delete_marker),
     KEY idx_log_backends_status (status),
-    KEY idx_log_backends_ended_at (ended_at),
     KEY idx_log_backends_deleted_at (deleted_at)
 );
 
@@ -38,7 +34,6 @@ CREATE TABLE IF NOT EXISTS log_backend_assignments (
     applied_generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
     status VARCHAR(24) NOT NULL DEFAULT 'pending',
     probe_id VARCHAR(128) NOT NULL DEFAULT '',
-    cutover_at DATETIME(3) NULL,
     last_probe_at DATETIME(3) NULL,
     last_write_success_at DATETIME(3) NULL,
     last_error VARCHAR(1024) NOT NULL DEFAULT '',
