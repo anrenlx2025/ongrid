@@ -2,6 +2,8 @@ package logs
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -13,28 +15,116 @@ import (
 
 const maxHistogramBuckets = 500
 
+const maxSearchCursorEnvelopeBytes = 8 * 1024
+
+type searchCursorEnvelope struct {
+	Backend           string `json:"backend"`
+	BackendID         uint64 `json:"backend_id"`
+	BackendGeneration uint64 `json:"backend_generation"`
+	Cursor            string `json:"cursor"`
+}
+
 func (s *Service) Search(ctx context.Context, req logquery.SearchRequest) (*logquery.SearchResult, error) {
 	if err := req.NormalizeAndValidate(); err != nil {
 		return nil, err
 	}
-	searcher, err := s.selectedSearcher(ctx)
+	backend, err := s.selectedBackend(ctx)
 	if err != nil {
 		return nil, err
+	}
+	searcher := s.loki
+	if backend != nil {
+		searcher, err = s.elasticsearchClient(ctx, backend)
+		if err != nil {
+			return nil, err
+		}
+		if req.Cursor != "" {
+			envelope, decodeErr := decodeSearchCursorEnvelope(req.Cursor)
+			if decodeErr != nil {
+				return nil, decodeErr
+			}
+			if envelope.Backend != string(model.BackendTypeElasticsearch) || envelope.BackendID != backend.ID ||
+				envelope.BackendGeneration != backend.Generation || envelope.Cursor == "" {
+				return nil, fmt.Errorf("%w: log cursor does not belong to the selected backend", apperrs.ErrInvalid)
+			}
+			req.Cursor = envelope.Cursor
+		}
+	} else if searcher == nil {
+		return nil, errors.New("current Loki backend is unavailable")
 	}
 	// Product search windows own (start, end]. Backend search APIs use an
 	// inclusive lower bound, so exclude the start boundary explicitly.
 	req.Start = req.Start.Add(time.Nanosecond)
-	return searcher.Search(ctx, req)
+	result, err := searcher.Search(ctx, req)
+	if err != nil || backend == nil || result.NextCursor == "" {
+		return result, err
+	}
+	innerCursor := result.NextCursor
+	result.NextCursor, err = encodeSearchCursorEnvelope(searchCursorEnvelope{
+		Backend: string(model.BackendTypeElasticsearch), BackendID: backend.ID,
+		BackendGeneration: backend.Generation, Cursor: innerCursor,
+	})
+	if err != nil {
+		if closeErr := logquery.CloseCursor(context.WithoutCancel(ctx), searcher, innerCursor); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close Elasticsearch cursor after envelope failure: %w", closeErr))
+		}
+		return nil, err
+	}
+	return result, nil
 }
 
 // CloseCursor releases backend resources when a caller abandons pagination.
 // It is safe for the built-in Loki path, whose cursors are stateless.
 func (s *Service) CloseCursor(ctx context.Context, cursor string) error {
-	searcher, err := s.selectedSearcher(ctx)
+	if cursor == "" {
+		return nil
+	}
+	envelope, err := decodeSearchCursorEnvelope(cursor)
 	if err != nil {
 		return err
 	}
-	return logquery.CloseCursor(ctx, searcher, cursor)
+	if envelope.Backend == "loki" {
+		return nil
+	}
+	if envelope.Backend != string(model.BackendTypeElasticsearch) || envelope.BackendID == 0 ||
+		envelope.BackendGeneration == 0 || envelope.Cursor == "" {
+		return fmt.Errorf("%w: invalid log cursor envelope", apperrs.ErrInvalid)
+	}
+	backend, err := s.repo.GetBackend(ctx, envelope.BackendID)
+	if err != nil {
+		return fmt.Errorf("load log cursor backend: %w", err)
+	}
+	if backend.Type != model.BackendTypeElasticsearch || backend.Generation != envelope.BackendGeneration {
+		return fmt.Errorf("%w: log cursor backend generation changed", apperrs.ErrConflict)
+	}
+	searcher, err := s.elasticsearchClient(ctx, backend)
+	if err != nil {
+		return err
+	}
+	return logquery.CloseCursor(ctx, searcher, envelope.Cursor)
+}
+
+func encodeSearchCursorEnvelope(envelope searchCursorEnvelope) (string, error) {
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		return "", fmt.Errorf("encode log cursor envelope: %w", err)
+	}
+	if len(body) > maxSearchCursorEnvelopeBytes {
+		return "", fmt.Errorf("%w: log cursor envelope is too large", apperrs.ErrInvalid)
+	}
+	return base64.RawURLEncoding.EncodeToString(body), nil
+}
+
+func decodeSearchCursorEnvelope(raw string) (searchCursorEnvelope, error) {
+	body, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil || len(body) == 0 || len(body) > maxSearchCursorEnvelopeBytes {
+		return searchCursorEnvelope{}, fmt.Errorf("%w: invalid log cursor envelope", apperrs.ErrInvalid)
+	}
+	var envelope searchCursorEnvelope
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return searchCursorEnvelope{}, fmt.Errorf("%w: invalid log cursor envelope", apperrs.ErrInvalid)
+	}
+	return envelope, nil
 }
 
 // Count uses only the selected backend. Retained data in an inactive backend

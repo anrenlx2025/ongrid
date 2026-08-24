@@ -1075,7 +1075,6 @@ func (s *Service) resolveLokiTarget(ctx context.Context) (LokiTarget, bool, erro
 	}
 	target.Endpoint = strings.TrimSpace(target.Endpoint)
 	target.BasicUser = strings.TrimSpace(target.BasicUser)
-	target.BasicPassword = strings.TrimSpace(target.BasicPassword)
 	if target.Endpoint == "" {
 		return LokiTarget{}, false, nil
 	}

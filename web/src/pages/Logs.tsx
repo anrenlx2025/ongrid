@@ -458,13 +458,23 @@ export default function LogsPage() {
     if (!quiet) setLoading(true);
     setError(null);
     try {
-      const [result, buckets] = await Promise.all([
+      const [searchOutcome, histogramOutcome] = await Promise.allSettled([
         searchLogs(input, controller.signal),
         getLogHistogram({ ...input, limit: 1, cursor: undefined }, histogramInterval(timeWindow.duration), controller.signal),
       ]);
+      if (searchOutcome.status === 'rejected') throw searchOutcome.reason;
+      const result = searchOutcome.value;
       if (seq !== requestSeq.current) {
         closeCursorQuietly(result.next_cursor ?? '');
         return;
+      }
+      if (histogramOutcome.status === 'rejected' && (histogramOutcome.reason as Error).name === 'AbortError') {
+        closeCursorQuietly(result.next_cursor ?? '');
+        return;
+      }
+      const buckets = histogramOutcome.status === 'fulfilled' ? histogramOutcome.value : [];
+      if (histogramOutcome.status === 'rejected') {
+        console.warn('log histogram request failed', histogramOutcome.reason);
       }
       pageRequestRef.current = input;
       setHasCompletedSearch(true);

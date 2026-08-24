@@ -105,7 +105,11 @@ func migrateLegacyLogRule(rule *model.Rule, kind string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("encode converted log_search rule: %w", err)
 	}
-	return string(encoded), nil
+	normalized, err := normalizeLogSearchConditionsForScope(string(encoded), effectiveScope(rule.ScopeType, kind))
+	if err != nil {
+		return "", fmt.Errorf("normalize converted log_search rule scope: %w", err)
+	}
+	return normalized, nil
 }
 
 func legacyLogRuleParts(raw, kind string) (selector, lineFilter, window, operator string, threshold float64, err error) {

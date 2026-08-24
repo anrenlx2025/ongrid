@@ -67,7 +67,7 @@ func TestMigrateLegacyLogRulesPreservesHostStreamGrouping(t *testing.T) {
 	repo := newFakeRepo()
 	repo.rules["host_error"] = &model.Rule{
 		ID: 1, RuleKey: "host_error", Kind: model.RuleKindLogMatch, ScopeType: model.RuleScopeHost,
-		ConditionsJSON: `{"stream_selector":"{device_id=~\".+\"}","line_filter":"(?i)error","window":"5m","operator":">=","threshold":1}`,
+		ConditionsJSON: `{"stream_selector":"{level=\"error\"}","line_filter":"(?i)error","window":"5m","operator":">=","threshold":1}`,
 	}
 	count, err := NewUsecase(repo, nil).MigrateLegacyLogRules(t.Context())
 	if err != nil || count != 1 {
@@ -83,6 +83,9 @@ func TestMigrateLegacyLogRulesPreservesHostStreamGrouping(t *testing.T) {
 	}
 	if !reflect.DeepEqual(compiled.GroupBy, legacyLogStreamGroupBy) {
 		t.Fatalf("compiled group_by = %v, want %v", compiled.GroupBy, legacyLogStreamGroupBy)
+	}
+	if !logSearchFiltersRequireDevice(compiled.Query.Filters) {
+		t.Fatalf("host query filters = %#v, want device_id existence constraint", compiled.Query.Filters)
 	}
 }
 

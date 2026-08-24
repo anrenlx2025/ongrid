@@ -197,6 +197,35 @@ describe('LogsPage', () => {
     expect(screen.queryByText('采集配置')).not.toBeInTheDocument();
   });
 
+  it('keeps successful logs and closes their cursor when the histogram fails', async () => {
+    let closedCursor = '';
+    server.use(
+      http.post('/api/v1/logs/search', () => HttpResponse.json({
+        code: 0,
+        message: '',
+        data: { records, next_cursor: 'origin-es-cursor', has_more: true, took_ms: 27, backends: ['elasticsearch'] },
+      })),
+      http.post('/api/v1/logs/histogram', () => HttpResponse.json({
+        code: 503,
+        message: 'histogram unavailable',
+      }, { status: 503 })),
+      http.post('/api/v1/logs/cursor/close', async ({ request }) => {
+        const input = await request.json() as { cursor: string };
+        closedCursor = input.cursor;
+        return HttpResponse.json({ code: 0, message: '', data: null });
+      }),
+    );
+
+    const view = render(<MemoryRouter><LogsPage /></MemoryRouter>);
+
+    await waitForInitialLogs();
+    expect(screen.getByRole('button', { name: '加载更多' })).toBeInTheDocument();
+    expect(screen.queryByText('histogram unavailable')).not.toBeInTheDocument();
+
+    view.unmount();
+    await waitFor(() => expect(closedCursor).toBe('origin-es-cursor'));
+  });
+
   it('resolves a cluster name from topology when logs contain only cluster_id', async () => {
     const recordsWithoutClusterName = records.map((record) => ({
       ...record,

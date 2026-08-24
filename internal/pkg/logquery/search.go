@@ -252,6 +252,8 @@ type FieldDefinition struct {
 
 var errInvalidCursor = errors.New("logquery: invalid cursor")
 
+const maxCursorBytes = 8 * 1024
+
 func (r *SearchRequest) NormalizeAndValidate() error {
 	if r.Start.IsZero() || r.End.IsZero() {
 		return errors.New("logquery: start and end are required")
@@ -525,7 +527,7 @@ func decodeCursor(raw string, dst any) error {
 	if err != nil {
 		return errInvalidCursor
 	}
-	if len(body) > 4096 {
+	if len(body) > maxCursorBytes {
 		return errInvalidCursor
 	}
 	if err := json.Unmarshal(body, dst); err != nil {

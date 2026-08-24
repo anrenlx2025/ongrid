@@ -669,6 +669,115 @@ func TestServiceReplacementSelectionUsesOnlyNewElasticsearch(t *testing.T) {
 	}
 }
 
+func TestServiceCloseCursorUsesOriginElasticsearchAfterBackendSwitch(t *testing.T) {
+	oldClosed := make(chan struct{}, 1)
+	newClosed := make(chan struct{}, 1)
+	oldServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/_pit"):
+			if err := json.NewEncoder(w).Encode(map[string]any{"id": "old-pit"}); err != nil {
+				t.Errorf("encode old PIT response: %v", err)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/_search":
+			hits := []any{
+				map[string]any{
+					"_id": "first", "_source": map[string]any{
+						"@timestamp": "2026-08-24T10:00:00Z", "body": map[string]any{"text": "first"},
+					}, "sort": []any{"2026-08-24T10:00:00Z", 1},
+				},
+				map[string]any{
+					"_id": "second", "_source": map[string]any{
+						"@timestamp": "2026-08-24T09:59:59Z", "body": map[string]any{"text": "second"},
+					}, "sort": []any{"2026-08-24T09:59:59Z", 2},
+				},
+			}
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"took": 1, "pit_id": "old-pit", "hits": map[string]any{"hits": hits},
+			}); err != nil {
+				t.Errorf("encode old search response: %v", err)
+			}
+		case r.Method == http.MethodDelete && r.URL.Path == "/_pit":
+			select {
+			case oldClosed <- struct{}{}:
+			default:
+			}
+			if err := json.NewEncoder(w).Encode(map[string]any{"succeeded": true}); err != nil {
+				t.Errorf("encode old close response: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(oldServer.Close)
+	newServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/_pit" {
+			select {
+			case newClosed <- struct{}{}:
+			default:
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{"succeeded": true}); err != nil {
+				t.Errorf("encode new close response: %v", err)
+			}
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(newServer.Close)
+
+	repo := logsstore.NewRepo(openTestDB(t))
+	oldBackend := &logsmodel.Backend{
+		Name: "external-elasticsearch", Type: logsmodel.BackendTypeElasticsearch,
+		Status: logsmodel.BackendStatusSelected, Generation: 1,
+		WriteEndpointsJSON: `["` + oldServer.URL + `"]`, QueryEndpoint: oldServer.URL,
+		Dataset: "ongrid.system", Namespace: "default", IndexPattern: "logs-ongrid.default.otel-*",
+		WriteCredentialRef: "old-write", QueryCredentialRef: "old-query", TLSInsecure: true,
+	}
+	if err := repo.SaveBackend(t.Context(), oldBackend); err != nil {
+		t.Fatalf("save old backend: %v", err)
+	}
+	newBackend := &logsmodel.Backend{
+		Name: "external-elasticsearch", Type: logsmodel.BackendTypeElasticsearch,
+		Status: logsmodel.BackendStatusUnselected, Generation: 2,
+		WriteEndpointsJSON: `["` + newServer.URL + `"]`, QueryEndpoint: newServer.URL,
+		Dataset: "ongrid.system", Namespace: "default", IndexPattern: "logs-ongrid.default.otel-*",
+		WriteCredentialRef: "new-write", QueryCredentialRef: "new-query", TLSInsecure: true,
+	}
+	if err := repo.SaveBackend(t.Context(), newBackend); err != nil {
+		t.Fatalf("save new backend: %v", err)
+	}
+	secrets := mapSecrets{
+		"old-query": {"api_key": "old-query-key"},
+		"new-query": {"api_key": "new-query-key"},
+	}
+	svc := bizlogs.NewService(repo, secrets, nil)
+	result, err := svc.Search(t.Context(), logquery.SearchRequest{
+		Start: time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC),
+		End:   time.Date(2026, 8, 24, 11, 0, 0, 0, time.UTC),
+		Limit: 1, Direction: logquery.SortBackward,
+	})
+	if err != nil || result.NextCursor == "" {
+		t.Fatalf("Search() result=%#v error=%v", result, err)
+	}
+	if err := repo.SelectBackend(t.Context(), newBackend.ID, "8.16.3", time.Now().UTC()); err != nil {
+		t.Fatalf("select new backend: %v", err)
+	}
+	if err := svc.CloseCursor(t.Context(), result.NextCursor); err != nil {
+		t.Fatalf("CloseCursor() error = %v", err)
+	}
+	select {
+	case <-oldClosed:
+	default:
+		t.Fatal("origin Elasticsearch PIT was not closed")
+	}
+	select {
+	case <-newClosed:
+		t.Fatal("cursor was sent to the newly selected Elasticsearch backend")
+	default:
+	}
+}
+
 func TestServiceSelectChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testing.T) {
 	var requestMu sync.Mutex
 	newEndpoint := func(requests *[]string) *httptest.Server {
@@ -1202,7 +1311,7 @@ func TestServiceLokiRuntimeUsesManagedExternalBasicAuth(t *testing.T) {
 	repo := logsstore.NewRepo(openTestDB(t))
 	svc := bizlogs.NewService(repo, nil, &echoProbeSearcher{})
 	svc.SetLokiTargetResolver(fixedLokiTargetResolver{target: bizlogs.LokiTarget{
-		Endpoint: "https://loki.example.com/otlp/v1/logs", BasicUser: "loki-user", BasicPassword: "loki-pass",
+		Endpoint: "https://loki.example.com/otlp/v1/logs", BasicUser: "loki-user", BasicPassword: " loki-pass ",
 		TLSInsecure: true,
 	}})
 
@@ -1222,7 +1331,7 @@ func TestServiceLokiRuntimeUsesManagedExternalBasicAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PluginSecretForEdge: %v", err)
 	}
-	wantContent := "Basic " + base64.StdEncoding.EncodeToString([]byte("loki-user:loki-pass"))
+	wantContent := "Basic " + base64.StdEncoding.EncodeToString([]byte("loki-user: loki-pass "))
 	wantHash := sha256.Sum256([]byte(wantContent))
 	if secret.Generation != generation || secret.Content != wantContent || secret.SHA256 != hex.EncodeToString(wantHash[:]) {
 		t.Fatalf("Loki secret = %+v", secret)
