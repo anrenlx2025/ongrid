@@ -59,9 +59,9 @@
 
 ### 兼容功能
 
-- 新增后端无关 `search_logs` AIOps 工具；旧 `query_logql` 仅在 Loki 可用时保留。
+- 只保留既有 `query_logql` AIOps 工具名和参数；它跟随当前选中的日志后端。Loki 支持完整 LogQL 并返回原生 `resultType/result`，Elasticsearch 支持流选择器与行过滤的安全子集并返回结构化 `records` 查询结果。
 - 新增结构化日志匹配告警；原始 LogQL 规则标记为 Loki-only，存在未迁移启用规则时阻止选择 ES。
-- Incident 日志关联消费统一日志结果，不再解析 Loki stream。
+- Incident 日志关联按当前后端分别消费 Loki stream 或 Elasticsearch record，再归一化为关联分析条目。
 - ES 模式统一使用产品日志页，不依赖 Kibana，也不在默认设置页提供 Kibana 或自定义 CA 配置。
 
 ## 边界情况

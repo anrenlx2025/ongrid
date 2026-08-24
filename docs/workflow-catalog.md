@@ -32,7 +32,7 @@ ongrid 工作流把「触发器 → 节点」连成可视化自动化：定时 /
 | 工具 | 说明 | 状态 |
 | --- | --- | --- |
 | `query_promql` | 用 PromQL 查询指标时序 | ✅ |
-| `query_logql` | 用 LogQL 查询 Loki 日志 | ✅ |
+| `query_logql` | 查询当前选中的日志后端；Loki 与 Elasticsearch 各自返回对应结果格式 | ✅ |
 | `query_traceql` | 用 TraceQL 查询 Tempo 链路 | ✅ |
 | `list_metric_catalog` | 列出当前在采的指标名 + 代表性标签 | ✅ |
 | `list_database_sources` | 列出已发现的数据库指标采集源 | ✅ |

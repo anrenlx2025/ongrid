@@ -6,7 +6,7 @@ import (
 	managermodeledge "github.com/ongridio/ongrid/internal/manager/model/edge"
 )
 
-func TestIsHostLogsRolloutEdge(t *testing.T) {
+func TestIsHostLogsConnectionEdge(t *testing.T) {
 	hostDeviceID := uint64(122)
 	zeroDeviceID := uint64(0)
 	tests := []struct {
@@ -23,8 +23,8 @@ func TestIsHostLogsRolloutEdge(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isHostLogsRolloutEdge(tt.edge); got != tt.want {
-				t.Fatalf("isHostLogsRolloutEdge() = %v, want %v", got, tt.want)
+			if got := isHostLogsConnectionEdge(tt.edge); got != tt.want {
+				t.Fatalf("isHostLogsConnectionEdge() = %v, want %v", got, tt.want)
 			}
 		})
 	}

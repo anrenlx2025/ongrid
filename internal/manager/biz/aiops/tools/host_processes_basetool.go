@@ -95,7 +95,7 @@ var GetProcessListBatchSchema = json.RawMessage(`{
 // getProcessListWhenToUse — batch-first routing hint (N+15).
 const getProcessListWhenToUse = "对一组设备一次拉 top N 进程做 fleet 比对（typical 5-10 device 一次）。" +
 	"top_n / sort_by 对所有 device 共享（一个口子调一次）。" +
-	"NOT for: 单设备深查（直接 host_bash 'ps aux' 更灵活）/ 历史进程数据 / 日志（用 search_logs）/ " +
+	"NOT for: 单设备深查（直接 host_bash 'ps aux' 更灵活）/ 历史进程数据 / 日志（用 query_logql）/ " +
 	"指标趋势（用 query_promql）。"
 
 // Info returns metadata. Class=read.

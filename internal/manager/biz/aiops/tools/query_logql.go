@@ -15,13 +15,13 @@ import (
 const ToolNameQueryLogQL = "query_logql"
 
 // QueryLogQLDescription is the single-sentence description shown to the LLM.
-// Phrased to push the model toward this tool whenever raw log inspection
-// is needed beyond what the metric-side tools can express.
-const QueryLogQLDescription = "Run a LogQL range query against Loki. " +
-	"Use this to investigate log patterns, error counts, or filter a specific device. " +
+// The public name and schema stay stable while the implementation follows the
+// log backend selected by the operator.
+const QueryLogQLDescription = "Run a log query against Ongrid's selected Loki or Elasticsearch backend using the stable LogQL interface. " +
+	"Use this to investigate log content, patterns, or a specific device. Loki supports full native LogQL; Elasticsearch supports stream selectors and line filters but not parser stages, unwrap, or metric LogQL. " +
 	"When device_id is set, start with {} plus a line filter because the backend injects the device selector; do not guess job/hostname/instance labels. " +
 	"Once a scoped query returns matching lines, summarize them unless the user asks for a narrower follow-up. " +
-	"Returns the raw Loki response (streams or matrix)."
+	"The compact result follows the selected backend: Loki keeps resultType/result data, while Elasticsearch returns key log fields and query metadata."
 
 var logQLDeviceIDMatcher = regexp.MustCompile(`(?:^|,)\s*device_id\s*(=|!=|=~|!~)\s*"([^"]*)"`)
 
@@ -154,8 +154,8 @@ func logQLStreamSelectorEnd(query string) (int, bool) {
 // query_promql for symmetry across signal types.
 const queryLogqlCallTimeout = 30 * time.Second
 
-// executeQueryLogQL runs the LogQL range query and hands the raw Loki
-// response back to the LLM via ResultJSON.
+// executeQueryLogQL runs the query against the selected backend and hands its
+// compact backend-specific result shape back to the LLM via ResultJSON.
 func (r *Registry) executeQueryLogQL(ctx context.Context, args json.RawMessage) (ExecuteResult, error) {
 	if r.logQuery == nil {
 		// Should not happen — when logQuery is nil at NewRegistry the
@@ -214,7 +214,7 @@ func (r *Registry) executeQueryLogQL(ctx context.Context, args json.RawMessage) 
 	callCtx, cancel := context.WithTimeout(ctx, queryLogqlCallTimeout)
 	defer cancel()
 
-	res, err := r.logQuery.QueryRange(callCtx, logquery.QueryRangeOptions{
+	res, err := r.logQuery.QueryLogQL(callCtx, logquery.QueryRangeOptions{
 		Query:     query,
 		Start:     start,
 		End:       end,
@@ -224,7 +224,7 @@ func (r *Registry) executeQueryLogQL(ctx context.Context, args json.RawMessage) 
 	if err != nil {
 		return ExecuteResult{}, fmt.Errorf("query_logql: dispatch: %w", err)
 	}
-	out, err := json.Marshal(res)
+	out, err := marshalQueryLogQLToolResult(res)
 	if err != nil {
 		return ExecuteResult{}, fmt.Errorf("query_logql: marshal response: %w", err)
 	}
@@ -232,10 +232,7 @@ func (r *Registry) executeQueryLogQL(ctx context.Context, args json.RawMessage) 
 }
 
 // LogQuerier is the narrow surface the query_logql executor needs from the
-// logquery client. Declared here so tests can inject a fake.
-//
-// NOTE: this interface is what r.logQuery is typed as. The concrete
-// *logquery.Client satisfies it.
+// selected-backend logs service. Declared here so tests can inject a fake.
 type LogQuerier interface {
-	QueryRange(ctx context.Context, opts logquery.QueryRangeOptions) (*logquery.QueryRangeResult, error)
+	QueryLogQL(ctx context.Context, opts logquery.QueryRangeOptions) (logquery.QueryLogQLResult, error)
 }

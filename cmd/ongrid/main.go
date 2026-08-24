@@ -1314,19 +1314,15 @@ func main() {
 	if promQueryClient != nil {
 		promQuerier = promQueryClient
 	}
-	// LogQuerier / TraceQuerier mirror the same pattern: build a client
-	// only when the URL is configured so the corresponding query_logql /
-	// query_traceql tools register conditionally.
-	var logQuerier aiopstools.LogQuerier
-	if cfg.Logs.URL != "" {
-		logQuerier = pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "aiops-logquery")))
-	}
+	// query_logql is wired to the selected-backend service so its stable name
+	// and arguments work for both backends while each keeps its own response
+	// shape. TraceQL remains conditionally available by URL.
+	var logQuerier aiopstools.LogQuerier = logsBackendSvc
 	var traceQuerier aiopstools.TraceQuerier
 	if cfg.Traces.URL != "" {
 		traceQuerier = pkgtracequery.New(cfg.Traces.URL, log.With(slog.String("comp", "aiops-tracequery")))
 	}
 	toolsReg := aiopstools.NewRegistry(fbClient, edgeUC, deviceUC, promQuerier, logQuerier, traceQuerier, alertUC, log)
-	toolsReg.SetLogSearcher(logsBackendSvc)
 	packetCaptureUC := managerbizpacketcapture.New(
 		managerpacketcapturedata.New(db),
 		fbClient,
@@ -5630,7 +5626,7 @@ var flowToolDescZhMap = map[string]string{
 	"send_notification":       "向设置中的通知目标发送消息。",
 	"send_im_message":         "通过指定 IM 应用和群 ID 主动发送消息。",
 	"query_promql":            "用 PromQL 查询指标时序数据。",
-	"query_logql":             "用 LogQL 查询 Loki 日志。",
+	"query_logql":             "查询当前选中的日志后端，并返回该后端对应的结果格式。",
 	"query_traceql":           "用 TraceQL 查询 Tempo 链路。",
 	"list_database_sources":   "列出已发现的数据库指标采集源。",
 	"analyze_database_status": "对数据库指标源做健康巡检（连接/慢查/复制等）。",

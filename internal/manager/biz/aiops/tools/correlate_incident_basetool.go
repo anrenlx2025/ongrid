@@ -33,15 +33,10 @@ type CorrelateIncidentTool struct {
 	alertUC    AlertUsecase
 	promQuery  PromQuerier
 	logQuery   LogQuerier
-	logSearch  logquery.Searcher
 	traceQuery TraceQuerier
 	edges      *edgebiz.Usecase
 	devices    *devicebiz.Usecase
 	log        *slog.Logger
-}
-
-func (t *CorrelateIncidentTool) SetLogSearcher(search logquery.Searcher) {
-	t.logSearch = search
 }
 
 // NewCorrelateIncidentTool builds the BaseTool variant.
@@ -116,7 +111,7 @@ var CorrelateIncidentBatchSchema = json.RawMessage(`{
 // correlateIncidentWhenToUse — batch-first routing hint (N+15).
 const correlateIncidentWhenToUse = "对一组 incident_id 各跑完整 metric+log+trace+edge 关联诊断。" +
 	"**典型 2-4 个一次**（每个内部已经 3 路并发）。**别一次给 16 个**——成本爆炸。" +
-	"NOT for: 单纯查 incident 字段（用 get_incident_detail）/ 没 incident_id 的自由查（用 query_promql / search_logs）/ " +
+	"NOT for: 单纯查 incident 字段（用 get_incident_detail）/ 没 incident_id 的自由查（用 query_promql / query_logql）/ " +
 	"列 incidents（用 query_incidents）。"
 
 // Info returns metadata. Class=read.
@@ -197,7 +192,7 @@ func (t *CorrelateIncidentTool) singleCorrelate(ctx context.Context, incidentID 
 		bundle.Skipped["metric_panel"] = "prom query client not configured"
 	}
 
-	if t.logSearch != nil || t.logQuery != nil {
+	if t.logQuery != nil {
 		if inc.DeviceID != nil {
 			entries, err := t.queryLogPanel(callCtx, *inc.DeviceID, wStart, wEnd)
 			if err != nil {
@@ -317,11 +312,8 @@ func (t *CorrelateIncidentTool) queryMetricPanel(ctx context.Context, expr strin
 
 // queryLogPanel mirrors Registry.queryLogPanel.
 func (t *CorrelateIncidentTool) queryLogPanel(ctx context.Context, edgeID uint64, start, end time.Time) ([]logEntry, error) {
-	if t.logSearch != nil {
-		return queryStructuredIncidentLogs(ctx, t.logSearch, edgeID, start, end)
-	}
-	q := fmt.Sprintf(`{edge_id="%d"} |~ "(?i)error|panic|oom|fatal|fail"`, edgeID)
-	res, err := t.logQuery.QueryRange(ctx, logquery.QueryRangeOptions{
+	q := fmt.Sprintf(`{device_id="%d"} |~ "(?i)error|panic|oom|fatal|fail"`, edgeID)
+	res, err := t.logQuery.QueryLogQL(ctx, logquery.QueryRangeOptions{
 		Query:     q,
 		Start:     start,
 		End:       end,
@@ -331,31 +323,7 @@ func (t *CorrelateIncidentTool) queryLogPanel(ctx context.Context, edgeID uint64
 	if err != nil {
 		return nil, err
 	}
-	if res == nil || len(res.Result) == 0 {
-		return nil, nil
-	}
-	var raw []struct {
-		Stream map[string]string `json:"stream"`
-		Values [][2]string       `json:"values"`
-	}
-	if err := json.Unmarshal(res.Result, &raw); err != nil {
-		return nil, fmt.Errorf("decode loki streams: %w", err)
-	}
-	entries := make([]logEntry, 0, 64)
-	for _, st := range raw {
-		for _, v := range st.Values {
-			ts := parseLokiNanoTimestamp(v[0])
-			line := truncateLine(v[1], 200)
-			entries = append(entries, logEntry{Timestamp: ts, Line: line, Labels: st.Stream})
-		}
-	}
-	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].Timestamp.After(entries[j].Timestamp)
-	})
-	if len(entries) > 50 {
-		entries = entries[:50]
-	}
-	return entries, nil
+	return logEntriesFromQueryLogQLResult(res)
 }
 
 // queryTracePanel mirrors Registry.queryTracePanel, including device scope

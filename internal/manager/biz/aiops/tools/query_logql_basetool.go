@@ -13,7 +13,7 @@ import (
 )
 
 // QueryLogQLTool is the BaseTool form of query_logql. Mirrors the closure
-// executor in query_logql.go: same args, same timeouts, same output bytes.
+// executor in query_logql.go: same args, same timeouts, same compact output.
 type QueryLogQLTool struct {
 	logQuery LogQuerier
 	log      *slog.Logger
@@ -31,7 +31,7 @@ func NewQueryLogQLTool(lq LogQuerier, log *slog.Logger) *QueryLogQLTool {
 // explicit "do NOT use for ..." steers the model away from
 // the metric / trace tools when the question is really about log content.
 const queryLogQLWhenToUse = "When the user asks about log CONTENT — grep error / panic / fatal, see the line text " +
-	"that explains why a service failed, or count log volume over time. " +
+	"that explains why a service failed, or inspect backend-selected log streams. Use stream selectors and line filters for portable Loki/Elasticsearch queries; metric LogQL is Loki-only. " +
 	"NOT for filesystem state, file names or file sizes (use a host_files skill). " +
 	"NOT for metric trends like cpu/mem (use query_promql). " +
 	"NOT for traces / span timelines (use query_traceql)."
@@ -102,7 +102,7 @@ func (t *QueryLogQLTool) InvokableRun(ctx context.Context, argsJSON string, _ ..
 	callCtx, cancel := context.WithTimeout(ctx, queryLogqlCallTimeout)
 	defer cancel()
 
-	res, err := t.logQuery.QueryRange(callCtx, logquery.QueryRangeOptions{
+	res, err := t.logQuery.QueryLogQL(callCtx, logquery.QueryRangeOptions{
 		Query:     query,
 		Start:     start,
 		End:       end,
@@ -112,7 +112,7 @@ func (t *QueryLogQLTool) InvokableRun(ctx context.Context, argsJSON string, _ ..
 	if err != nil {
 		return "", fmt.Errorf("query_logql: dispatch: %w", err)
 	}
-	out, err := json.Marshal(res)
+	out, err := marshalQueryLogQLToolResult(res)
 	if err != nil {
 		return "", fmt.Errorf("query_logql: marshal response: %w", err)
 	}

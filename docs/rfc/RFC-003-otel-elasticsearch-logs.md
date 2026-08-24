@@ -60,7 +60,7 @@
 ### 6. 产品耦合迁移
 
 - Logs 页面改为结构化筛选和 query text，不再构造 LogQL。
-- 新增 `search_logs` AIOps tool；旧 `query_logql` 兼容保留。
+- 保留现有 `query_logql` AIOps tool 作为唯一日志查询入口：Loki 原样执行完整 LogQL 并返回原生查询结果；Elasticsearch 将安全的流选择器与行过滤子集编译为结构化查询，并直接返回 `SearchResult`；不向模型暴露 Elasticsearch DSL，也不伪装成 Loki streams。
 - 新日志告警使用结构化 matcher；原始 LogQL 规则作为激活 blocker。
 - Incident correlation 使用统一 LogRecord。
 - Grafana Loki datasource 不自动替换；ES 下优先产品日志页，可选 Kibana URL。

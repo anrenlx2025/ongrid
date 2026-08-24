@@ -13,7 +13,7 @@ when_to_use: |
   不适合我：
     • 单纯指标告警分析（用 incident-investigator）
     • 文件系统 / 磁盘 / 进程问题（用 specialist-disk / specialist-compute）
-    • 业务日志查询（coordinator 自己用 search_logs）
+    • 业务日志查询（coordinator 自己用 query_logql）
 capabilities:
   - id: network_diagnosis
     description: Diagnose network reachability, DNS, TCP, routing, namespaces, and packet-path evidence.
