@@ -706,7 +706,7 @@ func decodeElasticsearchRecord(id string, raw json.RawMessage) (Record, error) {
 	resources := make(map[string]string)
 	for _, logical := range []string{
 		"device_id", "cluster_id", "namespace", "workload", "pod", "container",
-		"node", "source_id", "file", "unit",
+		"node", "service_name", "source_id", "file", "unit",
 	} {
 		def, _ := LookupField(logical)
 		name := strings.TrimPrefix(def.ElasticsearchPath, "resource.attributes.")

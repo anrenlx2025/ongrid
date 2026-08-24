@@ -81,9 +81,9 @@ assignment 仅保存检查所需的 desired/applied generation、probe 状态、
 ## 告警迁移
 
 - evaluator 只把 `log_search` 作为跨后端日志告警的规范存储形态；新写入不持久化 `log_match`/`log_volume`。
-- 旧规则迁移复用 `query_logql` 的安全子集编译器，将 selector/line filter 转为关键词、等值、存在、集合或前缀筛选，并保留窗口、比较符和绝对计数阈值；迁移后采用 `log_search` 的单一全局聚合 incident 契约。
+- 旧规则迁移复用 `query_logql` 的安全子集编译器，将 selector/line filter 转为关键词、等值、存在、集合或前缀筛选，并保留窗口、比较符、绝对计数阈值及 Loki stream 身份对应的 `group_by`；两个后端都按同一组标签生成逐组 incident。
 - 全部候选先完成解析，再由 Repo 在一个事务中 compare-and-swap 更新；避免半数规则已迁移、半数仍绑定 Loki。
-- 数据库更新后先刷新 evaluator 缓存，再写 ES 选中项。host incident 分组或自定义 LogQL 无法映射到统一契约时阻止 ES 切换并给出具体规则 key。
+- 数据库更新后先刷新 evaluator 缓存，再写 ES 选中项。host scope 自动补充 `device_id` 分组和存在约束；只有自定义 LogQL 无法映射到统一查询契约时才阻止 ES 切换并给出具体规则 key。
 
 ## 存储和安全
 

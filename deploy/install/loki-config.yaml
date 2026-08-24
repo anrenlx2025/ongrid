@@ -40,7 +40,7 @@ limits_config:
             - cluster_id
             - ongrid_source
             - namespace
-            - service_name
+            - service.name
         - action: structured_metadata
           attributes:
             - workload

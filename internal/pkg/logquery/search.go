@@ -369,7 +369,7 @@ func LookupField(name string) (FieldDefinition, bool) {
 	case "node":
 		return structuredField(name, "keyword", "node", "resource.attributes.node"), true
 	case "service_name":
-		return field(name, "keyword", "service_name", "resource.attributes.service_name"), true
+		return field(name, "keyword", "service_name", "resource.attributes.service.name"), true
 	case "source_id":
 		return field(name, "keyword", "ongrid_source", "resource.attributes.ongrid_source"), true
 	case "level":

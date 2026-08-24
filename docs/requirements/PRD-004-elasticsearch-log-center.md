@@ -61,7 +61,7 @@
 
 - 只保留既有 `query_logql` AIOps 工具名和参数；它跟随当前选中的日志后端。Loki 支持完整 LogQL 并返回原生 `resultType/result`，Elasticsearch 支持流选择器与行过滤的安全子集并返回结构化 `records` 查询结果。
 - 日志告警统一持久化为后端无关的 `log_search` 条件。选择 Elasticsearch 前，Manager 在事务中把旧 `log_match`/`log_volume` 规则转换为结构化关键词、字段筛选、窗口和绝对计数阈值，刷新规则缓存后再改变选中项；任一步失败都保持原后端不变。选择 Loki 不运行这项迁移，直接切换。
-- 迁移后的 `log_search` 按产品统一的全局聚合计数产生一条 incident；host scope 或超出安全 LogQL 子集的旧规则无法映射到这个契约，会返回明确冲突并阻止 ES 切换，不静默改写语义。新建与更新入口即使收到旧 kind 也立即规范化为 `log_search`，不再产生新的 Loki-only 规则。
+- 迁移后的 `log_search` 通过后端无关的 `group_by` 保留旧 Loki stream 的逐组计数与 incident 去重语义；host scope 强制包含 `device_id` 分组和约束。只有超出安全 LogQL 子集、无法无损表达的旧规则才返回明确冲突并阻止 ES 切换。新建与更新入口即使收到旧 kind 也立即规范化为 `log_search`，不再产生新的 Loki-only 规则。
 - Incident 日志关联按当前后端分别消费 Loki stream 或 Elasticsearch record，再归一化为关联分析条目。
 - ES 模式统一使用产品日志页，不依赖 Kibana，也不在默认设置页提供 Kibana 或自定义 CA 配置。
 
@@ -125,7 +125,7 @@
 - [ ] ES 设为当前前 Manager 查询/写入端点及 API Key 权限测试成功；Edge 离线不阻断切换。
 - [ ] 设置页明确展示当前日志后端，并可独立检查所有日志采集 Edge 是否应用当前 generation、是否完成真实写探针；离线设备显示待上线确认。
 - [ ] Loki/ES 切换前后不产生同一查询内的跨后端归并。
-- [ ] 旧 `log_match`/`log_volume` 告警在选择 Elasticsearch 前原子迁移为 `log_search` 并刷新 evaluator 缓存；不可映射到全局聚合契约的规则返回冲突且保持原后端；选择 Loki 仍为直接操作。
+- [ ] 旧 `log_match`/`log_volume` 告警在选择 Elasticsearch 前原子迁移为带 `group_by` 的 `log_search`，保留 stream/host 分组语义并刷新 evaluator 缓存；超出安全 LogQL 子集的规则返回冲突且保持原后端；选择 Loki 仍为直接操作。
 - [ ] ES 分页在正常结束、刷新取消、客户端主动放弃和请求失败时均关闭 PIT，不依赖 keep-alive 超时回收。
 - [ ] ES 故障可在 5 分钟内将同一个 OTel 流水线切回内置 Loki。
 - [ ] AMD64/ARM64 配置校验、Go race 测试、前端测试、构建和深浅主题截图通过。

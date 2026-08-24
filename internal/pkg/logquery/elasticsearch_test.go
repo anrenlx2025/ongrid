@@ -30,7 +30,7 @@ func TestElasticsearchClient_SearchUsesPITAndOpaqueCursor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadAll() error = %v", err)
 			}
-			if !strings.Contains(string(body), `"resource.attributes.device_id":["42"]`) || !strings.Contains(string(body), `"severity_text":["ERROR"]`) || !strings.Contains(string(body), `"match_phrase":{"body.text":"timeout"}`) {
+			if !strings.Contains(string(body), `"resource.attributes.device_id":["42"]`) || !strings.Contains(string(body), `"resource.attributes.service.name":["api"]`) || !strings.Contains(string(body), `"severity_text":["ERROR"]`) || !strings.Contains(string(body), `"match_phrase":{"body.text":"timeout"}`) {
 				t.Fatalf("search body missing scoped query: %s", body)
 			}
 			if strings.Contains(string(body), "simple_query_string") {
@@ -67,6 +67,7 @@ func TestElasticsearchClient_SearchUsesPITAndOpaqueCursor(t *testing.T) {
 	req := validSearchRequest()
 	req.Limit = 1
 	req.Scope.DeviceIDs = []uint64{42}
+	req.Scope.ServiceNames = []string{"api"}
 	req.Scope.Levels = []string{"ERROR"}
 	req.Keywords.Include = []string{"timeout"}
 	first, err := client.Search(t.Context(), req)
@@ -76,7 +77,7 @@ func TestElasticsearchClient_SearchUsesPITAndOpaqueCursor(t *testing.T) {
 	if len(first.Records) != 1 || !first.HasMore || first.NextCursor == "" {
 		t.Fatalf("first result = %#v", first)
 	}
-	if first.Records[0].ResourceAttributes["device_id"] != "42" {
+	if first.Records[0].ResourceAttributes["device_id"] != "42" || first.Records[0].ResourceAttributes["service_name"] != "api" {
 		t.Fatalf("resource attributes = %#v", first.Records[0].ResourceAttributes)
 	}
 	req.Cursor = first.NextCursor
