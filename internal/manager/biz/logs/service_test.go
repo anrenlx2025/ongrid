@@ -229,6 +229,17 @@ type countingNotifier struct {
 	calls int
 }
 
+type recordingLogAlertMigrator struct {
+	calls int
+	count int
+	err   error
+}
+
+func (m *recordingLogAlertMigrator) MigrateLegacyLogRules(context.Context) (int, error) {
+	m.calls++
+	return m.count, m.err
+}
+
 func (n *countingNotifier) NotifyLogsBackendChanged(context.Context) error {
 	n.mu.Lock()
 	n.calls++
@@ -975,6 +986,80 @@ func TestServiceSelectingLokiClearsSelectedElasticsearch(t *testing.T) {
 	runtime, err := svc.SelectedRuntime(t.Context())
 	if err != nil || runtime != nil {
 		t.Fatalf("selected runtime after choosing Loki = %+v, %v", runtime, err)
+	}
+}
+
+func TestServiceLokiSelectionDoesNotRunElasticsearchAlertMigration(t *testing.T) {
+	repo := logsstore.NewRepo(openTestDB(t))
+	svc := bizlogs.NewService(repo, mapSecrets{
+		"write": {"api_key": "write-key"},
+		"query": {"api_key": "query-key"},
+	}, &echoProbeSearcher{})
+	backend, err := svc.Save(t.Context(), bizlogs.SaveInput{
+		WriteEndpoints: []string{"https://es.example.com"}, QueryEndpoint: "https://es.example.com",
+		Dataset: "ongrid.system", Namespace: "old", WriteCredentialRef: "write", QueryCredentialRef: "query",
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := repo.SelectBackend(t.Context(), backend.ID, "8.16.3", time.Now().UTC()); err != nil {
+		t.Fatalf("SelectBackend: %v", err)
+	}
+	migrator := &recordingLogAlertMigrator{err: errors.New("non-portable legacy rule")}
+	svc.SetLogAlertMigrator(migrator)
+	view, err := svc.SelectLoki(t.Context())
+	if err != nil {
+		t.Fatalf("SelectLoki: %v", err)
+	}
+	if migrator.calls != 0 || view.CurrentBackend != "loki" {
+		t.Fatalf("migration calls=%d view=%+v", migrator.calls, view)
+	}
+}
+
+func TestServiceElasticsearchSelectionMigratesAlertsBeforeChangingBackend(t *testing.T) {
+	repo := logsstore.NewRepo(openTestDB(t))
+	es := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges":
+			_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer es.Close()
+
+	svc := bizlogs.NewService(repo, mapSecrets{
+		"write": {"api_key": "write-key"},
+		"query": {"api_key": "query-key"},
+	}, &echoProbeSearcher{})
+	backend, err := svc.Save(t.Context(), bizlogs.SaveInput{
+		WriteEndpoints: []string{es.URL}, QueryEndpoint: es.URL,
+		Dataset: "ongrid.system", Namespace: "old", WriteCredentialRef: "write", QueryCredentialRef: "query",
+		TLSInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	migrator := &recordingLogAlertMigrator{err: errors.New("non-portable legacy rule")}
+	svc.SetLogAlertMigrator(migrator)
+	if _, err := svc.Select(t.Context(), backend.ID); err == nil {
+		t.Fatal("Select succeeded despite migration failure")
+	}
+	if _, err := repo.SelectedBackend(t.Context()); !errors.Is(err, errs.ErrNotFound) {
+		t.Fatalf("selected backend after migration failure: %v", err)
+	}
+
+	migrator.err = nil
+	migrator.count = 2
+	view, err := svc.Select(t.Context(), backend.ID)
+	if err != nil {
+		t.Fatalf("Select retry: %v", err)
+	}
+	if migrator.calls != 2 || view.CurrentBackend != "elasticsearch" || view.Status != logsmodel.BackendStatusSelected {
+		t.Fatalf("migration calls=%d view=%+v", migrator.calls, view)
 	}
 }
 

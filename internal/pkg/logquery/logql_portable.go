@@ -140,6 +140,23 @@ func compileLogQLSelector(selector string) ([]FieldFilter, error) {
 			if strings.HasPrefix(strings.TrimSpace(value), "(?i)") {
 				return nil, fmt.Errorf("logquery: case-insensitive selector regex for %q is only available when Loki is selected", match[1])
 			}
+			if isLogQLMatchAllRegex(value) {
+				if match[2] == "!~" {
+					return nil, fmt.Errorf("logquery: negative match-all selector for %q is only available when Loki is selected", match[1])
+				}
+				filter.Operator = FilterExists
+				filters = append(filters, filter)
+				continue
+			}
+			if prefix, ok := literalLogQLPrefix(value); ok {
+				if match[2] == "!~" {
+					return nil, fmt.Errorf("logquery: negative prefix selector for %q is only available when Loki is selected", match[1])
+				}
+				filter.Operator = FilterPrefix
+				filter.Values = []string{prefix}
+				filters = append(filters, filter)
+				continue
+			}
 			values, err := literalLogQLRegexValues(value)
 			if err != nil {
 				return nil, fmt.Errorf("logquery: selector %s for %q: %w", match[2], match[1], err)
@@ -154,6 +171,36 @@ func compileLogQLSelector(selector string) ([]FieldFilter, error) {
 		filters = append(filters, filter)
 	}
 	return filters, nil
+}
+
+func isLogQLMatchAllRegex(pattern string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if strings.HasPrefix(pattern, "^") && strings.HasSuffix(pattern, "$") && len(pattern) >= 2 {
+		pattern = strings.TrimSpace(pattern[1 : len(pattern)-1])
+	}
+	return pattern == ".+" || pattern == ".*"
+}
+
+// literalLogQLPrefix recognizes the bounded prefix shapes produced by the
+// legacy alert presets. It deliberately does not accept arbitrary regex: the
+// backend-neutral contract exposes a safe prefix operator rather than raw
+// Elasticsearch or LogQL expressions.
+func literalLogQLPrefix(pattern string) (string, bool) {
+	pattern = strings.TrimSpace(pattern)
+	if strings.HasPrefix(pattern, "^") && strings.HasSuffix(pattern, "$") && len(pattern) >= 2 {
+		pattern = strings.TrimSpace(pattern[1 : len(pattern)-1])
+	}
+	for _, suffix := range []string{"(:.*)?", "(:.+)?", ".*", ".+"} {
+		if !strings.HasSuffix(pattern, suffix) {
+			continue
+		}
+		prefix := strings.TrimSpace(strings.TrimSuffix(pattern, suffix))
+		if prefix == "" || strings.ContainsAny(prefix, `.\\[]{}()*+?^$|`) {
+			return "", false
+		}
+		return prefix, true
+	}
+	return "", false
 }
 
 func splitLogQLMatchers(selector string) ([]string, error) {

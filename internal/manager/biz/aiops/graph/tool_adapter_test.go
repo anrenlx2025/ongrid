@@ -598,7 +598,7 @@ func TestEinoToolAdapter_DraftConfigChangeAllowsLogRuleWithoutMetricCatalog(t *t
 	a := &einoToolAdapter{inner: inner, memo: newToolMemo()}
 	ctx := context.Background()
 
-	out, err := a.InvokableRun(ctx, `{"domain":"alert_rule","action":"create","rule":{"kind":"log_match","spec":{"line_filter":"error","window":"5m"}}}`)
+	out, err := a.InvokableRun(ctx, `{"domain":"alert_rule","action":"create","rule":{"kind":"log_search","spec":{"keywords":{"include":["error"],"mode":"any"},"window":"5m"}}}`)
 	if err != nil {
 		t.Fatalf("InvokableRun() error = %v", err)
 	}

@@ -55,6 +55,42 @@ func TestCompileLogQLSearchPreservesExactLineFilterSemantics(t *testing.T) {
 	}
 }
 
+func TestCompileLogQLSearchConvertsLegacySelectorPrefixes(t *testing.T) {
+	start := time.Date(2026, 8, 24, 1, 0, 0, 0, time.UTC)
+	req, err := CompileLogQLSearch(QueryRangeOptions{
+		Query: `{ongrid_source=~"journald:.+",namespace=~".+"} |~ "(?i)panic|oom|fatal"`,
+		Start: start, End: start.Add(time.Hour), Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("CompileLogQLSearch() error = %v", err)
+	}
+	wantFilters := []FieldFilter{
+		{Field: "source_id", Operator: FilterPrefix, Values: []string{"journald:"}},
+		{Field: "namespace", Operator: FilterExists},
+	}
+	if got, want := mustJSON(t, req.Filters), mustJSON(t, wantFilters); got != want {
+		t.Fatalf("filters = %s, want %s", got, want)
+	}
+	if got := strings.Join(req.Keywords.Include, ","); got != "panic,oom,fatal" {
+		t.Fatalf("include keywords = %q", got)
+	}
+	lokiQuery, err := compileLogQL(req)
+	if err != nil {
+		t.Fatalf("compileLogQL() error = %v", err)
+	}
+	if !strings.Contains(lokiQuery, `ongrid_source=~"journald:.*"`) || !strings.Contains(lokiQuery, `namespace=~".+"`) {
+		t.Fatalf("Loki prefix/exists query = %q", lokiQuery)
+	}
+	esQuery, err := buildElasticsearchQuery(req)
+	if err != nil {
+		t.Fatalf("buildElasticsearchQuery() error = %v", err)
+	}
+	esJSON := mustJSON(t, esQuery)
+	if !strings.Contains(esJSON, `"prefix":{"resource.attributes.ongrid_source":"journald:"}`) || !strings.Contains(esJSON, `"exists":{"field":"resource.attributes.namespace"}`) {
+		t.Fatalf("Elasticsearch prefix/exists query = %s", esJSON)
+	}
+}
+
 func TestCompileLogQLSearchKeepsPublicLimitWhileCappingOneESPage(t *testing.T) {
 	start := time.Date(2026, 8, 24, 1, 0, 0, 0, time.UTC)
 	req, err := CompileLogQLSearch(QueryRangeOptions{
@@ -77,7 +113,8 @@ func TestCompileLogQLSearchRejectsSyntaxThatCannotKeepItsMeaning(t *testing.T) {
 	}{
 		{name: "metric expression", query: `sum(count_over_time({device_id="42"}[5m]))`},
 		{name: "parser stage", query: `{device_id="42"} | json | level="error"`},
-		{name: "arbitrary regex", query: `{device_id=~"4.*"} |= "error"`},
+		{name: "arbitrary regex", query: `{device_id=~"4[0-9].*"} |= "error"`},
+		{name: "negative prefix", query: `{ongrid_source!~"journald:.*"} |= "error"`},
 		{name: "metric step", query: `{device_id="42"}`, step: time.Minute},
 		{name: "unknown label", query: `{job="api"} |= "error"`},
 	}

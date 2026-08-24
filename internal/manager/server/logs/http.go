@@ -99,6 +99,7 @@ func newHandler(q Querier, searcher logquery.Searcher, backend BackendService) *
 // authenticated (any role; logs are not org-scoped post-pivot).
 func (h *Handler) Register(r chi.Router) {
 	r.Post("/v1/logs/search", h.searchLogs)
+	r.Post("/v1/logs/cursor/close", h.closeSearchCursor)
 	r.Get("/v1/logs/fields", h.fields)
 	r.Post("/v1/logs/field-values", h.fieldValues)
 	r.Post("/v1/logs/histogram", h.histogram)
@@ -298,6 +299,10 @@ type contextRequest struct {
 	After     int            `json:"after,omitempty"`
 }
 
+type closeCursorRequest struct {
+	Cursor string `json:"cursor"`
+}
+
 // searchLogs godoc
 // @Summary Search logs with backend-neutral filters
 // @Router /api/v1/logs/search [post]
@@ -324,6 +329,29 @@ func (h *Handler) searchLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success", Data: out})
+}
+
+// closeSearchCursor godoc
+// @Summary Close an abandoned log search cursor
+// @Router /api/v1/logs/cursor/close [post]
+// @Success 200 {object} apiEnvelope
+func (h *Handler) closeSearchCursor(w http.ResponseWriter, r *http.Request) {
+	if h.search == nil {
+		writeAPIErr(w, http.StatusServiceUnavailable, "LOGS_BACKEND_DISABLED", "logs backend disabled")
+		return
+	}
+	var in closeCursorRequest
+	if err := decodeJSONBody(r, &in); err != nil || strings.TrimSpace(in.Cursor) == "" {
+		writeAPIErr(w, http.StatusBadRequest, "LOG_QUERY_INVALID", "cursor is required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if err := logquery.CloseCursor(ctx, h.search, in.Cursor); err != nil {
+		writeSearchError(ctx, w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, apiEnvelope{Code: http.StatusOK, Message: "success"})
 }
 
 func (h *Handler) acquireSearchSlot(ctx context.Context) bool {
@@ -491,11 +519,19 @@ func (h *Handler) contextLogs(w http.ResponseWriter, r *http.Request) {
 		writeSearchError(r.Context(), w, err)
 		return
 	}
+	if err := logquery.CloseCursor(ctx, h.search, before.NextCursor); err != nil {
+		writeSearchError(r.Context(), w, err)
+		return
+	}
 	after, err := h.search.Search(ctx, logquery.SearchRequest{
 		Start: in.Timestamp, End: in.Timestamp.Add(15 * time.Minute),
 		Scope: in.Scope, Limit: max(in.After, 1), Direction: logquery.SortForward,
 	})
 	if err != nil {
+		writeSearchError(r.Context(), w, err)
+		return
+	}
+	if err := logquery.CloseCursor(ctx, h.search, after.NextCursor); err != nil {
 		writeSearchError(r.Context(), w, err)
 		return
 	}

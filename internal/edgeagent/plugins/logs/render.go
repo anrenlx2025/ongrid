@@ -165,7 +165,6 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 		`set(resource.attributes["pod"], resource.attributes["k8s.pod.name"]) where resource.attributes["k8s.pod.name"] != nil`,
 		`set(resource.attributes["container"], resource.attributes["k8s.container.name"]) where resource.attributes["k8s.container.name"] != nil`,
 		`set(resource.attributes["node"], resource.attributes["k8s.node.name"]) where resource.attributes["k8s.node.name"] != nil`,
-		`set(resource.attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil`,
 		`set(resource.attributes["workload"], resource.attributes["k8s.deployment.name"]) where resource.attributes["k8s.deployment.name"] != nil`,
 		`set(resource.attributes["workload"], resource.attributes["k8s.statefulset.name"]) where resource.attributes["k8s.statefulset.name"] != nil`,
 		`set(resource.attributes["workload"], resource.attributes["k8s.daemonset.name"]) where resource.attributes["k8s.daemonset.name"] != nil`,

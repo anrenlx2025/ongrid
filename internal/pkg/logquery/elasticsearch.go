@@ -91,7 +91,6 @@ func (c *ElasticsearchClient) Search(ctx context.Context, req SearchRequest) (_ 
 	}
 	started := time.Now()
 	var cursor elasticsearchCursor
-	openedPIT := false
 	if req.Cursor != "" {
 		if err := decodeCursor(req.Cursor, &cursor); err != nil {
 			return nil, err
@@ -105,10 +104,12 @@ func (c *ElasticsearchClient) Search(ctx context.Context, req SearchRequest) (_ 
 			return nil, err
 		}
 		cursor = elasticsearchCursor{Backend: elasticsearchBackendName, PITID: pitID, Direction: req.Direction}
-		openedPIT = true
 	}
 	defer func() {
-		if retErr != nil && openedPIT {
+		// A failed continuation is abandoned by the HTTP/tool caller, so close
+		// its PIT as well as a PIT opened by this call. This keeps canceled or
+		// failed pagination from accumulating server-side search contexts.
+		if retErr != nil {
 			if err := c.closePIT(context.WithoutCancel(ctx), cursor.PITID); err != nil {
 				retErr = errors.Join(retErr, err)
 			}
@@ -159,7 +160,6 @@ func (c *ElasticsearchClient) Search(ctx context.Context, req SearchRequest) (_ 
 		if err := c.closePIT(ctx, cursor.PITID); err != nil {
 			return nil, err
 		}
-		openedPIT = false
 	}
 	took := response.Took
 	if took == 0 {
@@ -172,6 +172,19 @@ func (c *ElasticsearchClient) Search(ctx context.Context, req SearchRequest) (_ 
 		TookMS:     took,
 		Backends:   []string{elasticsearchBackendName},
 	}, nil
+}
+
+// CloseCursor releases the Elasticsearch PIT embedded in an opaque cursor.
+// Callers use it when pagination is intentionally abandoned.
+func (c *ElasticsearchClient) CloseCursor(ctx context.Context, encoded string) error {
+	var cursor elasticsearchCursor
+	if err := decodeCursor(encoded, &cursor); err != nil {
+		return err
+	}
+	if cursor.Backend != elasticsearchBackendName || cursor.PITID == "" {
+		return errInvalidCursor
+	}
+	return c.closePIT(ctx, cursor.PITID)
 }
 
 // Count uses Elasticsearch's count API with the same allowlisted query
@@ -496,6 +509,8 @@ func buildElasticsearchQueryWithStart(req SearchRequest, startOperator string) (
 				clause = map[string]any{"bool": map[string]any{"should": should, "minimum_should_match": 1}}
 			case FilterExists:
 				clause = map[string]any{"exists": map[string]any{"field": def.ElasticsearchPath}}
+			case FilterPrefix:
+				clause = map[string]any{"match_phrase_prefix": map[string]any{def.ElasticsearchPath: filter.Values[0]}}
 			}
 		} else {
 			switch filter.Operator {
@@ -507,6 +522,8 @@ func buildElasticsearchQueryWithStart(req SearchRequest, startOperator string) (
 				clause = map[string]any{"exists": map[string]any{"field": def.ElasticsearchPath}}
 			case FilterNotEqual:
 				clause = map[string]any{"terms": map[string]any{def.ElasticsearchPath: filter.Values}}
+			case FilterPrefix:
+				clause = map[string]any{"prefix": map[string]any{def.ElasticsearchPath: filter.Values[0]}}
 			}
 		}
 		if filter.Operator == FilterNotEqual {

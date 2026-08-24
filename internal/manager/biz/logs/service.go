@@ -79,6 +79,13 @@ type BackendChangeNotifier interface {
 	NotifyLogsBackendChanged(ctx context.Context) error
 }
 
+// LogAlertMigrator canonicalizes persisted Loki-only alert rules before
+// Elasticsearch is selected. The interface lives here so the logs bounded
+// context does not depend on alert implementation packages.
+type LogAlertMigrator interface {
+	MigrateLegacyLogRules(ctx context.Context) (int, error)
+}
+
 // GrafanaSyncer is an optional, best-effort observer of selected log backend
 // changes. Grafana failures never alter the selected backend.
 type GrafanaSyncer interface {
@@ -212,6 +219,7 @@ type Service struct {
 	operationMu sync.Mutex
 	mu          sync.RWMutex
 	notifier    BackendChangeNotifier
+	alerts      LogAlertMigrator
 	grafana     GrafanaSyncer
 	devices     HostDeviceResolver
 	inventory   ConnectionEdgeInventory
@@ -242,6 +250,12 @@ func (s *Service) SetBackendChangeNotifier(notifier BackendChangeNotifier) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.notifier = notifier
+}
+
+func (s *Service) SetLogAlertMigrator(migrator LogAlertMigrator) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.alerts = migrator
 }
 
 func (s *Service) SetGrafanaSyncer(syncer GrafanaSyncer) {
@@ -441,6 +455,9 @@ func (s *Service) Select(ctx context.Context, id uint64) (*BackendView, error) {
 		return nil, err
 	}
 	if backend.Status == model.BackendStatusSelected {
+		if err := s.migrateLegacyLogAlerts(ctx); err != nil {
+			return nil, err
+		}
 		return s.view(ctx, backend)
 	}
 	version, err := s.probeBackend(ctx, backend)
@@ -450,6 +467,9 @@ func (s *Service) Select(ctx context.Context, id uint64) (*BackendView, error) {
 	now := time.Now().UTC()
 	backend.DetectedVersion = version
 	backend.LastTestAt = &now
+	if err := s.migrateLegacyLogAlerts(ctx); err != nil {
+		return nil, err
+	}
 	// The Manager-side endpoint and privilege probe is the complete selection
 	// gate. Device convergence is deliberately checked by a separate action.
 	if err := s.selectBackend(ctx, backend); err != nil {
@@ -692,6 +712,23 @@ func (s *Service) SelectLoki(ctx context.Context) (*BackendView, error) {
 		return nil, err
 	}
 	return s.view(ctx, backend)
+}
+
+func (s *Service) migrateLegacyLogAlerts(ctx context.Context) error {
+	s.mu.RLock()
+	migrator := s.alerts
+	s.mu.RUnlock()
+	if migrator == nil {
+		return nil
+	}
+	count, err := migrator.MigrateLegacyLogRules(ctx)
+	if err != nil {
+		return fmt.Errorf("migrate legacy log alerts before Elasticsearch selection: %w", err)
+	}
+	if count > 0 {
+		s.log.InfoContext(ctx, "migrated legacy log alerts to backend-neutral search", slog.Int("count", count))
+	}
+	return nil
 }
 
 func (s *Service) SelectedRuntime(ctx context.Context) (*RuntimeConfig, error) {

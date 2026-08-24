@@ -613,6 +613,34 @@ func (r *Repo) UpdateRule(ctx context.Context, id uint64, in *model.Rule) error 
 	return nil
 }
 
+// MigrateLegacyLogRules atomically rewrites a prepared batch. The kind
+// predicate prevents a concurrent administrator edit from being overwritten.
+func (r *Repo) MigrateLegacyLogRules(ctx context.Context, migrations []biz.LegacyLogRuleMigration) error {
+	if len(migrations) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, migration := range migrations {
+			if migration.ID == 0 || migration.FromKind == "" || migration.ConditionsJSON == "" {
+				return errs.ErrInvalid
+			}
+			result := tx.Model(&model.Rule{}).
+				Where("id = ? AND kind = ?", migration.ID, migration.FromKind).
+				Updates(map[string]any{
+					"kind":            model.RuleKindLogSearch,
+					"conditions_json": migration.ConditionsJSON,
+				})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return fmt.Errorf("%w: alert rule %d changed during migration", errs.ErrConflict, migration.ID)
+			}
+		}
+		return nil
+	})
+}
+
 // DeleteRule hard-deletes a custom rule so its unique rule_key can be reused.
 // The biz layer blocks built-in rules before reaching this repo method.
 func (r *Repo) DeleteRule(ctx context.Context, id uint64) error {

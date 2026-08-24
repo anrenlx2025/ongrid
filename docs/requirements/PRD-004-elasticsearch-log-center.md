@@ -60,7 +60,8 @@
 ### 兼容功能
 
 - 只保留既有 `query_logql` AIOps 工具名和参数；它跟随当前选中的日志后端。Loki 支持完整 LogQL 并返回原生 `resultType/result`，Elasticsearch 支持流选择器与行过滤的安全子集并返回结构化 `records` 查询结果。
-- 新增结构化日志匹配告警；原始 LogQL 规则标记为 Loki-only，存在未迁移启用规则时阻止选择 ES。
+- 日志告警统一持久化为后端无关的 `log_search` 条件。选择 Elasticsearch 前，Manager 在事务中把旧 `log_match`/`log_volume` 规则转换为结构化关键词、字段筛选、窗口和绝对计数阈值，刷新规则缓存后再改变选中项；任一步失败都保持原后端不变。选择 Loki 不运行这项迁移，直接切换。
+- 迁移后的 `log_search` 按产品统一的全局聚合计数产生一条 incident；host scope 或超出安全 LogQL 子集的旧规则无法映射到这个契约，会返回明确冲突并阻止 ES 切换，不静默改写语义。新建与更新入口即使收到旧 kind 也立即规范化为 `log_search`，不再产生新的 Loki-only 规则。
 - Incident 日志关联按当前后端分别消费 Loki stream 或 Elasticsearch record，再归一化为关联分析条目。
 - ES 模式统一使用产品日志页，不依赖 Kibana，也不在默认设置页提供 Kibana 或自定义 CA 配置。
 
@@ -79,7 +80,7 @@
 - **兼容性**：第一期支持 Elasticsearch 8.16+；不声明 OpenSearch、ES 7、Cloud ID 或原始 DSL 支持。
 - **安全**：HTTPS 默认开启；凭证加密存储、最小权限、可轮换且不进入普通插件快照、参数和日志。
 - **可靠性**：配置原子写入并在重启前校验；失败保持上一份工作配置。
-- **性能**：默认查询窗口 1 小时、结果上限 1000；后端使用 PIT + `search_after`，禁止无界深分页。
+- **性能**：默认查询窗口 1 小时、结果上限 1000；后端使用 PIT + `search_after`，禁止无界深分页。翻页完成、页面刷新/卸载、工具达到公开结果上限或查询失败时必须主动关闭 PIT。
 - **可观测性**：暴露 receiver、exporter、队列、存储、generation、最后成功时间和错误类别。
 - **运维**：保存与选择分离；选择只依赖 Manager 侧验证，切换后独立检查设备连接，不做生产双写或自动回退。
 
@@ -87,7 +88,7 @@
 
 - 新增日志后端保存、测试、选择 Elasticsearch、选择 Loki API；选择 Elasticsearch 时完成 Manager 连接与权限检查并立即切换。
 - 新增当前日志后端的设备连接检查启动/查询 API；Elasticsearch 使用持久化 backend generation，Loki 使用一次性检查 generation，二者都创建逐 Edge 真实写入探针并返回在线、已验证、失败与离线汇总，不改变当前选中项。
-- 新增 `/api/v1/logs/search`、`/histogram`、`/fields`、`/context`。
+- 新增 `/api/v1/logs/search`、`/cursor/close`、`/histogram`、`/fields`、`/context`；cursor 对调用方保持 opaque，调用方放弃后续分页时通过 close API 释放后端快照资源。
 - 保留现有 `/api/v1/logs/query_range` 和 label API 作为兼容接口。
 - 新增 tunnel `write_plugin_secrets` RPC；普通插件快照只增加 backend generation 和非敏感目标信息。
 
@@ -124,7 +125,8 @@
 - [ ] ES 设为当前前 Manager 查询/写入端点及 API Key 权限测试成功；Edge 离线不阻断切换。
 - [ ] 设置页明确展示当前日志后端，并可独立检查所有日志采集 Edge 是否应用当前 generation、是否完成真实写探针；离线设备显示待上线确认。
 - [ ] Loki/ES 切换前后不产生同一查询内的跨后端归并。
-- [ ] 未迁移的启用 LogQL 告警会阻止选择 ES。
+- [ ] 旧 `log_match`/`log_volume` 告警在选择 Elasticsearch 前原子迁移为 `log_search` 并刷新 evaluator 缓存；不可映射到全局聚合契约的规则返回冲突且保持原后端；选择 Loki 仍为直接操作。
+- [ ] ES 分页在正常结束、刷新取消、客户端主动放弃和请求失败时均关闭 PIT，不依赖 keep-alive 超时回收。
 - [ ] ES 故障可在 5 分钟内将同一个 OTel 流水线切回内置 Loki。
 - [ ] AMD64/ARM64 配置校验、Go race 测试、前端测试、构建和深浅主题截图通过。
 
@@ -168,6 +170,8 @@ P0
 | 2026-08-21 | Codex | Loki 支持设备连接检查与动态进度反馈 | 当前后端统一执行真实写入验证，在线计数从 0 推进到全部完成 |
 | 2026-08-21 | Codex | Loki 应用与设备探针彻底解耦 | 应用直接切换当前读写后端；真实写入验证只由“检查设备连接”触发 |
 | 2026-08-21 | Codex | 日志后端状态收敛为选中/未选中 | 删除 rollout、rollback、shadow 双写及自动回退状态；连接检查保持独立 |
+| 2026-08-24 | Codex | 旧 Loki 日志告警在选择 ES 前迁移为结构化 `log_search` | 避免切换 ES 后旧 evaluator 查询 Loki 并产生误恢复，同时保持 Loki 直接切换且不引入中间状态 |
+| 2026-08-24 | Codex | 补齐日志游标主动关闭协议 | 避免频繁刷新或工具提前达到上限时遗留 Elasticsearch PIT |
 
 ## 上线后复盘
 

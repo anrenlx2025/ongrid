@@ -989,6 +989,7 @@ func main() {
 	if err := alertRules.Refresh(rootCtx); err != nil {
 		log.Warn("alert rules initial refresh", slog.Any("err", err))
 	}
+	alertUC.SetRuleCacheRefresher(alertRules)
 	alertResolver := managerbizalert.NewDBChannelResolver(alertRepo, cfg.Notification.DefaultChannels)
 	// Honour rule-level notify_channel_ids overrides — resolver looks
 	// the rule up by key and reads its NotifyChannelIDsJSON.
@@ -1100,6 +1101,7 @@ func main() {
 	}
 	logsBackendRepo := managerlogsdata.NewRepo(db)
 	logsBackendSvc := managerbizlogs.NewService(logsBackendRepo, secretUC, lokiLogClient, log.With(slog.String("comp", "logs-backend")))
+	logsBackendSvc.SetLogAlertMigrator(alertUC)
 	logsBackendSvc.SetHostDeviceResolver(edgeDeviceRepo)
 	logsBackendSvc.SetConnectionEdgeInventory(logsConnectionEdgeInventory{edges: edgeUC, configs: pluginConfigUC})
 	logsBackendSvc.SetGrafanaSyncer(grafanaSvc)

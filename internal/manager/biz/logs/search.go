@@ -27,6 +27,16 @@ func (s *Service) Search(ctx context.Context, req logquery.SearchRequest) (*logq
 	return searcher.Search(ctx, req)
 }
 
+// CloseCursor releases backend resources when a caller abandons pagination.
+// It is safe for the built-in Loki path, whose cursors are stateless.
+func (s *Service) CloseCursor(ctx context.Context, cursor string) error {
+	searcher, err := s.selectedSearcher(ctx)
+	if err != nil {
+		return err
+	}
+	return logquery.CloseCursor(ctx, searcher, cursor)
+}
+
 // Count uses only the selected backend. Retained data in an inactive backend
 // is intentionally outside the product query surface.
 func (s *Service) Count(ctx context.Context, req logquery.SearchRequest) (uint64, error) {

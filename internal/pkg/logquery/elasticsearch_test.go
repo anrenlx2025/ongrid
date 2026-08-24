@@ -89,6 +89,97 @@ func TestElasticsearchClient_SearchUsesPITAndOpaqueCursor(t *testing.T) {
 	}
 }
 
+func TestElasticsearchClient_ClosesPITWhenContinuationFails(t *testing.T) {
+	searchCalls := 0
+	closed := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/_pit"):
+			writeTestJSON(t, w, map[string]any{"id": "pit-failed-continuation"})
+		case r.Method == http.MethodPost && r.URL.Path == "/_search":
+			searchCalls++
+			if searchCalls > 1 {
+				http.Error(w, `{"error":"injected"}`, http.StatusInternalServerError)
+				return
+			}
+			writeTestJSON(t, w, map[string]any{
+				"pit_id": "pit-failed-continuation",
+				"hits": map[string]any{"hits": []any{
+					testElasticsearchHit("one", "2026-08-18T12:00:00Z", "first", []any{"2026-08-18T12:00:00Z", 1}),
+					testElasticsearchHit("two", "2026-08-18T11:59:59Z", "next", []any{"2026-08-18T11:59:59Z", 2}),
+				}},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/_pit":
+			closed++
+			writeTestJSON(t, w, map[string]any{"succeeded": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewElasticsearchClient(ElasticsearchConfig{
+		Endpoint: server.URL, APIKey: "test-key", AllowInsecureHTTP: true,
+	}, server.Client(), nil)
+	if err != nil {
+		t.Fatalf("NewElasticsearchClient() error = %v", err)
+	}
+	req := validSearchRequest()
+	req.Limit = 1
+	first, err := client.Search(t.Context(), req)
+	if err != nil || first.NextCursor == "" {
+		t.Fatalf("first Search() = %#v, %v", first, err)
+	}
+	req.Cursor = first.NextCursor
+	if _, err := client.Search(t.Context(), req); err == nil {
+		t.Fatal("continuation Search() unexpectedly succeeded")
+	}
+	if closed != 1 {
+		t.Fatalf("PIT close calls = %d, want 1", closed)
+	}
+}
+
+func TestElasticsearchClient_CloseCursorReleasesAbandonedPIT(t *testing.T) {
+	closed := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/_pit"):
+			writeTestJSON(t, w, map[string]any{"id": "pit-abandoned"})
+		case r.Method == http.MethodPost && r.URL.Path == "/_search":
+			writeTestJSON(t, w, map[string]any{
+				"pit_id": "pit-abandoned",
+				"hits": map[string]any{"hits": []any{
+					testElasticsearchHit("one", "2026-08-18T12:00:00Z", "first", []any{"2026-08-18T12:00:00Z", 1}),
+					testElasticsearchHit("two", "2026-08-18T11:59:59Z", "next", []any{"2026-08-18T11:59:59Z", 2}),
+				}},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/_pit":
+			closed++
+			writeTestJSON(t, w, map[string]any{"succeeded": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewElasticsearchClient(ElasticsearchConfig{
+		Endpoint: server.URL, APIKey: "test-key", AllowInsecureHTTP: true,
+	}, server.Client(), nil)
+	if err != nil {
+		t.Fatalf("NewElasticsearchClient() error = %v", err)
+	}
+	req := validSearchRequest()
+	req.Limit = 1
+	result, err := client.Search(t.Context(), req)
+	if err != nil || result.NextCursor == "" {
+		t.Fatalf("Search() = %#v, %v", result, err)
+	}
+	if err := client.CloseCursor(t.Context(), result.NextCursor); err != nil {
+		t.Fatalf("CloseCursor() error = %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("PIT close calls = %d, want 1", closed)
+	}
+}
+
 func TestElasticsearchClient_SearchAcceptsValidPageLargerThanControlResponseLimit(t *testing.T) {
 	const recordCount = 70
 	message := strings.Repeat("x", 240<<10)

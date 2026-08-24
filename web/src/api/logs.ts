@@ -26,7 +26,7 @@ export type LogScope = {
 
 export type LogFieldFilter = {
   field: string;
-  operator: 'eq' | 'neq' | 'in' | 'exists';
+  operator: 'eq' | 'neq' | 'in' | 'exists' | 'prefix';
   values?: string[];
 };
 
@@ -81,6 +81,10 @@ export type LogHistogramBucket = {
 
 export function searchLogs(input: LogSearchRequest, signal?: AbortSignal) {
   return request<APIEnvelope<LogSearchResult>>('POST', '/logs/search', input, { signal }).then((r) => r.data);
+}
+
+export function closeLogCursor(cursor: string) {
+  return request<APIEnvelope<never>>('POST', '/logs/cursor/close', { cursor });
 }
 
 export function listLogFields(params?: { start?: string; end?: string }, signal?: AbortSignal) {

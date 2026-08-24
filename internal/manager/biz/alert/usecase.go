@@ -70,6 +70,12 @@ type WorkflowDispatcher interface {
 	OnAlertFired(incidentID uint64, rule, severity string, edgeID, deviceID uint64, labels map[string]string, firedAt time.Time)
 }
 
+// RuleCacheRefresher makes persisted rule migrations visible to the running
+// evaluator before a log backend switch is committed.
+type RuleCacheRefresher interface {
+	Refresh(ctx context.Context) error
+}
+
 type Usecase struct {
 	repo  Repo
 	clock Clock
@@ -80,6 +86,7 @@ type Usecase struct {
 	// workflowDispatcher is optional; nil-safe. main.go injects the flow
 	// dispatcher so a fired alert can auto-start matching workflows.
 	workflowDispatcher WorkflowDispatcher
+	ruleCacheRefresher RuleCacheRefresher
 }
 
 const maxSilenceNameRunes = 256
@@ -102,6 +109,12 @@ func (u *Usecase) SetInvestigator(inv Investigator) {
 // Safe to leave unset.
 func (u *Usecase) SetWorkflowDispatcher(d WorkflowDispatcher) {
 	u.workflowDispatcher = d
+}
+
+// SetRuleCacheRefresher wires the runtime alert snapshot refresh used after a
+// storage migration. Safe to leave unset in tests and lightweight processes.
+func (u *Usecase) SetRuleCacheRefresher(refresher RuleCacheRefresher) {
+	u.ruleCacheRefresher = refresher
 }
 
 // createEvent persists an alert event row and increments the
@@ -764,6 +777,23 @@ func buildRuleRow(in RuleInput, requireKey bool) (*model.Rule, error) {
 	storageKind := kind
 	if kind == model.RuleKindMetricThreshold {
 		storageKind = model.RuleKindMetricRaw
+	}
+	// log_match and log_volume are accepted only as legacy input shapes. New
+	// writes are canonicalized immediately so no newly-created rule can bind
+	// itself to whichever log backend happens to be selected at creation time.
+	// A host-scoped or non-portable LogQL rule is rejected rather than silently
+	// changing its incident grouping or query meaning.
+	if kind == model.RuleKindLogMatch || kind == model.RuleKindLogVolume {
+		condJSON, err = migrateLegacyLogRule(&model.Rule{
+			RuleKey:        key,
+			Kind:           kind,
+			ScopeType:      scope,
+			ConditionsJSON: condJSON,
+		}, kind)
+		if err != nil {
+			return nil, fmt.Errorf("canonicalize %s rule: %w", kind, err)
+		}
+		storageKind = model.RuleKindLogSearch
 	}
 	// 发送策略 (send-policy / dampening) validation: both zero = disabled
 	// (default); both > 0 = enabled; mixed = reject. Caps mirror the UI

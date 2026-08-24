@@ -413,6 +413,8 @@ func compileLogQL(req SearchRequest) (string, error) {
 				}
 			case FilterExists:
 				lineFilters = append(lineFilters, `|~ ".+"`)
+			case FilterPrefix:
+				lineFilters = append(lineFilters, `|~ "(?i)^`+escapeLogQLString(regexp.QuoteMeta(filter.Values[0]))+`"`)
 			}
 			continue
 		}
@@ -436,6 +438,13 @@ func compileLogQL(req SearchRequest) (string, error) {
 			}
 		case FilterExists:
 			matcher := def.LokiName + `=~".+"`
+			if def.LokiIndexed {
+				matchers = append(matchers, matcher)
+			} else {
+				lineFilters = append(lineFilters, "| "+matcher)
+			}
+		case FilterPrefix:
+			matcher := def.LokiName + `=~"` + escapeLogQLString(regexp.QuoteMeta(filter.Values[0])) + `.*"`
 			if def.LokiIndexed {
 				matchers = append(matchers, matcher)
 			} else {

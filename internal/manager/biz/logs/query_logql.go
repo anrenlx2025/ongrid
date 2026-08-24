@@ -48,8 +48,14 @@ func (s *Service) QueryLogQL(ctx context.Context, opts logquery.QueryRangeOption
 	return combined, nil
 }
 
-func searchLogQLPages(ctx context.Context, searcher logquery.Searcher, req logquery.SearchRequest, desired int) (*logquery.SearchResult, error) {
+func searchLogQLPages(ctx context.Context, searcher logquery.Searcher, req logquery.SearchRequest, desired int) (_ *logquery.SearchResult, retErr error) {
 	started := time.Now()
+	openCursor := req.Cursor
+	defer func() {
+		if err := logquery.CloseCursor(context.WithoutCancel(ctx), searcher, openCursor); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close Elasticsearch search cursor: %w", err))
+		}
+	}()
 	combined := &logquery.SearchResult{
 		Records:  make([]logquery.Record, 0, desired),
 		Backends: []string{},
@@ -63,6 +69,7 @@ func searchLogQLPages(ctx context.Context, searcher logquery.Searcher, req logqu
 		if page == nil {
 			return nil, errors.New("logquery: Elasticsearch returned an empty search page")
 		}
+		openCursor = page.NextCursor
 		if len(page.Records) > req.Limit {
 			return nil, errors.New("logquery: Elasticsearch returned more records than requested")
 		}
@@ -81,7 +88,6 @@ func searchLogQLPages(ctx context.Context, searcher logquery.Searcher, req logqu
 		}
 		if len(combined.Records) >= desired {
 			combined.HasMore = true
-			combined.NextCursor = page.NextCursor
 			break
 		}
 		req.Cursor = page.NextCursor

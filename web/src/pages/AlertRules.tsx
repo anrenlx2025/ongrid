@@ -29,6 +29,7 @@ import {
 import { Modal } from '@/components/Modal';
 import { cn } from '@/lib/cn';
 import {
+  CREATABLE_RULE_KINDS,
   RULE_KINDS,
   SIGNAL_SOURCES,
   TRIGGER_MODES,
@@ -1852,7 +1853,7 @@ function KindPicker({
   const { tr } = useI18n();
   const meta = findKindMeta(form.kind);
   const currentSource: SignalSource = meta?.source ?? 'metric';
-  const triggersForSource = RULE_KINDS.filter((k) => k.source === currentSource);
+  const triggersForSource = CREATABLE_RULE_KINDS.filter((k) => k.source === currentSource);
 
   return (
     <div className="rounded-md border border-zinc-800 bg-zinc-950/40 p-3 space-y-3">
@@ -1868,7 +1869,7 @@ function KindPicker({
                 disabled={disabled}
                 onClick={() => {
                   // Switching source resets to the first kind in that source.
-                  const next = RULE_KINDS.find((k) => k.source === s.code);
+                  const next = CREATABLE_RULE_KINDS.find((k) => k.source === s.code);
                   if (next) onPick(next.kind);
                 }}
                 className={cn(

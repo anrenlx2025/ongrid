@@ -196,7 +196,7 @@ func draftConfigChangeNeedsMetricCatalog(argumentsInJSON string) bool {
 	case "metric_threshold", "metric_raw", "metric_anomaly", "metric_forecast", "metric_burn_rate",
 		"trace_latency", "trace_error_rate":
 		return true
-	case "log_match", "log_volume":
+	case "log_search", "log_match", "log_volume":
 		return false
 	case "":
 		return len(in.Rule.Spec) > 0

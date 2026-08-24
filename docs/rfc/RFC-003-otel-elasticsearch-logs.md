@@ -52,6 +52,7 @@
 - Loki adapter 编译产品查询为 LogQL；ES adapter 使用 PIT/search_after 和受限聚合。
 - 浏览器与模型均不能提交原始 Elasticsearch DSL。
 - 稳定工具 `query_logql` 在 Loki 上执行原生 LogQL；在 ES 上仅编译 stream selector 与 line filter 的安全子集，结果保持各自后端类型。
+- ES 分页 cursor 封装 PIT id；自然耗尽、续页失败、Web 刷新/卸载和 AIOps 提前达到公开上限时主动关闭 PIT。
 
 ### 6. 字段边界
 
@@ -65,6 +66,13 @@
 - 当前制品只使用 OTel logs pipeline，不保留 Promtail 备用运行路径。
 - OTel 复用现有 checkpoint 语义避免进程重启后全量重读。
 - 需要紧急回退时回到上一 Ongrid 发布版本，而不是在当前版本维护双采集兼容层。
+
+### 8. 日志告警迁移
+
+- `log_search` 是唯一跨后端日志告警形态；新建接口与 UI 不再产生旧 `log_match`/`log_volume`。
+- 选择 Elasticsearch 时在写选中项前扫描旧规则，把可移植 LogQL selector/line filter 编译为同一结构化查询契约，并在单事务内更新全部候选；选择 Loki 仍直接切换。
+- 事务提交后必须刷新 evaluator 缓存，再切换当前后端，避免旧 Loki evaluator 在 ES 已选中后把无结果解释成恢复。
+- host scope 或安全子集外的自定义 LogQL 无法保证相同 incident 语义，选择请求因此失败并保留原后端；系统不自动禁用规则，也不伪造兼容结果。
 
 ## 不采用的方案
 
@@ -106,4 +114,6 @@
 - 任一后端被选中后，Edge 配置只包含该后端 exporter。
 - Logs 页面搜索、分页、字段值和直方图只访问当前后端。
 - `query_logql` 在 Loki 上支持原生 LogQL，在 ES 上正确执行受限日志查询。
+- 旧日志告警在选择 Elasticsearch 前迁移为全局聚合的 `log_search`；无法映射 host 分组或安全查询子集时切换失败且当前后端不变。
+- ES PIT 在分页完成、失败或调用方放弃时被主动释放。
 - Go race tests、前端 test/typecheck/build 和真实 Edge→后端验收通过。

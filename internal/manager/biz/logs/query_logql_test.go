@@ -40,6 +40,7 @@ type queryLogQLPagedSearcher struct {
 	logquery.Searcher
 	requests []logquery.SearchRequest
 	pages    []*logquery.SearchResult
+	closed   []string
 }
 
 func (s *queryLogQLPagedSearcher) Search(_ context.Context, req logquery.SearchRequest) (*logquery.SearchResult, error) {
@@ -47,6 +48,11 @@ func (s *queryLogQLPagedSearcher) Search(_ context.Context, req logquery.SearchR
 	page := s.pages[0]
 	s.pages = s.pages[1:]
 	return page, nil
+}
+
+func (s *queryLogQLPagedSearcher) CloseCursor(_ context.Context, cursor string) error {
+	s.closed = append(s.closed, cursor)
+	return nil
 }
 
 func (l *queryLogQLLoki) QueryRange(_ context.Context, opts logquery.QueryRangeOptions) (*logquery.QueryRangeResult, error) {
@@ -203,6 +209,22 @@ func TestSearchLogQLPagesPreservesQueryLogQLPublicLimit(t *testing.T) {
 	}
 	if searcher.requests[1].Limit != 500 || searcher.requests[1].Cursor != "next-page" {
 		t.Fatalf("second request = %#v", searcher.requests[1])
+	}
+}
+
+func TestSearchLogQLPagesClosesCursorWhenPublicLimitStopsPagination(t *testing.T) {
+	searcher := &queryLogQLPagedSearcher{pages: []*logquery.SearchResult{{
+		Records: make([]logquery.Record, 10), HasMore: true, NextCursor: "abandoned-pit",
+	}}}
+	result, err := searchLogQLPages(t.Context(), searcher, logquery.SearchRequest{}, 10)
+	if err != nil {
+		t.Fatalf("searchLogQLPages() error = %v", err)
+	}
+	if !result.HasMore || len(result.Records) != 10 {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(searcher.closed) != 1 || searcher.closed[0] != "abandoned-pit" {
+		t.Fatalf("closed cursors = %#v", searcher.closed)
 	}
 }
 

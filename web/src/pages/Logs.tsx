@@ -34,6 +34,7 @@ import {
   YAxis,
 } from 'recharts';
 import {
+  closeLogCursor,
   getLogHistogram,
   listLogFieldValues,
   listLogFields,
@@ -322,6 +323,7 @@ export default function LogsPage() {
   const [visibleFields, setVisibleFields] = useState<DisplayField[]>([]);
   const requestSeq = useRef(0);
   const paginationGeneration = useRef(0);
+  const nextCursorRef = useRef('');
   const pageRequestRef = useRef<LogSearchRequest | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
   const pageAbortRef = useRef<AbortController | null>(null);
@@ -418,6 +420,24 @@ export default function LogsPage() {
     };
   }, [buildScope, committedExclude, committedMode, committedQuery, committedScope, resolveWindow]);
 
+  const replaceNextCursor = useCallback((cursor: string) => {
+    nextCursorRef.current = cursor;
+    setNextCursor(cursor);
+  }, []);
+
+  const closeCursorQuietly = useCallback((cursor: string) => {
+    if (!cursor) return;
+    void closeLogCursor(cursor).catch((err) => {
+      console.warn('failed to close log search cursor', err);
+    });
+  }, []);
+
+  const abandonPagination = useCallback(() => {
+    const cursor = nextCursorRef.current;
+    replaceNextCursor('');
+    closeCursorQuietly(cursor);
+  }, [closeCursorQuietly, replaceNextCursor]);
+
   const runSearch = useCallback(async (quiet = false) => {
     const input = buildRequest();
     const timeWindow = resolveWindow();
@@ -431,7 +451,7 @@ export default function LogsPage() {
     pageAbortRef.current?.abort();
     pageAbortRef.current = null;
     pageRequestRef.current = null;
-    setNextCursor('');
+    abandonPagination();
     setLoadingMore(false);
     const controller = new AbortController();
     searchAbortRef.current = controller;
@@ -442,11 +462,14 @@ export default function LogsPage() {
         searchLogs(input, controller.signal),
         getLogHistogram({ ...input, limit: 1, cursor: undefined }, histogramInterval(timeWindow.duration), controller.signal),
       ]);
-      if (seq !== requestSeq.current) return;
+      if (seq !== requestSeq.current) {
+        closeCursorQuietly(result.next_cursor ?? '');
+        return;
+      }
       pageRequestRef.current = input;
       setHasCompletedSearch(true);
       setRecords(result.records ?? []);
-      setNextCursor(result.next_cursor ?? '');
+      replaceNextCursor(result.next_cursor ?? '');
       setBackends(result.backends ?? []);
       setTookMS(result.took_ms ?? 0);
       setHistogram(buckets ?? []);
@@ -459,13 +482,13 @@ export default function LogsPage() {
       if (!quiet) {
         setRecords([]);
         setHistogram([]);
-        setNextCursor('');
+        replaceNextCursor('');
       }
     } finally {
       if (searchAbortRef.current === controller) searchAbortRef.current = null;
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [buildRequest, resolveWindow, tr]);
+  }, [abandonPagination, buildRequest, closeCursorQuietly, replaceNextCursor, resolveWindow, tr]);
 
   const loadMore = useCallback(async () => {
     if (!nextCursor || loadingMore) return;
@@ -480,21 +503,30 @@ export default function LogsPage() {
     setError(null);
     try {
       const result = await searchLogs(input, controller.signal);
-      if (generation !== paginationGeneration.current) return;
+      if (generation !== paginationGeneration.current) {
+        closeCursorQuietly(result.next_cursor ?? '');
+        return;
+      }
       setRecords((current) => {
         const seen = new Set(current.map(recordKey));
         return current.concat((result.records ?? []).filter((record) => !seen.has(recordKey(record)))).slice(0, MAX_EXPORT_ROWS);
       });
-      setNextCursor(result.next_cursor ?? '');
+      replaceNextCursor(result.next_cursor ?? '');
       setBackends((current) => Array.from(new Set(current.concat(result.backends ?? []))));
       setTookMS((current) => current + (result.took_ms ?? 0));
     } catch (err) {
-      if ((err as Error).name !== 'AbortError' && generation === paginationGeneration.current) setError(errorMessage(err));
+      if ((err as Error).name !== 'AbortError' && generation === paginationGeneration.current) {
+        // A failed continuation is not reusable: the Manager closes its ES
+        // PIT on error. Clear/close the client cursor so "load more" cannot
+        // retry against an expired snapshot.
+        abandonPagination();
+        setError(errorMessage(err));
+      }
     } finally {
       if (pageAbortRef.current === controller) pageAbortRef.current = null;
       if (generation === paginationGeneration.current) setLoadingMore(false);
     }
-  }, [loadingMore, nextCursor]);
+  }, [abandonPagination, closeCursorQuietly, loadingMore, nextCursor, replaceNextCursor]);
 
   const submit = (event?: React.FormEvent) => {
     event?.preventDefault();
@@ -518,7 +550,8 @@ export default function LogsPage() {
     searchAbortRef.current?.abort();
     pageAbortRef.current?.abort();
     facetAbortRef.current?.abort();
-  }, []);
+    abandonPagination();
+  }, [abandonPagination]);
 
   useEffect(() => {
     if (!live) return;

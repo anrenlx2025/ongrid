@@ -198,6 +198,10 @@ func TestRenderHostAddsManagerClusterAndNormalizesLevel(t *testing.T) {
 		if statement == `set(resource.attributes["level"], log.severity_text)` {
 			t.Fatal("per-record level must not be written into shared resource attributes")
 		}
+		text, ok := statement.(string)
+		if ok && strings.Contains(text, `resource.attributes["service_name"]`) {
+			t.Fatal("service.name must not be duplicated as service_name")
+		}
 	}
 }
 

@@ -264,6 +264,11 @@ function localizedKindMeta(d: typeof RULE_KIND_DEFS[number]): RuleKindMeta {
 }
 
 export const RULE_KINDS: RuleKindMeta[] = RULE_KIND_DEFS.map(localizedKindMeta);
+// Legacy Loki-only kinds stay in RULE_KINDS so existing rows remain readable,
+// but every creation surface offers only canonical backend-neutral kinds.
+export const CREATABLE_RULE_KINDS: RuleKindMeta[] = RULE_KINDS.filter(
+  (item) => item.kind !== 'log_match' && item.kind !== 'log_volume',
+);
 
 const SCOPE_ZH = { host: '按主机', global: '全局', monitoring_pipeline: '平台自身' } as const;
 const SCOPE_EN = { host: 'Per host', global: 'Global', monitoring_pipeline: 'Platform itself' } as const;
@@ -287,7 +292,7 @@ export const SCOPE_HINT = new Proxy({} as Record<'host' | 'global' | 'monitoring
 
 const SIGNAL_SOURCES_DEF: Array<{ code: SignalSource; zh: string; en: string }> = [
   { code: 'metric', zh: '指标 (Prometheus)', en: 'Metric (Prometheus)' },
-  { code: 'log',    zh: '日志 (Loki)',       en: 'Log (Loki)' },
+  { code: 'log',    zh: '日志',              en: 'Log' },
   { code: 'trace',  zh: '链路 (Tempo)',      en: 'Trace (Tempo)' },
 ];
 export const SIGNAL_SOURCES: { code: SignalSource; label: string }[] = SIGNAL_SOURCES_DEF.map((s) => {

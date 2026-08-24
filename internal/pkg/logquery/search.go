@@ -42,6 +42,7 @@ const (
 	FilterNotEqual FilterOperator = "neq"
 	FilterIn       FilterOperator = "in"
 	FilterExists   FilterOperator = "exists"
+	FilterPrefix   FilterOperator = "prefix"
 )
 
 // Scope contains product-level dimensions. Adapters map these stable names to
@@ -142,6 +143,27 @@ type Searcher interface {
 	Histogram(ctx context.Context, req SearchRequest, interval time.Duration) ([]HistogramBucket, error)
 }
 
+// CursorCloser releases backend resources associated with an opaque search
+// cursor. Loki cursors are stateless and therefore do not implement it;
+// Elasticsearch cursors own a point-in-time search context and must be closed
+// when a caller abandons pagination.
+type CursorCloser interface {
+	CloseCursor(ctx context.Context, cursor string) error
+}
+
+// CloseCursor releases an opaque cursor when its backend owns server-side
+// state. Stateless searchers intentionally make this a no-op.
+func CloseCursor(ctx context.Context, searcher Searcher, cursor string) error {
+	if cursor == "" || searcher == nil {
+		return nil
+	}
+	closer, ok := searcher.(CursorCloser)
+	if !ok {
+		return nil
+	}
+	return closer.CloseCursor(ctx, cursor)
+}
+
 // FieldDefinition is the sole allowlist for user-addressable log fields.
 // LokiName may identify an indexed label or structured metadata field;
 // ElasticsearchPath always stays within the product OTel document schema.
@@ -206,9 +228,9 @@ func (r *SearchRequest) NormalizeAndValidate() error {
 			return fmt.Errorf("logquery: filter field %q is not allowed", f.Field)
 		}
 		switch f.Operator {
-		case FilterEqual:
+		case FilterEqual, FilterPrefix:
 			if len(f.Values) != 1 {
-				return fmt.Errorf("logquery: equal filter %q requires exactly one value", f.Field)
+				return fmt.Errorf("logquery: %s filter %q requires exactly one value", f.Operator, f.Field)
 			}
 		case FilterNotEqual, FilterIn:
 			if len(f.Values) == 0 {

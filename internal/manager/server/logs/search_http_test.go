@@ -33,6 +33,39 @@ func (idleStructuredSearcher) Histogram(context.Context, logquery.SearchRequest,
 	return nil, nil
 }
 
+type cursorRecordingSearcher struct {
+	idleStructuredSearcher
+	closed []string
+}
+
+func (s *cursorRecordingSearcher) CloseCursor(_ context.Context, cursor string) error {
+	s.closed = append(s.closed, cursor)
+	return nil
+}
+
+func TestCloseSearchCursorReleasesBackendState(t *testing.T) {
+	searcher := &cursorRecordingSearcher{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs/cursor/close", strings.NewReader(`{"cursor":"opaque-pit"}`))
+	rec := httptest.NewRecorder()
+	backendTestRouter(NewHandlerWithSearcher(nil, searcher)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(searcher.closed) != 1 || searcher.closed[0] != "opaque-pit" {
+		t.Fatalf("closed cursors = %#v", searcher.closed)
+	}
+}
+
+func TestCloseSearchCursorRejectsEmptyCursor(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs/cursor/close", strings.NewReader(`{"cursor":""}`))
+	rec := httptest.NewRecorder()
+	backendTestRouter(NewHandlerWithSearcher(nil, &cursorRecordingSearcher{})).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestExpensiveStructuredLogEndpointsShareConcurrencyLimit(t *testing.T) {
 	handler := NewHandlerWithSearcher(nil, idleStructuredSearcher{})
 	handler.searchWait = 5 * time.Millisecond
