@@ -402,6 +402,62 @@ func TestElasticsearchClient_CountUsesFixedIndexAndStructuredQuery(t *testing.T)
 	}
 }
 
+func TestElasticsearchClient_CountGroupedPagesCompositeAggregation(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/_search") {
+			http.NotFound(w, r)
+			return
+		}
+		calls++
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		aggs := body["aggs"].(map[string]any)
+		groups := aggs["groups"].(map[string]any)
+		composite := groups["composite"].(map[string]any)
+		sources := composite["sources"].([]any)
+		encodedSources, _ := json.Marshal(sources)
+		for _, want := range []string{"resource.attributes.device_id", "resource.attributes.ongrid_source", "missing_bucket"} {
+			if !strings.Contains(string(encodedSources), want) {
+				t.Fatalf("sources = %s, missing %q", encodedSources, want)
+			}
+		}
+		if calls == 1 {
+			if _, ok := composite["after"]; ok {
+				t.Fatalf("first composite unexpectedly has after: %#v", composite)
+			}
+			writeTestJSON(t, w, map[string]any{"aggregations": map[string]any{"groups": map[string]any{
+				"after_key": map[string]any{"device_id": "42", "source_id": "journald"},
+				"buckets":   []any{map[string]any{"key": map[string]any{"device_id": "42", "source_id": "journald"}, "doc_count": 6}},
+			}}})
+			return
+		}
+		after, ok := composite["after"].(map[string]any)
+		if !ok || after["device_id"] != "42" || after["source_id"] != "journald" {
+			t.Fatalf("second composite after = %#v", composite["after"])
+		}
+		writeTestJSON(t, w, map[string]any{"aggregations": map[string]any{"groups": map[string]any{
+			"buckets": []any{map[string]any{"key": map[string]any{"device_id": "43", "source_id": "kubernetes:pod"}, "doc_count": 2}},
+		}}})
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewElasticsearchClient(ElasticsearchConfig{
+		Endpoint: server.URL, APIKey: "test-key", AllowInsecureHTTP: true,
+	}, server.Client(), nil)
+	if err != nil {
+		t.Fatalf("NewElasticsearchClient() error = %v", err)
+	}
+	groups, err := client.CountGrouped(t.Context(), validSearchRequest(), []string{"device_id", "source_id"})
+	if err != nil {
+		t.Fatalf("CountGrouped() error = %v", err)
+	}
+	if calls != 2 || len(groups) != 2 || groups[0].Count != 6 || groups[1].Labels["device_id"] != "43" {
+		t.Fatalf("calls=%d groups=%#v", calls, groups)
+	}
+}
+
 func TestNewElasticsearchClient_RejectsUnsafeEndpointAndIndexPattern(t *testing.T) {
 	cases := []ElasticsearchConfig{
 		{Endpoint: "http://es.example", APIKey: "key"},

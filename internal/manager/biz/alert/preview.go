@@ -166,6 +166,39 @@ func previewLogSearch(ctx context.Context, row *model.Rule, start, end time.Time
 	req.Start, req.End = start, end
 	req.Limit = 1
 	req.Direction = logquery.SortBackward
+	if len(rule.GroupBy) > 0 {
+		windowStart := end.Add(-rule.Window)
+		if windowStart.Before(start) {
+			windowStart = start
+		}
+		req.Start = windowStart
+		groups, err := logquery.CountGrouped(ctx, deps.Search, req, rule.GroupBy)
+		if err != nil {
+			return nil, fmt.Errorf("preview grouped structured log count: %w", err)
+		}
+		threshold := rule.Threshold
+		out := &PreviewResult{Threshold: &threshold}
+		for _, group := range groups {
+			value := float64(group.Count)
+			if !compareFloat(value, rule.Operator, rule.Threshold) {
+				continue
+			}
+			out.FireCount++
+			summary := fmt.Sprintf("%s: log count %d %s %g in %s (labels=%s)",
+				rule.RuleKey, group.Count, rule.Operator, rule.Threshold, rule.WindowText, labelSetKey(group.Labels))
+			out.Samples = append(out.Samples, PreviewSample{
+				Timestamp: end, Labels: group.Labels, Value: value, Summary: summary,
+			})
+		}
+		if out.FireCount > 0 {
+			first, last := end, end
+			out.FirstFireAt, out.LastFireAt = &first, &last
+		}
+		if len(out.Samples) > 5 {
+			out.Samples = append([]PreviewSample(nil), out.Samples[:5]...)
+		}
+		return out, nil
+	}
 	buckets, err := deps.Search.Histogram(ctx, req, rule.Window)
 	if err != nil {
 		return nil, fmt.Errorf("preview structured log histogram: %w", err)

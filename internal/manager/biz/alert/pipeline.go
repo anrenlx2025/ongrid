@@ -484,6 +484,7 @@ func deviceDisplay(identity DeviceIdentity) string {
 var nonIdentityLabels = map[string]struct{}{
 	"__name__":      {},
 	"ongrid_source": {},
+	"source_id":     {},
 }
 
 func labelSetKey(m map[string]string) string {

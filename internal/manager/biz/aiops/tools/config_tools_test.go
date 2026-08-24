@@ -110,7 +110,7 @@ func TestConfigDraftToolInfoDescribesDraftValidationContract(t *testing.T) {
 		}
 	}
 	params := string(info.Parameters)
-	for _, want := range []string{"metric_raw accepts expr/promql/query", "source_explicit=true", "log_search is always global"} {
+	for _, want := range []string{"metric_raw accepts expr/promql/query", "source_explicit=true", "host log_search grouping is added automatically"} {
 		if !strings.Contains(params, want) {
 			t.Fatalf("Parameters should describe alert draft contract, missing %q: %s", want, params)
 		}

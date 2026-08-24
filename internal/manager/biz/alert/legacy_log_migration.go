@@ -13,6 +13,14 @@ import (
 	"github.com/ongridio/ongrid/internal/pkg/logquery"
 )
 
+// legacyLogStreamGroupBy is the product representation of the Loki stream
+// identity configured by deploy/install/loki-config.yaml. Persisting these
+// dimensions keeps legacy per-stream thresholds and dedupe keys stable while
+// allowing Elasticsearch to execute the same grouping with OTel fields.
+var legacyLogStreamGroupBy = []string{
+	"device_id", "cluster_id", "source_id", "namespace", "service_name",
+}
+
 // MigrateLegacyLogRules rewrites every persisted Loki-only log rule to the
 // canonical backend-neutral log_search shape. The conversion happens before
 // Elasticsearch selection: if the subsequent selection fails, the migrated
@@ -59,9 +67,6 @@ func (u *Usecase) MigrateLegacyLogRules(ctx context.Context) (int, error) {
 }
 
 func migrateLegacyLogRule(rule *model.Rule, kind string) (string, error) {
-	if effectiveScope(rule.ScopeType, kind) != model.RuleScopeGlobal {
-		return "", fmt.Errorf("%w: host-scoped legacy LogQL cannot be migrated without changing per-device incident semantics", errs.ErrConflict)
-	}
 	selector, lineFilter, window, operator, threshold, err := legacyLogRuleParts(rule.ConditionsJSON, kind)
 	if err != nil {
 		return "", err
@@ -85,6 +90,7 @@ func migrateLegacyLogRule(rule *model.Rule, kind string) (string, error) {
 	spec, _, err := normalizeLogSearchSpec(logSearchSpec{
 		Keywords: req.Keywords,
 		Filters:  req.Filters,
+		GroupBy:  append([]string(nil), legacyLogStreamGroupBy...),
 		Window:   window,
 		Operator: operator,
 		Threshold: func() *float64 {

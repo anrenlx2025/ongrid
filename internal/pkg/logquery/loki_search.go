@@ -133,56 +133,100 @@ func recordsAtTimestamp(records []Record, timestamp int64) int {
 // uses the same boundary convention so adjacent product histogram buckets do
 // not count an event twice.
 func (c *Client) Count(ctx context.Context, req SearchRequest) (uint64, error) {
-	if err := req.NormalizeAndValidate(); err != nil {
-		return 0, err
-	}
-	query, err := compileLogQL(req)
+	groups, err := c.countGrouped(ctx, req, nil)
 	if err != nil {
 		return 0, err
 	}
-	expr := fmt.Sprintf("sum(count_over_time(%s[%s]))", query, logQLDuration(req.End.Sub(req.Start)))
+	if len(groups) == 0 {
+		return 0, nil
+	}
+	return groups[0].Count, nil
+}
+
+// CountGrouped preserves the selected product dimensions as Loki vector
+// labels. Only indexed labels shared with the Elasticsearch OTel schema are
+// accepted by NormalizeGroupBy.
+func (c *Client) CountGrouped(ctx context.Context, req SearchRequest, groupBy []string) ([]CountGroup, error) {
+	fields, err := NormalizeGroupBy(groupBy)
+	if err != nil {
+		return nil, err
+	}
+	return c.countGrouped(ctx, req, fields)
+}
+
+func (c *Client) countGrouped(ctx context.Context, req SearchRequest, groupBy []string) ([]CountGroup, error) {
+	if err := req.NormalizeAndValidate(); err != nil {
+		return nil, err
+	}
+	query, err := compileLogQL(req)
+	if err != nil {
+		return nil, err
+	}
+	metric := fmt.Sprintf("count_over_time(%s[%s])", query, logQLDuration(req.End.Sub(req.Start)))
+	expr := "sum(" + metric + ")"
+	lokiFields := make([]string, 0, len(groupBy))
+	if len(groupBy) > 0 {
+		for _, field := range groupBy {
+			def, _ := LookupField(field)
+			lokiFields = append(lokiFields, def.LokiName)
+		}
+		expr = fmt.Sprintf("sum by (%s) (%s)", strings.Join(lokiFields, ","), metric)
+	}
 	params := url.Values{}
 	params.Set("query", expr)
 	params.Set("time", strconv.FormatInt(req.End.UnixNano(), 10))
 	body, err := c.do(ctx, "/loki/api/v1/query", params)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	var envelope struct {
 		Status string `json:"status"`
 		Data   struct {
 			ResultType string `json:"resultType"`
 			Result     []struct {
-				Value []json.RawMessage `json:"value"`
+				Metric map[string]string `json:"metric"`
+				Value  []json.RawMessage `json:"value"`
 			} `json:"result"`
 		} `json:"data"`
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return 0, fmt.Errorf("logquery: decode Loki count: %w", err)
+		return nil, fmt.Errorf("logquery: decode Loki count: %w", err)
 	}
 	if envelope.Status != "success" {
-		return 0, fmt.Errorf("logquery: %s", envelope.Error)
+		return nil, fmt.Errorf("logquery: %s", envelope.Error)
 	}
 	if envelope.Data.ResultType != "vector" {
-		return 0, fmt.Errorf("logquery: expected vector count result, got %q", envelope.Data.ResultType)
+		return nil, fmt.Errorf("logquery: expected vector count result, got %q", envelope.Data.ResultType)
 	}
-	var total uint64
+	groups := make([]CountGroup, 0, len(envelope.Data.Result))
 	for _, item := range envelope.Data.Result {
 		if len(item.Value) != 2 {
 			continue
 		}
 		var raw string
 		if err := json.Unmarshal(item.Value[1], &raw); err != nil {
-			return 0, fmt.Errorf("logquery: decode Loki count value: %w", err)
+			return nil, fmt.Errorf("logquery: decode Loki count value: %w", err)
 		}
 		value, err := strconv.ParseFloat(raw, 64)
-		if err != nil || value < 0 {
-			return 0, fmt.Errorf("logquery: invalid Loki count value %q", raw)
+		if err != nil || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value || value >= math.Exp2(64) {
+			return nil, fmt.Errorf("logquery: invalid Loki count value %q", raw)
 		}
-		total += uint64(value)
+		labels := make(map[string]string, len(groupBy))
+		for i, field := range groupBy {
+			if label := strings.TrimSpace(item.Metric[lokiFields[i]]); label != "" {
+				labels[field] = label
+			}
+		}
+		groups = append(groups, CountGroup{Labels: labels, Count: uint64(value)})
+		if len(groups) > MaxCountGroups {
+			return nil, fmt.Errorf("logquery: Loki grouped count exceeds %d buckets", MaxCountGroups)
+		}
 	}
-	return total, nil
+	if len(groupBy) == 0 && len(groups) == 0 {
+		return []CountGroup{{Count: 0}}, nil
+	}
+	return groups, nil
 }
 
 func (c *Client) Fields(_ context.Context, _, _ time.Time, _ Scope) ([]Field, error) {

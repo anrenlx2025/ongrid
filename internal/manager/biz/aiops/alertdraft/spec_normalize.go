@@ -28,9 +28,7 @@ func normalizeAlertScopeType(scopeType, kind string) string {
 func normalizeAlertScopeForKind(scopeType, kind string) string {
 	scope := strings.TrimSpace(scopeType)
 	switch strings.TrimSpace(kind) {
-	case "log_search":
-		return "global"
-	case "log_match", "log_volume", "trace_latency", "trace_error_rate", "metric_burn_rate":
+	case "log_search", "log_match", "log_volume", "trace_latency", "trace_error_rate", "metric_burn_rate":
 		if scope == "monitoring_pipeline" {
 			return "global"
 		}

@@ -42,6 +42,35 @@ func TestLokiCountUsesInstantStructuredQuery(t *testing.T) {
 	}
 }
 
+func TestLokiCountGroupedPreservesProductDimensions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/loki/api/v1/query" {
+			http.NotFound(w, r)
+			return
+		}
+		query := r.URL.Query().Get("query")
+		if !strings.Contains(query, "sum by (device_id,ongrid_source)") {
+			t.Fatalf("query = %q, want mapped grouping", query)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{"resultType": "vector", "result": []any{
+				map[string]any{"metric": map[string]string{"device_id": "42", "ongrid_source": "journald"}, "value": []any{1787054400, "3"}},
+				map[string]any{"metric": map[string]string{"device_id": "43", "ongrid_source": "kubernetes:pod"}, "value": []any{1787054400, "2"}},
+			}},
+		})
+	}))
+	t.Cleanup(server.Close)
+	client := NewWithHTTPClient(server.URL, server.Client(), nil)
+	groups, err := client.CountGrouped(t.Context(), validSearchRequest(), []string{"device_id", "source_id"})
+	if err != nil {
+		t.Fatalf("CountGrouped() error = %v", err)
+	}
+	if len(groups) != 2 || groups[0].Count != 3 || groups[0].Labels["device_id"] != "42" || groups[0].Labels["source_id"] != "journald" {
+		t.Fatalf("CountGrouped() = %#v", groups)
+	}
+}
+
 func TestLokiHistogramAlignsFullBucketsAndCountsPartialTail(t *testing.T) {
 	start := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
 	end := start.Add(5*time.Minute + 30*time.Second)

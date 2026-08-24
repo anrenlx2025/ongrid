@@ -51,6 +51,20 @@ func (s *Service) Count(ctx context.Context, req logquery.SearchRequest) (uint64
 	return searcher.Count(ctx, req)
 }
 
+// CountGrouped routes backend-neutral alert aggregation to the currently
+// selected backend. Product search windows own (start, end], matching Count.
+func (s *Service) CountGrouped(ctx context.Context, req logquery.SearchRequest, groupBy []string) ([]logquery.CountGroup, error) {
+	if err := req.NormalizeAndValidate(); err != nil {
+		return nil, err
+	}
+	searcher, err := s.selectedSearcher(ctx)
+	if err != nil {
+		return nil, err
+	}
+	req.Cursor = ""
+	return logquery.CountGrouped(ctx, searcher, req, groupBy)
+}
+
 func (s *Service) Fields(_ context.Context, _, _ time.Time, _ logquery.Scope) ([]logquery.Field, error) {
 	return logquery.AllowedFields(), nil
 }

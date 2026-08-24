@@ -208,6 +208,110 @@ func (c *ElasticsearchClient) Count(ctx context.Context, req SearchRequest) (uin
 	return response.Count, nil
 }
 
+// CountGrouped uses a composite aggregation so alert evaluation can enumerate
+// every matching group without relying on a backend-specific terms size or
+// silently truncating high-cardinality results.
+func (c *ElasticsearchClient) CountGrouped(ctx context.Context, req SearchRequest, groupBy []string) ([]CountGroup, error) {
+	fields, err := NormalizeGroupBy(groupBy)
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
+		count, err := c.Count(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		return []CountGroup{{Count: count}}, nil
+	}
+	if err := req.NormalizeAndValidate(); err != nil {
+		return nil, err
+	}
+	query, err := buildElasticsearchQueryWithStart(req, "gt")
+	if err != nil {
+		return nil, err
+	}
+	sources := make([]any, 0, len(fields))
+	for _, field := range fields {
+		def, _ := LookupField(field)
+		sources = append(sources, map[string]any{
+			field: map[string]any{"terms": map[string]any{
+				"field": def.ElasticsearchPath, "missing_bucket": true,
+			}},
+		})
+	}
+
+	const pageSize = 500
+	path := "/" + c.indexPattern + "/_search"
+	groups := make([]CountGroup, 0, min(pageSize, MaxCountGroups))
+	var after map[string]json.RawMessage
+	previousAfter := ""
+	for {
+		composite := map[string]any{"size": pageSize, "sources": sources}
+		if len(after) > 0 {
+			composite["after"] = after
+		}
+		body := map[string]any{
+			"size":  0,
+			"query": query,
+			"aggs":  map[string]any{"groups": map[string]any{"composite": composite}},
+		}
+		var response struct {
+			Aggregations struct {
+				Groups struct {
+					AfterKey map[string]json.RawMessage `json:"after_key"`
+					Buckets  []struct {
+						Key      map[string]json.RawMessage `json:"key"`
+						DocCount uint64                     `json:"doc_count"`
+					} `json:"buckets"`
+				} `json:"groups"`
+			} `json:"aggregations"`
+		}
+		if err := c.doJSON(ctx, http.MethodPost, path, nil, body, &response); err != nil {
+			return nil, err
+		}
+		for _, bucket := range response.Aggregations.Groups.Buckets {
+			labels := make(map[string]string, len(fields))
+			for _, field := range fields {
+				value, err := elasticsearchGroupValue(bucket.Key[field])
+				if err != nil {
+					return nil, fmt.Errorf("logquery: decode Elasticsearch group %q: %w", field, err)
+				}
+				if value != "" {
+					labels[field] = value
+				}
+			}
+			groups = append(groups, CountGroup{Labels: labels, Count: bucket.DocCount})
+			if len(groups) > MaxCountGroups {
+				return nil, fmt.Errorf("logquery: Elasticsearch grouped count exceeds %d buckets", MaxCountGroups)
+			}
+		}
+		if len(response.Aggregations.Groups.Buckets) == 0 || len(response.Aggregations.Groups.AfterKey) == 0 {
+			break
+		}
+		encodedAfter, err := json.Marshal(response.Aggregations.Groups.AfterKey)
+		if err != nil {
+			return nil, fmt.Errorf("logquery: encode Elasticsearch composite cursor: %w", err)
+		}
+		if string(encodedAfter) == previousAfter {
+			return nil, errors.New("logquery: Elasticsearch composite cursor did not advance")
+		}
+		previousAfter = string(encodedAfter)
+		after = response.Aggregations.Groups.AfterKey
+	}
+	return groups, nil
+}
+
+func elasticsearchGroupValue(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(text), nil
+}
+
 func (c *ElasticsearchClient) Fields(_ context.Context, _, _ time.Time, _ Scope) ([]Field, error) {
 	return AllowedFields(), nil
 }

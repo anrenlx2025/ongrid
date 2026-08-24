@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	model "github.com/ongridio/ongrid/internal/manager/model/alert"
-	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/logquery"
 )
 
@@ -58,20 +58,31 @@ func TestMigrateLegacyLogRulesCanonicalizesPortableRules(t *testing.T) {
 	if len(panicSpec.Filters) != 1 || panicSpec.Filters[0].Operator != logquery.FilterPrefix || panicSpec.Filters[0].Values[0] != "journald:" {
 		t.Fatalf("migrated filters = %#v", panicSpec.Filters)
 	}
+	if !reflect.DeepEqual(panicSpec.GroupBy, legacyLogStreamGroupBy) {
+		t.Fatalf("migrated group_by = %v, want %v", panicSpec.GroupBy, legacyLogStreamGroupBy)
+	}
 }
 
-func TestMigrateLegacyLogRulesRejectsHostScopedRuleWithoutWriting(t *testing.T) {
+func TestMigrateLegacyLogRulesPreservesHostStreamGrouping(t *testing.T) {
 	repo := newFakeRepo()
 	repo.rules["host_error"] = &model.Rule{
 		ID: 1, RuleKey: "host_error", Kind: model.RuleKindLogMatch, ScopeType: model.RuleScopeHost,
 		ConditionsJSON: `{"stream_selector":"{device_id=~\".+\"}","line_filter":"(?i)error","window":"5m","operator":">=","threshold":1}`,
 	}
-	_, err := NewUsecase(repo, nil).MigrateLegacyLogRules(t.Context())
-	if !errors.Is(err, errs.ErrConflict) {
-		t.Fatalf("MigrateLegacyLogRules() error = %v", err)
+	count, err := NewUsecase(repo, nil).MigrateLegacyLogRules(t.Context())
+	if err != nil || count != 1 {
+		t.Fatalf("MigrateLegacyLogRules() count=%d error=%v", count, err)
 	}
-	if repo.rules["host_error"].Kind != model.RuleKindLogMatch {
-		t.Fatalf("rule changed after failed migration: %#v", repo.rules["host_error"])
+	rule := repo.rules["host_error"]
+	if rule.Kind != model.RuleKindLogSearch || rule.ScopeType != model.RuleScopeHost {
+		t.Fatalf("migrated rule = %#v", rule)
+	}
+	compiled, err := compileLogSearchRule(rule)
+	if err != nil {
+		t.Fatalf("compile migrated host rule: %v", err)
+	}
+	if !reflect.DeepEqual(compiled.GroupBy, legacyLogStreamGroupBy) {
+		t.Fatalf("compiled group_by = %v, want %v", compiled.GroupBy, legacyLogStreamGroupBy)
 	}
 }
 
@@ -93,6 +104,50 @@ func TestCreateRuleCanonicalizesLegacyInput(t *testing.T) {
 	}
 	if _, err := compileLogSearchRule(row); err != nil {
 		t.Fatalf("compile canonical rule: %v", err)
+	}
+}
+
+func TestCreateHostLogSearchDefaultsToDeviceGrouping(t *testing.T) {
+	repo := newFakeRepo()
+	row, err := NewUsecase(repo, nil).CreateRule(t.Context(), RuleInput{
+		RuleKey: "host_logs", Kind: model.RuleKindLogSearch, ScopeType: model.RuleScopeHost,
+		Name: "Host logs", Severity: "warning", Enabled: true,
+		Spec: map[string]any{"window": "5m", "operator": ">=", "threshold": float64(1)},
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateRule() error = %v", err)
+	}
+	compiled, err := compileLogSearchRule(row)
+	if err != nil {
+		t.Fatalf("compile host rule: %v", err)
+	}
+	if !reflect.DeepEqual(compiled.GroupBy, []string{"device_id"}) {
+		t.Fatalf("group_by = %v, want device_id", compiled.GroupBy)
+	}
+	if !logSearchFiltersRequireDevice(compiled.Query.Filters) {
+		t.Fatalf("host query filters = %#v, want device_id existence constraint", compiled.Query.Filters)
+	}
+}
+
+func TestCreateHostLogSearchPrependsDeviceToExplicitGrouping(t *testing.T) {
+	repo := newFakeRepo()
+	row, err := NewUsecase(repo, nil).CreateRule(t.Context(), RuleInput{
+		RuleKey: "host_service_logs", Kind: model.RuleKindLogSearch, ScopeType: model.RuleScopeHost,
+		Name: "Host service logs", Severity: "warning", Enabled: true,
+		Spec: map[string]any{
+			"group_by": []string{"service_name"}, "window": "5m",
+			"operator": ">=", "threshold": float64(1),
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateRule() error = %v", err)
+	}
+	compiled, err := compileLogSearchRule(row)
+	if err != nil {
+		t.Fatalf("compile host rule: %v", err)
+	}
+	if !reflect.DeepEqual(compiled.GroupBy, []string{"device_id", "service_name"}) {
+		t.Fatalf("group_by = %v", compiled.GroupBy)
 	}
 }
 

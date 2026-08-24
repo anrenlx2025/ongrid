@@ -103,6 +103,7 @@ type LogSearchRule struct {
 	RunbookURL string
 	Labels     map[string]string
 	Query      logquery.SearchRequest
+	GroupBy    []string
 	Window     time.Duration
 	WindowText string
 	Operator   string
@@ -757,6 +758,7 @@ type logSearchSpec struct {
 	Keywords  logquery.Keywords      `json:"keywords,omitempty"`
 	Scope     logquery.Scope         `json:"scope,omitempty"`
 	Filters   []logquery.FieldFilter `json:"filters,omitempty"`
+	GroupBy   []string               `json:"group_by,omitempty"`
 	Window    string                 `json:"window"`
 	Operator  string                 `json:"operator"`
 	Threshold *float64               `json:"threshold"`
@@ -819,6 +821,11 @@ func normalizeLogSearchSpec(spec logSearchSpec) (logSearchSpec, time.Duration, e
 	if *spec.Threshold < 0 {
 		return logSearchSpec{}, 0, fmt.Errorf("threshold must be non-negative")
 	}
+	groupBy, err := logquery.NormalizeGroupBy(spec.GroupBy)
+	if err != nil {
+		return logSearchSpec{}, 0, err
+	}
+	spec.GroupBy = groupBy
 
 	// Run the same allowlists and limits used by the Logs HTTP API. The
 	// placeholder times are discarded after validation.
@@ -860,6 +867,7 @@ func compileLogSearchRule(r *model.Rule) (LogSearchRule, error) {
 		Severity:   r.Severity,
 		ScopeType:  effectiveScope(r.ScopeType, r.Kind),
 		Query:      logquery.SearchRequest{Scope: spec.Scope, Keywords: spec.Keywords, Filters: spec.Filters},
+		GroupBy:    append([]string(nil), spec.GroupBy...),
 		Window:     window,
 		WindowText: spec.Window,
 		Operator:   spec.Operator,

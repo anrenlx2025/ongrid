@@ -14,6 +14,7 @@ const (
 	DefaultSearchLimit = 200
 	MaxSearchLimit     = 1000
 	MaxSearchWindow    = 30 * 24 * time.Hour
+	MaxCountGroups     = 10_000
 	MaxKeywordCount    = 20
 	MaxFilterCount     = 20
 	MaxScopeValueCount = 100
@@ -119,6 +120,13 @@ type HistogramBucket struct {
 	Count uint64    `json:"count"`
 }
 
+// CountGroup is one backend-neutral log aggregation bucket. Labels always use
+// product field names rather than Loki labels or Elasticsearch document paths.
+type CountGroup struct {
+	Labels map[string]string `json:"labels,omitempty"`
+	Count  uint64            `json:"count"`
+}
+
 type FieldValuesRequest struct {
 	Field string    `json:"field"`
 	Start time.Time `json:"start"`
@@ -141,6 +149,63 @@ type Searcher interface {
 	Fields(ctx context.Context, start, end time.Time, scope Scope) ([]Field, error)
 	FieldValues(ctx context.Context, req FieldValuesRequest) ([]string, error)
 	Histogram(ctx context.Context, req SearchRequest, interval time.Duration) ([]HistogramBucket, error)
+}
+
+// GroupedCounter is implemented by backends that can preserve alert grouping
+// across Loki and Elasticsearch. Keeping it separate from Searcher avoids
+// forcing non-alert search wrappers to own an aggregation implementation.
+type GroupedCounter interface {
+	CountGrouped(ctx context.Context, req SearchRequest, groupBy []string) ([]CountGroup, error)
+}
+
+// CountGrouped evaluates a grouped count through the selected searcher. An
+// empty group_by remains compatible with Searcher.Count and always returns one
+// bucket, including when the count is zero.
+func CountGrouped(ctx context.Context, searcher Searcher, req SearchRequest, groupBy []string) ([]CountGroup, error) {
+	if searcher == nil {
+		return nil, errors.New("logquery: search backend is unavailable")
+	}
+	fields, err := NormalizeGroupBy(groupBy)
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
+		count, err := searcher.Count(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		return []CountGroup{{Count: count}}, nil
+	}
+	counter, ok := searcher.(GroupedCounter)
+	if !ok {
+		return nil, errors.New("logquery: selected backend does not support grouped counts")
+	}
+	return counter.CountGrouped(ctx, req, fields)
+}
+
+// NormalizeGroupBy validates the closed set of dimensions whose values are
+// represented identically by the Loki stream schema and Elasticsearch OTel
+// documents. Order is retained for deterministic backend queries.
+func NormalizeGroupBy(groupBy []string) ([]string, error) {
+	if len(groupBy) > 5 {
+		return nil, errors.New("logquery: group_by accepts at most 5 fields")
+	}
+	seen := make(map[string]struct{}, len(groupBy))
+	fields := make([]string, 0, len(groupBy))
+	for _, raw := range groupBy {
+		name := strings.TrimSpace(raw)
+		switch name {
+		case "device_id", "cluster_id", "source_id", "namespace", "service_name":
+		default:
+			return nil, fmt.Errorf("logquery: field %q cannot be used in group_by", name)
+		}
+		if _, exists := seen[name]; exists {
+			return nil, fmt.Errorf("logquery: duplicate group_by field %q", name)
+		}
+		seen[name] = struct{}{}
+		fields = append(fields, name)
+	}
+	return fields, nil
 }
 
 // CursorCloser releases backend resources associated with an opaque search

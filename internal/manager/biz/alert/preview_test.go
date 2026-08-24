@@ -93,6 +93,37 @@ type fakeEventCounter struct {
 	calls   int
 }
 
+func TestPreviewHostLogSearchUsesGroupedCurrentWindow(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	searcher := &scriptedStructuredLogSearcher{groups: []logquery.CountGroup{
+		{Labels: map[string]string{"device_id": "42"}, Count: 3},
+		{Labels: map[string]string{"device_id": "43"}, Count: 1},
+	}}
+	res, err := PreviewRule(t.Context(), PreviewInput{
+		Input: RuleInput{
+			RuleKey: "host_errors", Kind: model.RuleKindLogSearch, ScopeType: model.RuleScopeHost,
+			Name: "Host errors", Severity: "warning", Enabled: true,
+			Spec: map[string]any{
+				"keywords": map[string]any{"include": []string{"error"}, "mode": "any"},
+				"window":   "5m", "operator": ">=", "threshold": float64(2),
+			},
+		},
+		LookbackSeconds: 3600,
+	}, PreviewDeps{Search: searcher, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("PreviewRule() error = %v", err)
+	}
+	if res.FireCount != 1 || len(res.Samples) != 1 || res.Samples[0].Labels["device_id"] != "42" {
+		t.Fatalf("preview = %#v", res)
+	}
+	if !searcher.request.Start.Equal(now.Add(-5*time.Minute)) || !searcher.request.End.Equal(now) {
+		t.Fatalf("preview count range = %s..%s", searcher.request.Start, searcher.request.End)
+	}
+	if strings.Join(searcher.groupBy, ",") != "device_id" {
+		t.Fatalf("preview group_by = %v", searcher.groupBy)
+	}
+}
+
 func (f *fakeEventCounter) CountEventsByType(_ context.Context, _ string, _ time.Time, _, _ string) (int64, error) {
 	if f.calls >= len(f.answers) {
 		f.calls++

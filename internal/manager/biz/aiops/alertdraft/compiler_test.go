@@ -72,7 +72,7 @@ func TestCompileDraft_NormalizesBackendNeutralLogSearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileDraft: %v", err)
 	}
-	if got.Rule.Kind != "log_search" || got.Rule.ScopeType != "global" {
+	if got.Rule.Kind != "log_search" || got.Rule.ScopeType != "host" {
 		t.Fatalf("rule = %#v", got.Rule)
 	}
 	keywords, ok := got.Rule.Spec["keywords"].(map[string]interface{})

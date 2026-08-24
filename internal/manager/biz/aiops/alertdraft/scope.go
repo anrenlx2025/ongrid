@@ -36,7 +36,7 @@ func HostScopeRecommended(in RuleConfigInput, requestText string) bool {
 
 func kindCanUseHostScope(kind string) bool {
 	switch strings.TrimSpace(kind) {
-	case "metric_threshold", "metric_raw", "metric_anomaly", "metric_forecast", "log_match", "log_volume":
+	case "metric_threshold", "metric_raw", "metric_anomaly", "metric_forecast", "log_search", "log_match", "log_volume":
 		return true
 	default:
 		return false
@@ -87,6 +87,14 @@ func metricRawLooksHostScoped(in RuleConfigInput, requestText string) bool {
 
 func logRuleLooksHostScoped(in RuleConfigInput, requestText string) bool {
 	switch strings.TrimSpace(in.Kind) {
+	case "log_search":
+		scope, _ := in.Spec["scope"].(map[string]interface{})
+		if scope != nil {
+			if ids, ok := scope["device_ids"].([]interface{}); ok && len(ids) > 0 {
+				return true
+			}
+		}
+		return requestLooksHostResourceScoped(requestText)
 	case "log_match", "log_volume":
 	default:
 		return false

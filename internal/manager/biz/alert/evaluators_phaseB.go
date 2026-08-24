@@ -42,7 +42,7 @@ func (e *PipelineEvaluator) evaluateLogSearch(ctx context.Context, now time.Time
 		req.Cursor = ""
 		req.Limit = 1
 		req.Direction = logquery.SortBackward
-		count, err := e.logSearcher.Count(ctx, req)
+		groups, err := logquery.CountGrouped(ctx, e.logSearcher, req, rule.GroupBy)
 		if err != nil {
 			e.log.Warn("alert: structured log count failed",
 				slog.String("rule", rule.RuleKey),
@@ -52,20 +52,33 @@ func (e *PipelineEvaluator) evaluateLogSearch(ctx context.Context, now time.Time
 			continue
 		}
 
-		fired := make(map[string]struct{}, 1)
-		value := float64(count)
-		if compareFloat(value, rule.Operator, rule.Threshold) {
-			dedupeKey := fmt.Sprintf("pipeline:%s:structured-log", rule.RuleKey)
+		fired := make(map[string]struct{}, len(groups))
+		scope := effectiveScope(rule.ScopeType, model.RuleKindLogSearch)
+		for _, group := range groups {
+			value := float64(group.Count)
+			if !compareFloat(value, rule.Operator, rule.Threshold) {
+				continue
+			}
+			groupKey := "structured-log"
+			if len(group.Labels) > 0 {
+				groupKey = labelSetKey(group.Labels)
+			}
+			dedupeKey := fmt.Sprintf("pipeline:%s:%s", rule.RuleKey, groupKey)
 			fired[dedupeKey] = struct{}{}
-			summary := fmt.Sprintf("%s: log count %d %s %g in %s",
-				rule.RuleKey, count, rule.Operator, rule.Threshold, rule.WindowText)
+			summary := fmt.Sprintf("%s: log count %d %s %g in %s (labels=%s)",
+				rule.RuleKey, group.Count, rule.Operator, rule.Threshold, rule.WindowText, groupKey)
 			threshold := rule.Threshold
+			var devID *uint64
+			if scope == model.RuleScopeHost {
+				devID = deviceIDFromLabels(group.Labels)
+			}
 			input := FiringInput{
-				ScopeType:  effectiveScope(rule.ScopeType, model.RuleKindLogSearch),
-				Scope:      effectiveScope(rule.ScopeType, model.RuleKindLogSearch),
+				ScopeType:  scope,
+				Scope:      scope,
 				Rule:       rule.RuleKey,
 				RuleName:   rule.Name,
 				Severity:   ruleSev(rule.Severity, notify.SeverityWarning),
+				DeviceID:   devID,
 				DedupeKey:  dedupeKey,
 				OccurredAt: now,
 				Title:      summary,
@@ -73,7 +86,7 @@ func (e *PipelineEvaluator) evaluateLogSearch(ctx context.Context, now time.Time
 				RunbookURL: rule.RunbookURL,
 				Value:      &value,
 				Threshold:  &threshold,
-				Labels: mergeLabels(rule.Labels, nil, map[string]string{
+				Labels: mergeLabels(rule.Labels, group.Labels, map[string]string{
 					"rule":       rule.RuleKey,
 					"trigger":    "ticker",
 					"log_window": rule.WindowText,

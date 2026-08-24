@@ -94,3 +94,29 @@ func TestAllowedFields_DoNotExposeElasticsearchIndexControls(t *testing.T) {
 		t.Fatalf("allowed fields = %#v, want level and no severity", names)
 	}
 }
+
+func TestNormalizeGroupByKeepsPortableDimensionsOnly(t *testing.T) {
+	got, err := NormalizeGroupBy([]string{" device_id ", "source_id", "namespace"})
+	if err != nil {
+		t.Fatalf("NormalizeGroupBy() error = %v", err)
+	}
+	want := []string{"device_id", "source_id", "namespace"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("NormalizeGroupBy() = %v, want %v", got, want)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		fields []string
+	}{
+		{name: "unsupported", fields: []string{"pod"}},
+		{name: "duplicate", fields: []string{"device_id", "device_id"}},
+		{name: "too_many", fields: []string{"device_id", "cluster_id", "source_id", "namespace", "service_name", "pod"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NormalizeGroupBy(tc.fields); err == nil {
+				t.Fatalf("NormalizeGroupBy(%v) unexpectedly succeeded", tc.fields)
+			}
+		})
+	}
+}

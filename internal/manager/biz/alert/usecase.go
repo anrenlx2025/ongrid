@@ -12,6 +12,7 @@ import (
 
 	model "github.com/ongridio/ongrid/internal/manager/model/alert"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
+	"github.com/ongridio/ongrid/internal/pkg/logquery"
 	"github.com/ongridio/ongrid/internal/pkg/notify"
 	"github.com/ongridio/ongrid/internal/pkg/prom"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
@@ -781,8 +782,9 @@ func buildRuleRow(in RuleInput, requireKey bool) (*model.Rule, error) {
 	// log_match and log_volume are accepted only as legacy input shapes. New
 	// writes are canonicalized immediately so no newly-created rule can bind
 	// itself to whichever log backend happens to be selected at creation time.
-	// A host-scoped or non-portable LogQL rule is rejected rather than silently
-	// changing its incident grouping or query meaning.
+	// Non-portable LogQL is rejected rather than silently changing its query
+	// meaning. Portable rules retain Loki stream-level grouping on both
+	// backends, including host-scoped rules.
 	if kind == model.RuleKindLogMatch || kind == model.RuleKindLogVolume {
 		condJSON, err = migrateLegacyLogRule(&model.Rule{
 			RuleKey:        key,
@@ -794,6 +796,12 @@ func buildRuleRow(in RuleInput, requireKey bool) (*model.Rule, error) {
 			return nil, fmt.Errorf("canonicalize %s rule: %w", kind, err)
 		}
 		storageKind = model.RuleKindLogSearch
+	}
+	if storageKind == model.RuleKindLogSearch {
+		condJSON, err = normalizeLogSearchConditionsForScope(condJSON, scope)
+		if err != nil {
+			return nil, fmt.Errorf("normalize log_search grouping: %w", err)
+		}
 	}
 	// 发送策略 (send-policy / dampening) validation: both zero = disabled
 	// (default); both > 0 = enabled; mixed = reject. Caps mirror the UI
@@ -1054,17 +1062,19 @@ func buildConditionsJSON(kind string, in RuleInput) (string, error) {
 // readonly badge. Kinds with multiple entries let the user choose.
 //
 //   - metric_threshold : per-host evaluator → host only
-//   - metric_burn_rate / log_search / trace_* : aggregate → global only
+//   - metric_burn_rate / trace_* : aggregate → global only
 //   - metric_anomaly / metric_forecast / metric_raw / log_match / log_volume :
 //     PromQL/LogQL controls aggregation, user picks host vs global
-//   - log_search : backend-neutral aggregate count, global only
+//   - log_search : backend-neutral aggregate count, global or per-host
 func allowedScopesForKind(kind string) []string {
 	switch kind {
 	case model.RuleKindMetricThreshold:
 		return []string{model.RuleScopeHost}
-	case model.RuleKindMetricBurnRate, model.RuleKindLogSearch,
+	case model.RuleKindMetricBurnRate,
 		model.RuleKindTraceLatency, model.RuleKindTraceErrorRate:
 		return []string{model.RuleScopeGlobal}
+	case model.RuleKindLogSearch:
+		return []string{model.RuleScopeGlobal, model.RuleScopeHost}
 	case model.RuleKindMetricRaw:
 		return []string{model.RuleScopeGlobal, model.RuleScopeHost}
 	case model.RuleKindMetricAnomaly, model.RuleKindMetricForecast,
@@ -1073,6 +1083,52 @@ func allowedScopesForKind(kind string) []string {
 	default:
 		return []string{model.RuleScopeGlobal, model.RuleScopeHost, model.RuleScopeMonitoringPipeline}
 	}
+}
+
+func normalizeLogSearchConditionsForScope(raw, scope string) (string, error) {
+	var spec logSearchSpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		return "", fmt.Errorf("decode conditions: %w", err)
+	}
+	if scope == model.RuleScopeHost {
+		hasDeviceGroup := false
+		for _, field := range spec.GroupBy {
+			if strings.TrimSpace(field) == "device_id" {
+				hasDeviceGroup = true
+				break
+			}
+		}
+		if !hasDeviceGroup {
+			spec.GroupBy = append([]string{"device_id"}, spec.GroupBy...)
+		}
+		if len(spec.Scope.DeviceIDs) == 0 && !logSearchFiltersRequireDevice(spec.Filters) {
+			spec.Filters = append(spec.Filters, logquery.FieldFilter{
+				Field: "device_id", Operator: logquery.FilterExists,
+			})
+		}
+	}
+	normalized, _, err := normalizeLogSearchSpec(spec)
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "", fmt.Errorf("encode conditions: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func logSearchFiltersRequireDevice(filters []logquery.FieldFilter) bool {
+	for _, filter := range filters {
+		if strings.TrimSpace(filter.Field) != "device_id" {
+			continue
+		}
+		switch filter.Operator {
+		case logquery.FilterEqual, logquery.FilterIn, logquery.FilterExists, logquery.FilterPrefix:
+			return true
+		}
+	}
+	return false
 }
 
 func defaultScopeForKind(kind string) string {

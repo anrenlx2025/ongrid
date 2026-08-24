@@ -238,7 +238,7 @@ const RULE_KIND_DEFS: Array<RuleKindMeta & { _zh: { label: string; hint: string 
     label: '', hint: '', _zh: { label: '指标 · 燃烧率', hint: 'SLO error budget 多窗多倍率' } },
   { kind: 'metric_raw',        source: 'metric', trigger: 'raw',        scopes: ['global', 'host'],
     label: '', hint: '', _zh: { label: '指标 · 原生 PromQL', hint: '自己写 PromQL 表达式' } },
-  { kind: 'log_search',        source: 'log',    trigger: 'match',      scopes: ['global'],
+  { kind: 'log_search',        source: 'log',    trigger: 'match',      scopes: ['global', 'host'],
     label: '', hint: '', _zh: { label: '日志 · 结构化搜索', hint: '关键词 + 字段过滤，Loki / Elasticsearch 共用' } },
   { kind: 'log_match',         source: 'log',    trigger: 'match',      scopes: ['global', 'host'],
     label: '', hint: '', _zh: { label: '日志 · 模式匹配（Loki 兼容）', hint: '旧 LogQL 正则规则，切换 Elasticsearch 前需迁移' } },

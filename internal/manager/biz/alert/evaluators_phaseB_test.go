@@ -80,6 +80,47 @@ func TestCompileLogSearchAndEvaluateThroughStructuredCounter(t *testing.T) {
 	}
 }
 
+func TestEvaluateLogSearchComparesAndRecoversEachGroup(t *testing.T) {
+	repo := newFakeRepo()
+	searcher := &scriptedStructuredLogSearcher{groups: []logquery.CountGroup{
+		{Labels: map[string]string{"device_id": "42", "source_id": "journald"}, Count: 3},
+		{Labels: map[string]string{"device_id": "43", "source_id": "journald"}, Count: 1},
+	}}
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	rule := LogSearchRule{
+		RuleKey: "host_errors", Name: "Host errors", ScopeType: model.RuleScopeHost,
+		GroupBy: []string{"device_id", "source_id"}, Window: 5 * time.Minute,
+		WindowText: "5m", Operator: ">=", Threshold: 2,
+	}
+	eval := newPipelineEvaluator(t, repo, &fakeNotifier{},
+		NewStaticRulesProvider(WithLogSearchRules([]LogSearchRule{rule})),
+		PipelineEvaluatorOpts{LogSearcher: searcher, Cooldown: time.Minute, Now: func() time.Time { return now }},
+	)
+	eval.EvaluateOnce(t.Context())
+	if len(repo.incidents) != 1 {
+		t.Fatalf("incidents = %d, want one independently breaching group", len(repo.incidents))
+	}
+	var incident *model.Incident
+	for _, candidate := range repo.incidents {
+		incident = candidate
+	}
+	if incident.DeviceID == nil || *incident.DeviceID != 42 || incident.Value == nil || *incident.Value != 3 {
+		t.Fatalf("incident = %#v", incident)
+	}
+	if strings.Join(searcher.groupBy, ",") != "device_id,source_id" {
+		t.Fatalf("group_by = %v", searcher.groupBy)
+	}
+
+	searcher.groups = []logquery.CountGroup{
+		{Labels: map[string]string{"device_id": "42", "source_id": "journald"}, Count: 1},
+		{Labels: map[string]string{"device_id": "43", "source_id": "journald"}, Count: 1},
+	}
+	eval.EvaluateOnce(t.Context())
+	if incident.Status != model.IncidentStatusResolved {
+		t.Fatalf("incident status = %q, want resolved", incident.Status)
+	}
+}
+
 func TestCompileLogMatch_Errors(t *testing.T) {
 	for _, c := range []struct {
 		name, spec string
@@ -223,6 +264,8 @@ type scriptedLogRange struct {
 
 type scriptedStructuredLogSearcher struct {
 	count   uint64
+	groups  []logquery.CountGroup
+	groupBy []string
 	request logquery.SearchRequest
 }
 
@@ -233,6 +276,12 @@ func (*scriptedStructuredLogSearcher) Search(context.Context, logquery.SearchReq
 func (s *scriptedStructuredLogSearcher) Count(_ context.Context, req logquery.SearchRequest) (uint64, error) {
 	s.request = req
 	return s.count, nil
+}
+
+func (s *scriptedStructuredLogSearcher) CountGrouped(_ context.Context, req logquery.SearchRequest, groupBy []string) ([]logquery.CountGroup, error) {
+	s.request = req
+	s.groupBy = append([]string(nil), groupBy...)
+	return append([]logquery.CountGroup(nil), s.groups...), nil
 }
 
 func (*scriptedStructuredLogSearcher) Fields(context.Context, time.Time, time.Time, logquery.Scope) ([]logquery.Field, error) {
