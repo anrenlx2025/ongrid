@@ -300,7 +300,7 @@ func TestServiceSelectionSecretsAndIndependentConnectionChecks(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/":
-			_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"cluster_uuid": "test-cluster", "version": map[string]string{"number": "8.16.3"}})
 		case r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges":
 			_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/_pit"):
@@ -614,7 +614,7 @@ func TestServiceReplacementSelectionUsesOnlyNewElasticsearch(t *testing.T) {
 			return
 		}
 		if r.Method == http.MethodGet && r.URL.Path == "/" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"cluster_uuid": "test-cluster", "version": map[string]string{"number": "8.16.3"}})
 			return
 		}
 		http.NotFound(w, r)
@@ -681,7 +681,7 @@ func TestServiceSelectChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testi
 			case r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges":
 				_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
 			case r.Method == http.MethodGet && r.URL.Path == "/":
-				_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
+				_ = json.NewEncoder(w).Encode(map[string]any{"cluster_uuid": "test-cluster", "version": map[string]string{"number": "8.16.3"}})
 			default:
 				http.NotFound(w, r)
 			}
@@ -718,19 +718,65 @@ func TestServiceSelectChecksEveryWriteEndpointWithoutBroadeningWriteKey(t *testi
 	requestMu.Lock()
 	defer requestMu.Unlock()
 	wantQueryProbe := false
+	wantQueryPrivileges := false
 	wantWritePrivileges := false
 	for _, request := range secondRequests {
 		switch request {
 		case "ApiKey query-key GET /":
 			wantQueryProbe = true
+		case "ApiKey query-key POST /_security/user/_has_privileges":
+			wantQueryPrivileges = true
 		case "ApiKey write-key POST /_security/user/_has_privileges":
 			wantWritePrivileges = true
 		case "ApiKey write-key GET /":
 			t.Fatalf("runtime write key was used for cluster version probe: %#v", secondRequests)
 		}
 	}
-	if !wantQueryProbe || !wantWritePrivileges {
+	if !wantQueryProbe || !wantQueryPrivileges || !wantWritePrivileges {
 		t.Fatalf("second write endpoint was not fully checked: %#v", secondRequests)
+	}
+}
+
+func TestServiceSelectRejectsWriteEndpointFromDifferentCluster(t *testing.T) {
+	newEndpoint := func(clusterUUID string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges":
+				_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
+			case r.Method == http.MethodGet && r.URL.Path == "/":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"cluster_uuid": clusterUUID,
+					"version":      map[string]string{"number": "8.16.3"},
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+	}
+	queryEndpoint := newEndpoint("query-cluster")
+	defer queryEndpoint.Close()
+	writeEndpoint := newEndpoint("write-cluster")
+	defer writeEndpoint.Close()
+
+	repo := logsstore.NewRepo(openTestDB(t))
+	svc := bizlogs.NewService(repo, mapSecrets{
+		"write": {"api_key": "write-key"},
+		"query": {"api_key": "query-key"},
+	}, nil)
+	backend, err := svc.Save(t.Context(), bizlogs.SaveInput{
+		WriteEndpoints: []string{writeEndpoint.URL}, QueryEndpoint: queryEndpoint.URL,
+		Dataset: "ongrid.system", Namespace: "prod",
+		WriteCredentialRef: "write", QueryCredentialRef: "query", TLSInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := svc.Select(t.Context(), backend.ID); err == nil || !strings.Contains(err.Error(), "belongs to cluster write-cluster") {
+		t.Fatalf("Select() error = %v", err)
+	}
+	if _, err := repo.SelectedBackend(t.Context()); !errors.Is(err, errs.ErrNotFound) {
+		t.Fatalf("SelectedBackend() after rejected selection = %v", err)
 	}
 }
 
@@ -1035,7 +1081,7 @@ func TestServiceElasticsearchSelectionMigratesAlertsBeforeChangingBackend(t *tes
 		case r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges":
 			_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
 		case r.Method == http.MethodGet && r.URL.Path == "/":
-			_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"cluster_uuid": "test-cluster", "version": map[string]string{"number": "8.16.3"}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -1082,7 +1128,7 @@ func TestServiceConnectionCheckIncludesOfflineLogEnabledEdgeWithoutBlockingCutov
 		case r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges":
 			_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
 		case r.Method == http.MethodGet && r.URL.Path == "/":
-			_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"cluster_uuid": "test-cluster", "version": map[string]string{"number": "8.16.3"}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -1307,7 +1353,7 @@ func TestServiceSelectionWithNoOnlineEdgesUsesManagerProbe(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/_security/user/_has_privileges":
 			_ = json.NewEncoder(w).Encode(map[string]any{"has_all_requested": true})
 		case r.Method == http.MethodGet && r.URL.Path == "/":
-			_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"number": "8.16.3"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"cluster_uuid": "test-cluster", "version": map[string]string{"number": "8.16.3"}})
 		default:
 			http.NotFound(w, r)
 		}

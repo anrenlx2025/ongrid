@@ -277,7 +277,10 @@ func TestElasticsearchClient_HistogramAlignsBucketsToRequestStart(t *testing.T) 
 
 func TestElasticsearchClient_ProbeRequiresSupportedVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeTestJSON(t, w, map[string]any{"version": map[string]string{"number": "8.16.3"}})
+		writeTestJSON(t, w, map[string]any{
+			"cluster_uuid": "cluster-a",
+			"version":      map[string]string{"number": "8.16.3"},
+		})
 	}))
 	t.Cleanup(server.Close)
 	client, err := NewElasticsearchClient(ElasticsearchConfig{
@@ -289,6 +292,10 @@ func TestElasticsearchClient_ProbeRequiresSupportedVersion(t *testing.T) {
 	version, err := client.Probe(t.Context())
 	if err != nil || version != "8.16.3" {
 		t.Fatalf("Probe() = %q, %v", version, err)
+	}
+	info, err := client.ProbeInfo(t.Context())
+	if err != nil || info.Version != "8.16.3" || info.ClusterUUID != "cluster-a" {
+		t.Fatalf("ProbeInfo() = %+v, %v", info, err)
 	}
 }
 

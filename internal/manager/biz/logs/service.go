@@ -1421,9 +1421,12 @@ func (s *Service) probeBackend(ctx context.Context, backend *model.Backend) (str
 	if err := queryClient.RequirePrivileges(ctx, []string{"monitor"}, []string{"read", "view_index_metadata"}); err != nil {
 		return "", fmt.Errorf("Elasticsearch query privileges: %w", err)
 	}
-	version, err := queryClient.Probe(ctx)
+	queryInfo, err := queryClient.ProbeInfo(ctx)
 	if err != nil {
 		return "", fmt.Errorf("Elasticsearch query probe: %w", err)
+	}
+	if queryInfo.ClusterUUID == "" {
+		return "", errors.New("Elasticsearch query probe: cluster UUID is missing")
 	}
 	writeKey, err := s.apiKey(ctx, backend.WriteCredentialRef)
 	if err != nil {
@@ -1442,22 +1445,31 @@ func (s *Service) probeBackend(ctx context.Context, backend *model.Backend) (str
 			return "", fmt.Errorf("Elasticsearch write endpoint %d privileges: %w", i+1, privilegeErr)
 		}
 
-		// Use the Manager-only query credential for the version check. The
-		// runtime write credential sent to Edge deliberately has no cluster
+		// Use the Manager-only query credential for read and identity checks.
+		// The runtime write credential sent to Edge deliberately has no cluster
 		// monitor permission.
 		writeEndpointProbe, clientErr := s.newESClient(endpoint, backend.IndexPattern, queryKey, backend)
 		if clientErr != nil {
 			return "", clientErr
 		}
-		writeVersion, probeErr := writeEndpointProbe.Probe(ctx)
+		if privilegeErr := writeEndpointProbe.RequirePrivileges(ctx, nil, []string{"read", "view_index_metadata"}); privilegeErr != nil {
+			return "", fmt.Errorf("Elasticsearch write endpoint %d query privileges: %w", i+1, privilegeErr)
+		}
+		writeInfo, probeErr := writeEndpointProbe.ProbeInfo(ctx)
 		if probeErr != nil {
 			return "", fmt.Errorf("Elasticsearch write endpoint %d probe: %w", i+1, probeErr)
 		}
-		if writeVersion != version {
-			return "", fmt.Errorf("Elasticsearch write endpoint %d reports version %s, query endpoint reports %s", i+1, writeVersion, version)
+		if writeInfo.ClusterUUID == "" {
+			return "", fmt.Errorf("Elasticsearch write endpoint %d probe: cluster UUID is missing", i+1)
+		}
+		if writeInfo.ClusterUUID != queryInfo.ClusterUUID {
+			return "", fmt.Errorf("Elasticsearch write endpoint %d belongs to cluster %s, query endpoint belongs to cluster %s", i+1, writeInfo.ClusterUUID, queryInfo.ClusterUUID)
+		}
+		if writeInfo.Version != queryInfo.Version {
+			return "", fmt.Errorf("Elasticsearch write endpoint %d reports version %s, query endpoint reports %s", i+1, writeInfo.Version, queryInfo.Version)
 		}
 	}
-	return version, nil
+	return queryInfo.Version, nil
 }
 
 func (s *Service) apiKey(ctx context.Context, ref string) (string, error) {

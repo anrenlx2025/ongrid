@@ -422,26 +422,48 @@ func (c *ElasticsearchClient) Histogram(ctx context.Context, req SearchRequest, 
 	return buckets, nil
 }
 
-func (c *ElasticsearchClient) Probe(ctx context.Context) (string, error) {
+// ElasticsearchInfo identifies the cluster behind an Elasticsearch endpoint.
+// ClusterUUID is used to prevent split-brain configurations where Edge writes
+// and Manager queries target different clusters that happen to run the same
+// Elasticsearch version.
+type ElasticsearchInfo struct {
+	Version     string
+	ClusterUUID string
+}
+
+// ProbeInfo validates the supported Elasticsearch version and returns the
+// stable cluster identity advertised by the root endpoint.
+func (c *ElasticsearchClient) ProbeInfo(ctx context.Context) (ElasticsearchInfo, error) {
 	var info struct {
-		Version struct {
+		ClusterUUID string `json:"cluster_uuid"`
+		Version     struct {
 			Number string `json:"number"`
 		} `json:"version"`
 	}
 	if err := c.doJSON(ctx, http.MethodGet, "/", nil, nil, &info); err != nil {
-		return "", err
+		return ElasticsearchInfo{}, err
 	}
 	if info.Version.Number == "" {
-		return "", errors.New("logquery: Elasticsearch version missing")
+		return ElasticsearchInfo{}, errors.New("logquery: Elasticsearch version missing")
 	}
 	major, minor, err := parseElasticsearchVersion(info.Version.Number)
 	if err != nil {
-		return "", err
+		return ElasticsearchInfo{}, err
 	}
 	if major < 8 || (major == 8 && minor < 16) {
-		return "", fmt.Errorf("logquery: Elasticsearch 8.16+ required, got %s", info.Version.Number)
+		return ElasticsearchInfo{}, fmt.Errorf("logquery: Elasticsearch 8.16+ required, got %s", info.Version.Number)
 	}
-	return info.Version.Number, nil
+	return ElasticsearchInfo{Version: info.Version.Number, ClusterUUID: strings.TrimSpace(info.ClusterUUID)}, nil
+}
+
+// Probe preserves the existing version-only API for callers that only need a
+// compatibility check.
+func (c *ElasticsearchClient) Probe(ctx context.Context) (string, error) {
+	info, err := c.ProbeInfo(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.Version, nil
 }
 
 // RequirePrivileges verifies the API key against the fixed product index

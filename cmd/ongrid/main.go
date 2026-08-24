@@ -1095,10 +1095,10 @@ func main() {
 	// external Elasticsearch configuration routes every log query directly to
 	// Elasticsearch. Log payloads never traverse this service; Edge collectors
 	// still write directly to the selected data-plane endpoint.
-	var lokiLogClient *pkglogquery.Client
-	if cfg.Logs.URL != "" {
-		lokiLogClient = pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "logquery")))
-	}
+	lokiLogClient := pkglogquery.NewRuntimeClient(
+		lokiQueryEndpointResolver{resolver: lokiResolver},
+		log.With(slog.String("comp", "logquery")),
+	)
 	logsBackendRepo := managerlogsdata.NewRepo(db)
 	logsBackendSvc := managerbizlogs.NewService(logsBackendRepo, secretUC, lokiLogClient, log.With(slog.String("comp", "logs-backend")))
 	logsBackendSvc.SetLogAlertMigrator(alertUC)
@@ -1261,9 +1261,7 @@ func main() {
 		if promQueryClient != nil {
 			previewDeps.Prom = promQueryClient
 		}
-		if cfg.Logs.URL != "" {
-			previewDeps.Log = pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "alert-preview-log")))
-		}
+		previewDeps.Log = lokiLogClient
 		alertSvc.SetPreviewDeps(previewDeps)
 	}
 
@@ -1690,15 +1688,10 @@ func main() {
 	imbridgeStreamSupervisor.RegisterFactory("slack", managerbizimbridgeslack.NewStreamFactory(log))
 	go imbridgeStreamSupervisor.Run(rootCtx)
 
-	// @-mention search backend (HLD: ChatInput @-popover). Wires
-	// device + alert biz + Loki client. Any nil dep just means that
-	// type returns no results — graceful for deployments without Loki
-	// or with the alert bounded context disabled.
-	var mentionLogClient *pkglogquery.Client
-	if cfg.Logs.URL != "" {
-		mentionLogClient = pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "mention-logquery")))
-	}
-	mentionSearcher := managerbizaiopsmentions.New(deviceUC, alertUC, mentionLogClient)
+	// @-mention search backend (HLD: ChatInput @-popover). The shared runtime
+	// Loki client follows integration URL, auth and TLS edits without restart.
+	// Nil device/alert dependencies still degrade their corresponding types.
+	mentionSearcher := managerbizaiopsmentions.New(deviceUC, alertUC, lokiLogClient)
 	aiopsHandler.SetMentionSearcher(mentionSearcher)
 	// Provider catalog → /v1/aiops/models. The router has the canonical
 	// list; the handler reads from it via a narrow interface so wiring
@@ -2829,10 +2822,6 @@ func main() {
 		// Legacy log_match / log_volume kinds still need a Loki client.
 		// New log_search rules use logsBackendSvc below and therefore follow
 		// the same Loki/Elasticsearch history plan as the Logs UI.
-		var alertLogQuerier managerbizalert.LogQuerier
-		if cfg.Logs.URL != "" {
-			alertLogQuerier = pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "alert-logquery")))
-		}
 		pipelineEval := managerbizalert.NewPipelineEvaluator(managerbizalert.PipelineEvaluatorOpts{
 			Usecase:         alertUC,
 			Rules:           alertRules,
@@ -2844,7 +2833,7 @@ func main() {
 			Interval:        cfg.Alert.EvaluatorInterval,
 			EdgeLister:      edgeUC,
 			PromQuerier:     alertPromQuerier,
-			LogQuerier:      alertLogQuerier,
+			LogQuerier:      lokiLogClient,
 			LogSearcher:     logsBackendSvc,
 			DeviceIdentityResolver: func(ctx context.Context, deviceID uint64) (managerbizalert.DeviceIdentity, error) {
 				device, err := deviceUC.Get(ctx, deviceID)
@@ -2978,6 +2967,23 @@ type telemetryBackendResolver interface {
 	URL(ctx context.Context) string
 	Auth(ctx context.Context) (basicUser, basicPassword string)
 	TLSInsecure(ctx context.Context) bool
+}
+
+type lokiQueryEndpointResolver struct {
+	resolver telemetryBackendResolver
+}
+
+func (r lokiQueryEndpointResolver) ResolveLokiEndpoint(ctx context.Context) (pkglogquery.LokiEndpoint, error) {
+	if r.resolver == nil {
+		return pkglogquery.LokiEndpoint{}, errors.New("Loki query resolver is unavailable")
+	}
+	user, password := r.resolver.Auth(ctx)
+	return pkglogquery.LokiEndpoint{
+		URL:           r.resolver.URL(ctx),
+		BasicUser:     user,
+		BasicPassword: password,
+		TLSInsecure:   r.resolver.TLSInsecure(ctx),
+	}, nil
 }
 
 func (r pluginEndpointResolver) Endpoint(ctx context.Context, plugin string) string {
