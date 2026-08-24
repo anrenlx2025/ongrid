@@ -145,6 +145,39 @@ func TestRenderBuiltInLokiPipeline(t *testing.T) {
 	}
 }
 
+func TestRenderExternalLokiUsesManagedAuthorizationFile(t *testing.T) {
+	authPath := filepath.Join(t.TempDir(), "loki-authorization")
+	root := renderConfig(t, plugins.PluginConfig{
+		Enabled: true, EdgeID: 42, Endpoint: "https://loki.example.com/otlp/v1/logs",
+		AuthUser: "edge-user", AuthPass: "edge-pass",
+		Spec: map[string]interface{}{
+			"backend": "builtin_loki", "loki_auth_mode": "basic",
+			"loki_authorization_file": authPath, "loki_tls_insecure_skip_verify": false,
+		},
+	})
+	loki := object(t, object(t, root, "exporters"), "otlphttp/builtin_loki")
+	headers := object(t, loki, "headers")
+	if got := scalar(t, headers, "Authorization"); got != "${file:"+authPath+"}" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	tlsConfig := object(t, loki, "tls")
+	if insecure, ok := tlsConfig["insecure_skip_verify"].(bool); !ok || insecure {
+		t.Fatalf("TLS config = %#v, want verification enabled", tlsConfig)
+	}
+}
+
+func TestRenderExternalLokiWithoutAuthDoesNotUseEdgeCredentials(t *testing.T) {
+	root := renderConfig(t, plugins.PluginConfig{
+		Enabled: true, EdgeID: 42, Endpoint: "https://loki.example.com/otlp/v1/logs",
+		AuthUser: "edge-user", AuthPass: "edge-pass",
+		Spec: map[string]interface{}{"backend": "builtin_loki", "loki_auth_mode": "none"},
+	})
+	loki := object(t, object(t, root, "exporters"), "otlphttp/builtin_loki")
+	if _, exists := loki["headers"]; exists {
+		t.Fatalf("external no-auth Loki inherited Edge credentials: %#v", loki["headers"])
+	}
+}
+
 func TestRenderRejectsMissingBuiltInEndpoint(t *testing.T) {
 	if _, err := render(plugins.PluginConfig{Enabled: true, EdgeID: 1}); err == nil {
 		t.Fatal("render must reject a missing built-in Loki endpoint")

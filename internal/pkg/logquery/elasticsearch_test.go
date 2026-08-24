@@ -459,6 +459,38 @@ func TestElasticsearchClient_CountGroupedPagesCompositeAggregation(t *testing.T)
 	}
 }
 
+func TestElasticsearchClient_CountGroupedOmitsUnknownService(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/_search") {
+			http.NotFound(w, r)
+			return
+		}
+		writeTestJSON(t, w, map[string]any{"aggregations": map[string]any{"groups": map[string]any{
+			"buckets": []any{map[string]any{
+				"key":       map[string]any{"device_id": "42", "service_name": "unknown_service"},
+				"doc_count": 2,
+			}},
+		}}})
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewElasticsearchClient(ElasticsearchConfig{
+		Endpoint: server.URL, APIKey: "test-key", AllowInsecureHTTP: true,
+	}, server.Client(), nil)
+	if err != nil {
+		t.Fatalf("NewElasticsearchClient() error = %v", err)
+	}
+	groups, err := client.CountGrouped(t.Context(), validSearchRequest(), []string{"device_id", "service_name"})
+	if err != nil {
+		t.Fatalf("CountGrouped() error = %v", err)
+	}
+	if len(groups) != 1 || groups[0].Labels["device_id"] != "42" {
+		t.Fatalf("groups = %#v", groups)
+	}
+	if _, exists := groups[0].Labels["service_name"]; exists {
+		t.Fatalf("unknown service sentinel was retained: %#v", groups[0].Labels)
+	}
+}
+
 func TestNewElasticsearchClient_RejectsUnsafeEndpointAndIndexPattern(t *testing.T) {
 	cases := []ElasticsearchConfig{
 		{Endpoint: "http://es.example", APIKey: "key"},

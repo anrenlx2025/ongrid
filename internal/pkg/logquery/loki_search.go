@@ -214,7 +214,7 @@ func (c *Client) countGrouped(ctx context.Context, req SearchRequest, groupBy []
 		}
 		labels := make(map[string]string, len(groupBy))
 		for i, field := range groupBy {
-			if label := strings.TrimSpace(item.Metric[lokiFields[i]]); label != "" {
+			if label, ok := normalizeGroupedLabelValue(field, item.Metric[lokiFields[i]]); ok {
 				labels[field] = label
 			}
 		}

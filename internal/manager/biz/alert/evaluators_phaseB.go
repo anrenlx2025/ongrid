@@ -59,10 +59,7 @@ func (e *PipelineEvaluator) evaluateLogSearch(ctx context.Context, now time.Time
 			if !compareFloat(value, rule.Operator, rule.Threshold) {
 				continue
 			}
-			groupKey := "structured-log"
-			if len(group.Labels) > 0 {
-				groupKey = labelSetKey(group.Labels)
-			}
+			groupKey := logSearchGroupKey(rule.GroupBy, group.Labels)
 			dedupeKey := fmt.Sprintf("pipeline:%s:%s", rule.RuleKey, groupKey)
 			fired[dedupeKey] = struct{}{}
 			summary := fmt.Sprintf("%s: log count %d %s %g in %s (labels=%s)",
@@ -104,6 +101,22 @@ func (e *PipelineEvaluator) evaluateLogSearch(ctx context.Context, now time.Time
 		e.sweepRecovery(ctx, rule.RuleKey, fired, "structured log condition cleared", now)
 		done()
 	}
+}
+
+// logSearchGroupKey preserves the rule's complete group_by identity. The
+// generic labelSetKey intentionally removes collector provenance such as
+// source_id for metric alerts, but source_id is a first-class grouping
+// dimension for structured log rules.
+func logSearchGroupKey(groupBy []string, labels map[string]string) string {
+	if len(groupBy) == 0 {
+		return "structured-log"
+	}
+	parts := make([]string, 0, len(groupBy))
+	for _, field := range groupBy {
+		value := labels[field]
+		parts = append(parts, field+"="+strconv.Itoa(len(value))+":"+value)
+	}
+	return strings.Join(parts, ",")
 }
 
 // evaluateLogMatch runs every enabled log_match rule's count_over_time

@@ -45,6 +45,14 @@ func TestPluginEndpointResolverPublishesExternalSignalSettings(t *testing.T) {
 	if logs.Endpoint != "https://loki.example/otlp/v1/logs" || logs.BasicUser != "loki-user" || logs.BasicPassword != "loki-pass" || !logs.TLSInsecure || logs.UseTelemetryCredential {
 		t.Fatalf("logs target = %#v", logs)
 	}
+	edgeLogs, err := (logsLokiTargetResolver{resolver: resolver}).ResolveLokiTarget(context.Background())
+	if err != nil {
+		t.Fatalf("resolve ordinary Edge logs: %v", err)
+	}
+	if edgeLogs.Endpoint != logs.Endpoint || edgeLogs.BasicUser != logs.BasicUser || edgeLogs.BasicPassword != logs.BasicPassword ||
+		edgeLogs.TLSInsecure != logs.TLSInsecure || edgeLogs.UseEdgeCredentials {
+		t.Fatalf("ordinary Edge logs target = %#v", edgeLogs)
+	}
 	traces, err := resolver.ResolveTelemetryTarget(context.Background(), "traces")
 	if err != nil {
 		t.Fatalf("resolve traces: %v", err)

@@ -71,6 +71,30 @@ func TestLokiCountGroupedPreservesProductDimensions(t *testing.T) {
 	}
 }
 
+func TestLokiCountGroupedOmitsUnknownService(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{"resultType": "vector", "result": []any{
+				map[string]any{"metric": map[string]string{"device_id": "42", "service_name": "unknown_service"}, "value": []any{1787054400, "3"}},
+			}},
+		})
+	}))
+	t.Cleanup(server.Close)
+	client := NewWithHTTPClient(server.URL, server.Client(), nil)
+
+	groups, err := client.CountGrouped(t.Context(), validSearchRequest(), []string{"device_id", "service_name"})
+	if err != nil {
+		t.Fatalf("CountGrouped() error = %v", err)
+	}
+	if len(groups) != 1 || groups[0].Labels["device_id"] != "42" {
+		t.Fatalf("CountGrouped() = %#v", groups)
+	}
+	if _, exists := groups[0].Labels["service_name"]; exists {
+		t.Fatalf("unknown service must be omitted: %#v", groups[0].Labels)
+	}
+}
+
 func TestLokiHistogramAlignsFullBucketsAndCountsPartialTail(t *testing.T) {
 	start := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
 	end := start.Add(5*time.Minute + 30*time.Second)

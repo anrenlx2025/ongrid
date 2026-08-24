@@ -3,9 +3,11 @@ package logs_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -130,6 +132,15 @@ type fixedEdgeInventory []bizlogs.ConnectionEdge
 
 func (i fixedEdgeInventory) ListConnectionEdges(context.Context) ([]bizlogs.ConnectionEdge, error) {
 	return append([]bizlogs.ConnectionEdge(nil), i...), nil
+}
+
+type fixedLokiTargetResolver struct {
+	target bizlogs.LokiTarget
+	err    error
+}
+
+func (r fixedLokiTargetResolver) ResolveLokiTarget(context.Context) (bizlogs.LokiTarget, error) {
+	return r.target, r.err
 }
 
 type histogramCountingSearcher struct {
@@ -1138,6 +1149,98 @@ func TestServiceConnectionCheckIncludesOfflineLogEnabledEdgeWithoutBlockingCutov
 	stillSelected, err := repo.GetBackend(context.Background(), backend.ID)
 	if err != nil || stillSelected.Status != logsmodel.BackendStatusSelected {
 		t.Fatalf("connection failure changed the selected backend: %+v, %v", stillSelected, err)
+	}
+}
+
+func TestServiceLokiRuntimeUsesManagedExternalBasicAuth(t *testing.T) {
+	repo := logsstore.NewRepo(openTestDB(t))
+	svc := bizlogs.NewService(repo, nil, &echoProbeSearcher{})
+	svc.SetLokiTargetResolver(fixedLokiTargetResolver{target: bizlogs.LokiTarget{
+		Endpoint: "https://loki.example.com/otlp/v1/logs", BasicUser: "loki-user", BasicPassword: "loki-pass",
+		TLSInsecure: true,
+	}})
+
+	overlay, err := svc.PluginRuntimeOverlay(t.Context(), 42, "logs")
+	if err != nil {
+		t.Fatalf("PluginRuntimeOverlay: %v", err)
+	}
+	generation, ok := overlay["backend_generation"].(uint64)
+	if !ok || generation == 0 || overlay["loki_auth_mode"] != "basic" ||
+		overlay["loki_secret_slot"] != bizlogs.SecretSlotLokiBasicAuth || overlay["loki_tls_insecure_skip_verify"] != true {
+		t.Fatalf("Loki overlay = %#v", overlay)
+	}
+	if strings.Contains(fmt.Sprint(overlay), "loki-pass") {
+		t.Fatalf("Loki overlay leaked password: %#v", overlay)
+	}
+	secret, err := svc.PluginSecretForEdge(t.Context(), 42, "logs", bizlogs.SecretSlotLokiBasicAuth, generation)
+	if err != nil {
+		t.Fatalf("PluginSecretForEdge: %v", err)
+	}
+	wantContent := "Basic " + base64.StdEncoding.EncodeToString([]byte("loki-user:loki-pass"))
+	wantHash := sha256.Sum256([]byte(wantContent))
+	if secret.Generation != generation || secret.Content != wantContent || secret.SHA256 != hex.EncodeToString(wantHash[:]) {
+		t.Fatalf("Loki secret = %+v", secret)
+	}
+	if _, err := svc.PluginSecretForEdge(t.Context(), 42, "logs", bizlogs.SecretSlotLokiBasicAuth, generation+1); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("stale generation error = %v, want conflict", err)
+	}
+
+	svc.SetConnectionEdgeInventory(fixedEdgeInventory{{EdgeID: 42, Online: true}})
+	check, err := svc.StartConnectionCheck(t.Context(), 0)
+	if err != nil {
+		t.Fatalf("StartConnectionCheck: %v", err)
+	}
+	checkOverlay, err := svc.PluginRuntimeOverlay(t.Context(), 42, "logs")
+	if err != nil {
+		t.Fatalf("PluginRuntimeOverlay(check): %v", err)
+	}
+	if checkOverlay["backend_generation"] != check.Generation {
+		t.Fatalf("check overlay generation = %#v, want %d", checkOverlay, check.Generation)
+	}
+	checkSecret, err := svc.PluginSecretForEdge(t.Context(), 42, "logs", bizlogs.SecretSlotLokiBasicAuth, check.Generation)
+	if err != nil {
+		t.Fatalf("PluginSecretForEdge(check): %v", err)
+	}
+	if checkSecret.Generation != check.Generation || checkSecret.Content != wantContent {
+		t.Fatalf("check secret = %+v", checkSecret)
+	}
+}
+
+func TestServiceLokiRuntimeSelectsExplicitAuthMode(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target bizlogs.LokiTarget
+		mode   string
+	}{
+		{
+			name: "manager fallback uses Edge credentials",
+			target: bizlogs.LokiTarget{
+				Endpoint: "https://manager.example.com/loki/otlp/v1/logs", UseEdgeCredentials: true,
+			},
+			mode: "edge",
+		},
+		{
+			name: "external Loki without auth sends no credentials",
+			target: bizlogs.LokiTarget{
+				Endpoint: "https://loki.example.com/otlp/v1/logs",
+			},
+			mode: "none",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := bizlogs.NewService(logsstore.NewRepo(openTestDB(t)), nil, &echoProbeSearcher{})
+			svc.SetLokiTargetResolver(fixedLokiTargetResolver{target: tc.target})
+			overlay, err := svc.PluginRuntimeOverlay(t.Context(), 42, "logs")
+			if err != nil {
+				t.Fatalf("PluginRuntimeOverlay: %v", err)
+			}
+			if overlay["loki_auth_mode"] != tc.mode {
+				t.Fatalf("Loki auth mode = %#v, want %q", overlay, tc.mode)
+			}
+			if _, exists := overlay["loki_secret_slot"]; exists {
+				t.Fatalf("unexpected Loki secret slot: %#v", overlay)
+			}
+		})
 	}
 }
 

@@ -208,6 +208,17 @@ func NormalizeGroupBy(groupBy []string) ([]string, error) {
 	return fields, nil
 }
 
+// normalizeGroupedLabelValue keeps aggregation identities backend-neutral.
+// Loki's OTLP ingestion uses unknown_service when service.name is absent,
+// whereas Elasticsearch represents the same record with a missing field.
+func normalizeGroupedLabelValue(field, value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || (field == "service_name" && strings.EqualFold(value, "unknown_service")) {
+		return "", false
+	}
+	return value, true
+}
+
 // CursorCloser releases backend resources associated with an opaque search
 // cursor. Loki cursors are stateless and therefore do not implement it;
 // Elasticsearch cursors own a point-in-time search context and must be closed

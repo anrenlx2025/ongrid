@@ -6,9 +6,28 @@ import (
 	"fmt"
 	"strconv"
 
+	managerbizlogs "github.com/ongridio/ongrid/internal/manager/biz/logs"
 	devicemodel "github.com/ongridio/ongrid/internal/manager/model/device"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 )
+
+type logsLokiTargetResolver struct {
+	resolver pluginEndpointResolver
+}
+
+func (r logsLokiTargetResolver) ResolveLokiTarget(ctx context.Context) (managerbizlogs.LokiTarget, error) {
+	target, err := r.resolver.ResolveTelemetryTarget(ctx, "logs")
+	if err != nil {
+		return managerbizlogs.LokiTarget{}, err
+	}
+	return managerbizlogs.LokiTarget{
+		Endpoint:           target.Endpoint,
+		BasicUser:          target.BasicUser,
+		BasicPassword:      target.BasicPassword,
+		TLSInsecure:        target.TLSInsecure,
+		UseEdgeCredentials: target.UseTelemetryCredential,
+	}, nil
+}
 
 type logsRuntimeOverlayBase interface {
 	PluginRuntimeOverlay(ctx context.Context, edgeID uint64, plugin string) (map[string]interface{}, error)

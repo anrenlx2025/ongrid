@@ -521,8 +521,27 @@ func logsExporter(cfg plugins.PluginConfig, spec map[string]interface{}, backend
 				boolSpecDefault(spec, "tls_insecure_skip_verify", true),
 			)},
 		}
-		if auth := authorizationHeader(cfg.AuthUser, cfg.AuthPass); auth != "" {
-			exporter["headers"] = map[string]interface{}{"Authorization": auth}
+		if _, present := spec["loki_authorization"]; present {
+			return "", nil, errors.New("logs plugin: inline Loki authorization is forbidden")
+		}
+		authMode := strings.TrimSpace(stringSpec(spec, "loki_auth_mode"))
+		if authMode == "" {
+			authMode = "edge"
+		}
+		switch authMode {
+		case "edge":
+			if auth := authorizationHeader(cfg.AuthUser, cfg.AuthPass); auth != "" {
+				exporter["headers"] = map[string]interface{}{"Authorization": auth}
+			}
+		case "none":
+		case "basic":
+			authFile := strings.TrimSpace(stringSpec(spec, "loki_authorization_file"))
+			if !filepath.IsAbs(authFile) || strings.Contains(authFile, "..") {
+				return "", nil, errors.New("logs plugin: managed Loki authorization file is required")
+			}
+			exporter["headers"] = map[string]interface{}{"Authorization": "${file:" + authFile + "}"}
+		default:
+			return "", nil, errors.New("logs plugin: unsupported Loki auth mode")
 		}
 		return "otlphttp/builtin_loki", exporter, nil
 	}

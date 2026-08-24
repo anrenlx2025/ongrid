@@ -18,22 +18,24 @@ import (
 const (
 	logsExternalBackend = "external_elasticsearch"
 	logsESSecretSlot    = "elasticsearch_api_key"
+	logsLokiSecretSlot  = "loki_basic_auth"
 )
 
 var logsProbeIDPattern = regexp.MustCompile(`^ongrid-log-probe-[A-Za-z0-9_-]{20,64}$`)
-var logsManagedRuntimeFilePattern = regexp.MustCompile(`^(elasticsearch_api_key\.g[1-9][0-9]*(\.generation)?|elasticsearch_ca\.g[1-9][0-9]*\.pem|logs_probe\.g[1-9][0-9]*\.[0-9a-f]{16}\.log)$`)
+var logsManagedRuntimeFilePattern = regexp.MustCompile(`^(elasticsearch_api_key\.g[1-9][0-9]*(\.generation)?|loki_authorization\.g[1-9][0-9]*(\.generation)?|elasticsearch_ca\.g[1-9][0-9]*\.pem|logs_probe\.g[1-9][0-9]*\.[0-9a-f]{16}\.log)$`)
 
 func (t *TunnelConfigFetcher) materializeLogsRuntime(ctx context.Context, cfg PluginConfig) (PluginConfig, error) {
 	spec := copySpec(cfg.Spec)
 	backend := configString(spec, "backend")
 	probeID := configString(spec, "log_probe_id")
+	lokiSlot := configString(spec, "loki_secret_slot")
 	dir := filepath.Join(t.secretBaseDir, "logs")
 	if !cfg.Enabled {
 		t.pruneLogsRuntimeFiles(ctx, dir, nil, "disabled")
 		cfg.Spec = spec
 		return cfg, nil
 	}
-	if backend != logsExternalBackend && probeID == "" {
+	if backend != logsExternalBackend && lokiSlot == "" && probeID == "" {
 		t.pruneLogsRuntimeFiles(ctx, dir, nil, "inactive")
 		cfg.Spec = spec
 		return cfg, nil
@@ -59,6 +61,14 @@ func (t *TunnelConfigFetcher) materializeLogsRuntime(ctx context.Context, cfg Pl
 			spec["elasticsearch_ca_file"] = caPath
 		}
 		delete(spec, "elasticsearch_ca_pem")
+	}
+	if lokiSlot != "" {
+		authPath, authErr := t.fetchAndMaterializeLokiAuthorization(ctx, dir, generation, lokiSlot)
+		if authErr != nil {
+			return PluginConfig{}, authErr
+		}
+		spec["loki_authorization_file"] = authPath
+		delete(spec, "loki_secret_slot")
 	}
 
 	if probeID != "" {
@@ -87,7 +97,7 @@ func (t *TunnelConfigFetcher) pruneLogsRuntimeFiles(ctx context.Context, dir str
 func logsRuntimeKeepPaths(dir string, spec map[string]interface{}) map[string]struct{} {
 	keep := make(map[string]struct{}, 4)
 	for _, key := range []string{
-		"elasticsearch_api_key_file", "elasticsearch_ca_file", "log_probe_file",
+		"elasticsearch_api_key_file", "loki_authorization_file", "elasticsearch_ca_file", "log_probe_file",
 	} {
 		path := filepath.Clean(configString(spec, key))
 		if path == "." || filepath.Dir(path) != filepath.Clean(dir) {
@@ -98,7 +108,7 @@ func logsRuntimeKeepPaths(dir string, spec map[string]interface{}) map[string]st
 			continue
 		}
 		keep[name] = struct{}{}
-		if strings.HasPrefix(name, "elasticsearch_api_key.g") {
+		if strings.HasPrefix(name, "elasticsearch_api_key.g") || strings.HasPrefix(name, "loki_authorization.g") {
 			keep[name+".generation"] = struct{}{}
 		}
 	}
@@ -160,6 +170,31 @@ func (t *TunnelConfigFetcher) fetchAndMaterializeESKey(ctx context.Context, dir 
 		return "", fmt.Errorf("write Elasticsearch API key: %w", err)
 	}
 	return keyPath, nil
+}
+
+func (t *TunnelConfigFetcher) fetchAndMaterializeLokiAuthorization(ctx context.Context, dir string, generation uint64, slot string) (string, error) {
+	if slot != logsLokiSecretSlot {
+		return "", errors.New("unsupported Loki secret slot")
+	}
+	var secret tunnel.GetPluginSecretResponse
+	if err := t.client.Call(ctx, tunnel.MethodGetPluginSecret, tunnel.GetPluginSecretRequest{
+		Plugin: "logs", Slot: slot, Generation: generation,
+	}, &secret); err != nil {
+		return "", fmt.Errorf("fetch Loki Basic Auth generation %d: %w", generation, err)
+	}
+	content := strings.TrimSpace(secret.Content)
+	if secret.Generation != generation || content != secret.Content || !strings.HasPrefix(content, "Basic ") || strings.ContainsAny(content, "\r\n") {
+		return "", errors.New("invalid Loki secret response")
+	}
+	digest := sha256.Sum256([]byte(content))
+	if !strings.EqualFold(secret.SHA256, hex.EncodeToString(digest[:])) {
+		return "", errors.New("Loki secret checksum mismatch")
+	}
+	authPath := filepath.Join(dir, fmt.Sprintf("loki_authorization.g%d", generation))
+	if err := materializeGenerationFile(dir, authPath, generation, []byte(content)); err != nil {
+		return "", fmt.Errorf("write Loki Basic Auth: %w", err)
+	}
+	return authPath, nil
 }
 
 // ReportPluginConfigApplied implements ConfigApplyReporter. Only a connection

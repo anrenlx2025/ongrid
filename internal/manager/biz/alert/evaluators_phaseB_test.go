@@ -121,6 +121,52 @@ func TestEvaluateLogSearchComparesAndRecoversEachGroup(t *testing.T) {
 	}
 }
 
+func TestEvaluateLogSearchKeepsSourceIDInIncidentIdentity(t *testing.T) {
+	repo := newFakeRepo()
+	searcher := &scriptedStructuredLogSearcher{groups: []logquery.CountGroup{
+		{Labels: map[string]string{"device_id": "42", "source_id": "journald"}, Count: 3},
+		{Labels: map[string]string{"device_id": "42", "source_id": "kubernetes:pod"}, Count: 4},
+	}}
+	rule := LogSearchRule{
+		RuleKey: "host_errors", Name: "Host errors", ScopeType: model.RuleScopeHost,
+		GroupBy: []string{"device_id", "source_id"}, Window: 5 * time.Minute,
+		WindowText: "5m", Operator: ">=", Threshold: 2,
+	}
+	eval := newPipelineEvaluator(t, repo, &fakeNotifier{},
+		NewStaticRulesProvider(WithLogSearchRules([]LogSearchRule{rule})),
+		PipelineEvaluatorOpts{LogSearcher: searcher, Cooldown: time.Minute},
+	)
+
+	eval.EvaluateOnce(t.Context())
+	if len(repo.incidents) != 2 {
+		t.Fatalf("incidents = %d, want one per source_id", len(repo.incidents))
+	}
+	sources := make(map[string]bool, len(repo.incidents))
+	for _, incident := range repo.incidents {
+		labels, err := incident.Labels()
+		if err != nil {
+			t.Fatalf("decode incident labels: %v", err)
+		}
+		sources[labels["source_id"]] = true
+	}
+	if !sources["journald"] || !sources["kubernetes:pod"] {
+		t.Fatalf("incident sources = %#v", sources)
+	}
+}
+
+func TestLogSearchGroupKeyIsUnambiguous(t *testing.T) {
+	groupBy := []string{"device_id", "source_id"}
+	first := logSearchGroupKey(groupBy, map[string]string{
+		"device_id": "42,source_id=journald", "source_id": "kubernetes:pod",
+	})
+	second := logSearchGroupKey(groupBy, map[string]string{
+		"device_id": "42", "source_id": "journald,source_id=kubernetes:pod",
+	})
+	if first == second {
+		t.Fatalf("distinct structured-log groups share key %q", first)
+	}
+}
+
 func TestCompileLogMatch_Errors(t *testing.T) {
 	for _, c := range []struct {
 		name, spec string

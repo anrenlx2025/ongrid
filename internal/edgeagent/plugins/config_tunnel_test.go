@@ -603,6 +603,83 @@ func TestTunnelConfigFetcherMaterializesExternalElasticsearchSecret(t *testing.T
 	}
 }
 
+func TestTunnelConfigFetcherMaterializesExternalLokiSecret(t *testing.T) {
+	secret := "Basic dXNlcjpwYXNz"
+	digest := sha256.Sum256([]byte(secret))
+	client := &fakeTunnelClient{
+		resp: tunnel.GetPluginConfigsResponse{EdgeID: 42, Configs: map[string]tunnel.GetPluginConfigsEntry{
+			"logs": {
+				Enabled:  true,
+				Endpoint: "https://loki.example.com/otlp/v1/logs",
+				Spec: map[string]interface{}{
+					"backend": "builtin_loki", "backend_generation": float64(7),
+					"loki_auth_mode": "basic", "loki_secret_slot": "loki_basic_auth",
+				},
+			},
+		}},
+		secret: &tunnel.GetPluginSecretResponse{
+			Generation: 7, Content: secret, SHA256: hex.EncodeToString(digest[:]),
+		},
+	}
+	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
+	fetcher.secretBaseDir = t.TempDir()
+
+	got, err := fetcher.Fetch(t.Context())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if client.secretReq == nil || client.secretReq.Generation != 7 || client.secretReq.Slot != "loki_basic_auth" {
+		t.Fatalf("secret request = %+v", client.secretReq)
+	}
+	cfg := got["logs"]
+	authPath, _ := cfg.Spec["loki_authorization_file"].(string)
+	if authPath == "" || strings.Contains(fmt.Sprint(cfg.Spec), secret) {
+		t.Fatalf("materialized spec leaks or omits Loki secret path: %#v", cfg.Spec)
+	}
+	content, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatalf("read Loki authorization file: %v", err)
+	}
+	if string(content) != secret {
+		t.Fatalf("Loki authorization content = %q", content)
+	}
+	info, err := os.Stat(authPath)
+	if err != nil {
+		t.Fatalf("stat Loki authorization file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("Loki authorization mode = %o", info.Mode().Perm())
+	}
+	if _, exists := cfg.Spec["loki_secret_slot"]; exists {
+		t.Fatalf("Loki secret slot remained in supervisor config: %#v", cfg.Spec)
+	}
+}
+
+func TestTunnelConfigFetcherRejectsLokiAuthorizationWithNewline(t *testing.T) {
+	secret := "Basic dXNlcjpwYXNz\n"
+	digest := sha256.Sum256([]byte(secret))
+	client := &fakeTunnelClient{
+		resp: tunnel.GetPluginConfigsResponse{EdgeID: 42, Configs: map[string]tunnel.GetPluginConfigsEntry{
+			"logs": {
+				Enabled: true,
+				Spec: map[string]interface{}{
+					"backend": "builtin_loki", "backend_generation": float64(7),
+					"loki_auth_mode": "basic", "loki_secret_slot": "loki_basic_auth",
+				},
+			},
+		}},
+		secret: &tunnel.GetPluginSecretResponse{
+			Generation: 7, Content: secret, SHA256: hex.EncodeToString(digest[:]),
+		},
+	}
+	fetcher := NewTunnelConfigFetcher(client, []string{"logs"})
+	fetcher.secretBaseDir = t.TempDir()
+
+	if _, err := fetcher.Fetch(t.Context()); err == nil || !strings.Contains(err.Error(), "invalid Loki secret response") {
+		t.Fatalf("Fetch error = %v, want invalid Loki secret response", err)
+	}
+}
+
 func TestMaterializeLogsRuntimeUsesUniqueProbePathForSameGenerationRetry(t *testing.T) {
 	fetcher := NewTunnelConfigFetcher(nil, []string{"logs"})
 	fetcher.secretBaseDir = t.TempDir()
@@ -648,6 +725,7 @@ func TestMaterializeLogsRuntimePrunesManagedFilesWhenElasticsearchIsInactive(t *
 	}
 	managed := []string{
 		"elasticsearch_api_key.g9", "elasticsearch_api_key.g9.generation",
+		"loki_authorization.g9", "loki_authorization.g9.generation",
 		"elasticsearch_ca.g9.pem", "logs_probe.g9.0123456789abcdef.log",
 	}
 	for _, name := range managed {

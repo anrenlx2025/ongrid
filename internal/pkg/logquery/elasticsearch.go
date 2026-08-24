@@ -276,7 +276,7 @@ func (c *ElasticsearchClient) CountGrouped(ctx context.Context, req SearchReques
 				if err != nil {
 					return nil, fmt.Errorf("logquery: decode Elasticsearch group %q: %w", field, err)
 				}
-				if value != "" {
+				if value, ok := normalizeGroupedLabelValue(field, value); ok {
 					labels[field] = value
 				}
 			}

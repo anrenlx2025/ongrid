@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ import (
 const (
 	DefaultBackendName      = "external-elasticsearch"
 	SecretSlotESAPIKey      = "elasticsearch_api_key"
+	SecretSlotLokiBasicAuth = "loki_basic_auth"
 	managedLogsSecretPrefix = "ongrid-managed-logs-es-"
 	elasticsearchCredType   = "elasticsearch"
 	maxAPIKeyBytes          = 16 << 10
@@ -95,6 +97,21 @@ type GrafanaSyncer interface {
 
 type HostDeviceResolver interface {
 	LookupHostDevice(ctx context.Context, edgeID uint64) (uint64, error)
+}
+
+// LokiTargetResolver supplies the selected Loki data-plane target. Sensitive
+// Basic Auth values stay inside Manager and are only returned through the
+// authenticated plugin-secret RPC.
+type LokiTargetResolver interface {
+	ResolveLokiTarget(ctx context.Context) (LokiTarget, error)
+}
+
+type LokiTarget struct {
+	Endpoint           string
+	BasicUser          string
+	BasicPassword      string
+	TLSInsecure        bool
+	UseEdgeCredentials bool
 }
 
 type ConnectionEdge struct {
@@ -223,6 +240,7 @@ type Service struct {
 	grafana     GrafanaSyncer
 	devices     HostDeviceResolver
 	inventory   ConnectionEdgeInventory
+	lokiTarget  LokiTargetResolver
 	cacheKey    string
 	cachedES    *logquery.ElasticsearchClient
 	lokiCheck   *lokiConnectionCheckSession
@@ -274,6 +292,12 @@ func (s *Service) SetConnectionEdgeInventory(inventory ConnectionEdgeInventory) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.inventory = inventory
+}
+
+func (s *Service) SetLokiTargetResolver(resolver LokiTargetResolver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lokiTarget = resolver
 }
 
 func (s *Service) Save(ctx context.Context, input SaveInput) (view *BackendView, retErr error) {
@@ -772,6 +796,23 @@ func (s *Service) PluginRuntimeOverlay(ctx context.Context, edgeID uint64, plugi
 			"backend":            "builtin_loki",
 			"backend_generation": uint64(0),
 		}
+		target, configured, targetErr := s.resolveLokiTarget(ctx)
+		if targetErr != nil {
+			return nil, targetErr
+		}
+		if configured {
+			if target.UseEdgeCredentials {
+				overlay["loki_auth_mode"] = "edge"
+			} else {
+				overlay["loki_auth_mode"] = "none"
+				overlay["loki_tls_insecure_skip_verify"] = target.TLSInsecure
+				overlay["backend_generation"] = lokiTargetGeneration(target)
+				if target.BasicUser != "" {
+					overlay["loki_auth_mode"] = "basic"
+					overlay["loki_secret_slot"] = SecretSlotLokiBasicAuth
+				}
+			}
+		}
 		if assignment := s.lokiConnectionAssignment(edgeID); assignment != nil {
 			overlay["backend_id"] = uint64(0)
 			overlay["backend_generation"] = assignment.DesiredGeneration
@@ -804,9 +845,20 @@ func (s *Service) PluginRuntimeOverlay(ctx context.Context, edgeID uint64, plugi
 // Every authenticated Edge may obtain the currently selected generation; the
 // request can never select an arbitrary vault entry.
 func (s *Service) PluginSecretForEdge(ctx context.Context, edgeID uint64, plugin, slot string, generation uint64) (*PluginSecret, error) {
-	if edgeID == 0 || plugin != "logs" || slot != SecretSlotESAPIKey {
+	if edgeID == 0 || plugin != "logs" {
 		return nil, errs.ErrForbidden
 	}
+	switch slot {
+	case SecretSlotESAPIKey:
+		return s.elasticsearchSecretForEdge(ctx, edgeID, generation)
+	case SecretSlotLokiBasicAuth:
+		return s.lokiSecretForEdge(ctx, edgeID, generation)
+	default:
+		return nil, errs.ErrForbidden
+	}
+}
+
+func (s *Service) elasticsearchSecretForEdge(ctx context.Context, edgeID, generation uint64) (*PluginSecret, error) {
 	backend, assignment, err := s.backendForEdgeGeneration(ctx, edgeID, generation)
 	if err != nil {
 		return nil, err
@@ -836,6 +888,33 @@ func (s *Service) PluginSecretForEdge(ctx context.Context, edgeID uint64, plugin
 	}
 	sum := sha256.Sum256([]byte(apiKey))
 	return &PluginSecret{Generation: backend.Generation, Content: apiKey, SHA256: hex.EncodeToString(sum[:])}, nil
+}
+
+func (s *Service) lokiSecretForEdge(ctx context.Context, edgeID, generation uint64) (*PluginSecret, error) {
+	backend, _, err := s.runtimeBackendForEdge(ctx, edgeID)
+	if err != nil {
+		return nil, err
+	}
+	if backend != nil {
+		return nil, fmt.Errorf("%w: Loki is not the selected log backend", errs.ErrConflict)
+	}
+	target, configured, err := s.resolveLokiTarget(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !configured || target.UseEdgeCredentials || target.BasicUser == "" {
+		return nil, errs.ErrForbidden
+	}
+	expectedGeneration := lokiTargetGeneration(target)
+	if assignment := s.lokiConnectionAssignment(edgeID); assignment != nil {
+		expectedGeneration = assignment.DesiredGeneration
+	}
+	if generation == 0 || generation != expectedGeneration {
+		return nil, fmt.Errorf("%w: stale Loki target generation", errs.ErrConflict)
+	}
+	content := "Basic " + base64.StdEncoding.EncodeToString([]byte(target.BasicUser+":"+target.BasicPassword))
+	sum := sha256.Sum256([]byte(content))
+	return &PluginSecret{Generation: generation, Content: content, SHA256: hex.EncodeToString(sum[:])}, nil
 }
 
 // MarkApplied closes the real-path check: a successful local Collector start
@@ -981,6 +1060,48 @@ func (s *Service) runtimeBackendForEdge(ctx context.Context, edgeID uint64) (*mo
 		}
 	}
 	return selected, nil, nil
+}
+
+func (s *Service) resolveLokiTarget(ctx context.Context) (LokiTarget, bool, error) {
+	s.mu.RLock()
+	resolver := s.lokiTarget
+	s.mu.RUnlock()
+	if resolver == nil {
+		return LokiTarget{}, false, nil
+	}
+	target, err := resolver.ResolveLokiTarget(ctx)
+	if err != nil {
+		return LokiTarget{}, false, fmt.Errorf("resolve Loki data-plane target: %w", err)
+	}
+	target.Endpoint = strings.TrimSpace(target.Endpoint)
+	target.BasicUser = strings.TrimSpace(target.BasicUser)
+	target.BasicPassword = strings.TrimSpace(target.BasicPassword)
+	if target.Endpoint == "" {
+		return LokiTarget{}, false, nil
+	}
+	if target.UseEdgeCredentials && (target.BasicUser != "" || target.BasicPassword != "") {
+		return LokiTarget{}, false, fmt.Errorf("%w: Loki target cannot combine Edge and Basic Auth credentials", errs.ErrInvalid)
+	}
+	if target.BasicUser == "" && target.BasicPassword != "" {
+		return LokiTarget{}, false, fmt.Errorf("%w: Loki Basic Auth user is required when password is configured", errs.ErrInvalid)
+	}
+	return target, true, nil
+}
+
+func lokiTargetGeneration(target LokiTarget) uint64 {
+	payload := strings.Join([]string{
+		target.Endpoint,
+		target.BasicUser,
+		target.BasicPassword,
+		strconv.FormatBool(target.TLSInsecure),
+		strconv.FormatBool(target.UseEdgeCredentials),
+	}, "\x00")
+	sum := sha256.Sum256([]byte(payload))
+	generation := binary.BigEndian.Uint64(sum[:8]) & ((1 << 52) - 1)
+	if generation == 0 {
+		return 1
+	}
+	return generation
 }
 
 func (s *Service) backendForEdgeGeneration(ctx context.Context, edgeID, generation uint64) (*model.Backend, *model.BackendAssignment, error) {

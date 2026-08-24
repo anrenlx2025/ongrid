@@ -1103,6 +1103,7 @@ func main() {
 	logsBackendSvc := managerbizlogs.NewService(logsBackendRepo, secretUC, lokiLogClient, log.With(slog.String("comp", "logs-backend")))
 	logsBackendSvc.SetLogAlertMigrator(alertUC)
 	logsBackendSvc.SetHostDeviceResolver(edgeDeviceRepo)
+	logsBackendSvc.SetLokiTargetResolver(logsLokiTargetResolver{resolver: pluginEndpointResolver})
 	logsBackendSvc.SetConnectionEdgeInventory(logsConnectionEdgeInventory{edges: edgeUC, configs: pluginConfigUC})
 	logsBackendSvc.SetGrafanaSyncer(grafanaSvc)
 	grafanaSvc.SetLogsDatasourceProvider(logsBackendSvc.SelectedElasticsearchDatasource)
