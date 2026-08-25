@@ -2995,6 +2995,20 @@ func (r lokiQueryEndpointResolver) ResolveLokiEndpoint(ctx context.Context) (pkg
 }
 
 func (r pluginEndpointResolver) Endpoint(ctx context.Context, plugin string) string {
+	// Keep the Edge wire contract on Loki's legacy push URL. Pre-OTel Edge
+	// releases pass it directly to Promtail, while current releases translate
+	// it to OTLP locally. Sending OTLP here would break every old Edge as soon
+	// as Manager reloads its plugin config.
+	if plugin == "logs" {
+		if r.loki != nil {
+			if u := edgeReachableLokiURL(r.loki.URL(ctx)); u != "" {
+				return u + "/loki/api/v1/push"
+			}
+		}
+		if r.publicURL != "" {
+			return strings.TrimRight(r.publicURL, "/") + "/loki/api/v1/push"
+		}
+	}
 	target, err := r.ResolveTelemetryTarget(ctx, plugin)
 	if err != nil {
 		return ""
