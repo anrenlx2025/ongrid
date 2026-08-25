@@ -721,7 +721,8 @@ publish-edge-version-attachments: ## [release] 自动创建并上传当前 VERSI
 	CNB_RELEASE_TARGET_COMMITISH="$(CNB_RELEASE_TARGET_COMMITISH)" \
 		bash scripts/ensure-cnb-release.sh "$(VERSION)" "$(CNB_REPO_SLUG)" \
 		"Ongrid Edge $(VERSION)" \
-		"Ongrid Edge binaries for $(VERSION). Source: https://github.com/ongridio/ongrid"; \
+		"Ongrid Edge binaries for $(VERSION). Source: https://github.com/ongridio/ongrid" \
+		"$(if $(findstring -,$(VERSION)),true,false)"; \
 	CNB_API_ENDPOINT="$(CNB_API_ENDPOINT)" \
 		bash scripts/publish-cnb-release-attachments.sh "$(VERSION)" "$(CNB_REPO_SLUG)" "$(CNB_RELEASE_BASE_URL)" "$(CNB_ATTACHMENTS_IMAGE)" $$files
 

@@ -10,6 +10,13 @@ command -v ruby >/dev/null 2>&1 || { echo "ruby is required" >&2; exit 1; }
 ruby -ryaml -e '
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
 jobs = workflow.fetch("jobs")
+tag_pattern = Regexp.new(workflow.fetch("env").fetch("RELEASE_TAG_PATTERN"))
+%w[v0.14.0 v0.14.0-rc.1 v1.2.3-beta.2].each do |tag|
+  raise "valid release tag rejected: #{tag}" unless tag.match?(tag_pattern)
+end
+%w[v0.14 v0.14.0-rc. v01.2.3 latest].each do |tag|
+  raise "invalid release tag accepted: #{tag}" if tag.match?(tag_pattern)
+end
 
 manager = jobs.fetch("manager-image")
 raise "manager platform jobs must run on their native matrix runner" unless manager.fetch("runs-on") == "${{ matrix.runner }}"
@@ -92,6 +99,7 @@ release_run = publish_release.fetch("run")
 raise "GitHub Release does not publish the amd64 package" unless release_run.include?("linux-amd64.tar.xz")
 raise "GitHub Release does not publish the arm64 package" unless release_run.include?("linux-arm64.tar.xz")
 raise "GitHub Release still publishes the merged universal package" if release_run.match?(/linux\.tar\.xz/)
+raise "prerelease tags are not marked as prereleases" unless release_run.include?("release_flags+=(--prerelease)")
 ' "$workflow"
 
 grep -Fxq 'PACKAGE_EDGE_TARGETS ?= linux-amd64 linux-arm64' "$makefile" \
@@ -100,6 +108,8 @@ grep -Fxq 'EDGE_ATTACHMENT_TARGETS ?= linux-amd64 linux-arm64' "$makefile" \
     || { echo "CNB Edge releases do not declare both architectures" >&2; exit 1; }
 grep -Fq 'build-edge-version-attachments: build-edge-linux-amd64 build-edge-linux-arm64' "$makefile" \
     || { echo "versioned CNB Edge release does not build both architectures" >&2; exit 1; }
+grep -Fq '"$(if $(findstring -,$(VERSION)),true,false)"' "$makefile" \
+    || { echo "versioned CNB Edge release does not preserve prerelease status" >&2; exit 1; }
 
 grep -Eq '^RELEASE_IMAGE_DIGEST_DIR \?= dist/release-digests$' "$makefile" \
     || { echo "Makefile manager digest directory does not match the workflow artifacts" >&2; exit 1; }

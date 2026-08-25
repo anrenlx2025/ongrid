@@ -3,10 +3,11 @@
 
 set -euo pipefail
 
-TAG=${1:?usage: ensure-cnb-release.sh <tag> <repo-slug> <title> <description>}
+TAG=${1:?usage: ensure-cnb-release.sh <tag> <repo-slug> <title> <description> [prerelease]}
 REPO_SLUG=${2:?repository slug}
 TITLE=${3:?release title}
 DESCRIPTION=${4:?release description}
+PRERELEASE=${5:-false}
 
 : "${CNB_TOKEN:?CNB_TOKEN with repo-release read/write permission is required}"
 
@@ -19,6 +20,10 @@ TARGET_COMMITISH=${CNB_RELEASE_TARGET_COMMITISH:-main}
 }
 [[ "$REPO_SLUG" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]] || {
     echo "ensure-cnb-release: invalid repository slug: $REPO_SLUG" >&2
+    exit 2
+}
+[[ "$PRERELEASE" == true || "$PRERELEASE" == false ]] || {
+    echo "ensure-cnb-release: prerelease must be true or false" >&2
     exit 2
 }
 
@@ -39,8 +44,9 @@ get_release() {
 }
 
 verify_release_tag() {
-    jq -e --arg tag "$TAG" '.tag_name == $tag' "$response_file" >/dev/null || {
-        echo "ensure-cnb-release: CNB returned a mismatched Release for $TAG" >&2
+    jq -e --arg tag "$TAG" --argjson prerelease "$PRERELEASE" \
+        '.tag_name == $tag and .prerelease == $prerelease' "$response_file" >/dev/null || {
+        echo "ensure-cnb-release: CNB returned mismatched metadata for $TAG" >&2
         exit 1
     }
 }
@@ -64,13 +70,14 @@ jq -nc \
     --arg target "$TARGET_COMMITISH" \
     --arg title "$TITLE" \
     --arg description "$DESCRIPTION" \
+    --argjson prerelease "$PRERELEASE" \
     '{
         tag_name: $tag,
         target_commitish: $target,
         name: $title,
         body: $description,
         draft: false,
-        prerelease: false,
+        prerelease: $prerelease,
         make_latest: "false"
     }' >"$tmp_dir/request.json"
 
