@@ -74,7 +74,7 @@ metadata:
    - 改了什么 → `query_change_events`（around_ts=fired_at）查症状前后有没有人改过规则 / 配置 / 设备——**产品侧变更常常就是 0 号病人**（注意它看不到主机外部改动）
    - 依赖上游 → `expand_topology` 顺边往**上游**走（不是只看 blast-radius 往下）/ `find_topology_node`
    - 调用链 → `query_traceql` 跟 caller→callee、找最慢 span 的**发起方**
-   - 首条错误 → `query_logql` 按 device_id grep，找 fired_at **之前**的第一条 ERROR/PANIC/OOM
+   - 首条错误 → `query_logql` 按 device_id 和关键词检索，找 fired_at **之前**的第一条 ERROR/PANIC/OOM
    - 谁先偏离 → `query_promql` 看"哪个指标在它之前先动"
 4. **递归上溯**：把上游候选当新的当前点，回第 3 步继续。直到：
    - **触底** → 再往上没有 in-system 上游（定位到某进程 / 某次变更 / 某外部依赖）= 0 号病人；

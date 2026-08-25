@@ -11,7 +11,7 @@ type IncidentFilter struct {
 	Status   string
 	Severity string
 	RuleKey  string
-	DeviceID   *uint64
+	DeviceID *uint64
 	Limit    int
 	Offset   int
 }
@@ -23,6 +23,15 @@ type ChannelFilter struct {
 	ChannelType string
 	Limit       int
 	Offset      int
+}
+
+// LegacyLogRuleMigration is one compare-and-swap update prepared by the biz
+// layer. Repositories apply the complete batch transactionally so backend
+// selection never observes a partially migrated alert set.
+type LegacyLogRuleMigration struct {
+	ID             uint64
+	FromKind       string
+	ConditionsJSON string
 }
 
 // Repo is the biz-layer persistence contract for the alert sub-domain.
@@ -98,6 +107,7 @@ type Repo interface {
 	GetRuleByID(ctx context.Context, id uint64) (*model.Rule, error)
 	CreateRule(ctx context.Context, in *model.Rule) error
 	UpdateRule(ctx context.Context, id uint64, in *model.Rule) error
+	MigrateLegacyLogRules(ctx context.Context, migrations []LegacyLogRuleMigration) error
 	UpdateRuleEnabled(ctx context.Context, id uint64, enabled bool) error
 	DeleteRule(ctx context.Context, id uint64) error
 }

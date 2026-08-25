@@ -11,6 +11,10 @@ func TestLabelSetKey_IgnoresProvenanceLabels(t *testing.T) {
 	if labelSetKey(withSrc) != labelSetKey(without) {
 		t.Errorf("ongrid_source must not split the key: with=%q without=%q", labelSetKey(withSrc), labelSetKey(without))
 	}
+	withProductSrc := map[string]string{"device_id": "1", "mountpoint": "/", "source_id": "embedded"}
+	if labelSetKey(withProductSrc) != labelSetKey(without) {
+		t.Errorf("source_id must not split the key: with=%q without=%q", labelSetKey(withProductSrc), labelSetKey(without))
+	}
 
 	// __name__ is still stripped; real identity labels still distinguish.
 	if got := labelSetKey(map[string]string{"__name__": "node_x", "device_id": "1"}); got != "device_id=1" {

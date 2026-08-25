@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	biz "github.com/ongridio/ongrid/internal/manager/biz/alert"
 	model "github.com/ongridio/ongrid/internal/manager/model/alert"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 )
@@ -277,6 +278,46 @@ func TestDeleteRuleHardDeletesAndFreesRuleKey(t *testing.T) {
 	}
 	if err := repo.CreateRule(ctx, second); err != nil {
 		t.Fatalf("CreateRule second with same key: %v", err)
+	}
+}
+
+func TestMigrateLegacyLogRulesIsAtomicAndCompareAndSwapProtected(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := t.Context()
+	rules := []*model.Rule{
+		{RuleKey: "legacy_match", Kind: model.RuleKindLogMatch, Name: "match", ScopeType: model.RuleScopeGlobal, JoinMode: model.RuleJoinModeAll, Severity: "warning", ConditionsJSON: `{}`},
+		{RuleKey: "legacy_volume", Kind: model.RuleKindLogVolume, Name: "volume", ScopeType: model.RuleScopeGlobal, JoinMode: model.RuleJoinModeAll, Severity: "warning", ConditionsJSON: `{}`},
+	}
+	for _, rule := range rules {
+		if err := repo.CreateRule(ctx, rule); err != nil {
+			t.Fatalf("CreateRule(%s): %v", rule.RuleKey, err)
+		}
+	}
+	bad := []biz.LegacyLogRuleMigration{
+		{ID: rules[0].ID, FromKind: model.RuleKindLogMatch, ConditionsJSON: `{"window":"5m"}`},
+		{ID: rules[1].ID, FromKind: model.RuleKindLogMatch, ConditionsJSON: `{"window":"5m"}`},
+	}
+	if err := repo.MigrateLegacyLogRules(ctx, bad); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("MigrateLegacyLogRules(bad) error = %v", err)
+	}
+	for _, rule := range rules {
+		got, err := repo.GetRuleByID(ctx, rule.ID)
+		if err != nil || got.Kind != rule.Kind || got.ConditionsJSON != `{}` {
+			t.Fatalf("rule %d after rolled-back migration = %#v, %v", rule.ID, got, err)
+		}
+	}
+	good := []biz.LegacyLogRuleMigration{
+		{ID: rules[0].ID, FromKind: model.RuleKindLogMatch, ConditionsJSON: `{"window":"5m"}`},
+		{ID: rules[1].ID, FromKind: model.RuleKindLogVolume, ConditionsJSON: `{"window":"5m"}`},
+	}
+	if err := repo.MigrateLegacyLogRules(ctx, good); err != nil {
+		t.Fatalf("MigrateLegacyLogRules(good): %v", err)
+	}
+	for _, rule := range rules {
+		got, err := repo.GetRuleByID(ctx, rule.ID)
+		if err != nil || got.Kind != model.RuleKindLogSearch || got.ConditionsJSON != `{"window":"5m"}` {
+			t.Fatalf("rule %d after migration = %#v, %v", rule.ID, got, err)
+		}
 	}
 }
 

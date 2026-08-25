@@ -352,13 +352,13 @@ type duSummaryResultEnvelope struct {
 // request didn't include "/", Hint is non-empty and explicitly tells
 // the model to re-call with paths=["/"].
 type duCoverage struct {
-	RootMount      string  `json:"root_mount,omitempty"`
-	FsUsedBytes    int64   `json:"fs_used_bytes,omitempty"`
-	FsUsedHuman    string  `json:"fs_used_human,omitempty"`
-	ScannedBytes   int64   `json:"scanned_bytes,omitempty"`
-	ScannedHuman   string  `json:"scanned_human,omitempty"`
-	ExplainedPct   float64 `json:"explained_pct,omitempty"`
-	Hint           string  `json:"hint,omitempty"`
+	RootMount    string  `json:"root_mount,omitempty"`
+	FsUsedBytes  int64   `json:"fs_used_bytes,omitempty"`
+	FsUsedHuman  string  `json:"fs_used_human,omitempty"`
+	ScannedBytes int64   `json:"scanned_bytes,omitempty"`
+	ScannedHuman string  `json:"scanned_human,omitempty"`
+	ExplainedPct float64 `json:"explained_pct,omitempty"`
+	Hint         string  `json:"hint,omitempty"`
 }
 
 // DuSummaryTool is the BaseTool-shape implementation of du_summary.

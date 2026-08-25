@@ -83,6 +83,7 @@ import (
 	managerbizdevice "github.com/ongridio/ongrid/internal/manager/biz/device"
 	managerbizedge "github.com/ongridio/ongrid/internal/manager/biz/edge"
 	managerbizk8s "github.com/ongridio/ongrid/internal/manager/biz/k8s"
+	managerbizlogs "github.com/ongridio/ongrid/internal/manager/biz/logs"
 	managerbizmetric "github.com/ongridio/ongrid/internal/manager/biz/metric"
 	managerbizpromwrite "github.com/ongridio/ongrid/internal/manager/biz/promwrite"
 	managerbiztopology "github.com/ongridio/ongrid/internal/manager/biz/topology"
@@ -90,9 +91,11 @@ import (
 	managerdevicedata "github.com/ongridio/ongrid/internal/manager/data/device/store"
 	manageredgedata "github.com/ongridio/ongrid/internal/manager/data/edge/store"
 	managerk8sdata "github.com/ongridio/ongrid/internal/manager/data/k8s/store"
+	managerlogsdata "github.com/ongridio/ongrid/internal/manager/data/logs/store"
 	managermetricdata "github.com/ongridio/ongrid/internal/manager/data/metric/store"
 	managertopologydata "github.com/ongridio/ongrid/internal/manager/data/topology/store"
 	managermodelalert "github.com/ongridio/ongrid/internal/manager/model/alert"
+	managermodeledge "github.com/ongridio/ongrid/internal/manager/model/edge"
 
 	managerbizaiops "github.com/ongridio/ongrid/internal/manager/biz/aiops"
 	aiopsagent "github.com/ongridio/ongrid/internal/manager/biz/aiops/agent"
@@ -269,6 +272,7 @@ func main() {
 		managerdevicedata.Migrate,
 		manageredgedata.Migrate,
 		managerk8sdata.Migrate,
+		managerlogsdata.Migrate,
 		managertopologydata.Migrate,
 		managermetricdata.Migrate,
 		manageraiopsdata.Migrate,
@@ -294,6 +298,10 @@ func main() {
 	} else if migrated > 0 {
 		log.Info("migrated legacy workflow IM notification tools", slog.Int("flow_count", migrated))
 	}
+	// The encrypted credential vault is shared by multiple bounded contexts.
+	// Construct it immediately after migrations so log backend wiring can use
+	// separate read/write API keys without delaying the HTTP/query services.
+	secretUC := managerbizsecret.NewUsecase(managersecretdata.NewRepo(db))
 	sqlDB, errDB := db.DB()
 	if errDB != nil {
 		log.Warn("gorm.DB() failed; DB pool metrics and health ping will be unavailable", slog.Any("err", errDB))
@@ -981,6 +989,7 @@ func main() {
 	if err := alertRules.Refresh(rootCtx); err != nil {
 		log.Warn("alert rules initial refresh", slog.Any("err", err))
 	}
+	alertUC.SetRuleCacheRefresher(alertRules)
 	alertResolver := managerbizalert.NewDBChannelResolver(alertRepo, cfg.Notification.DefaultChannels)
 	// Honour rule-level notify_channel_ids overrides — resolver looks
 	// the rule up by key and reads its NotifyChannelIDsJSON.
@@ -1082,20 +1091,44 @@ func main() {
 	}
 	metricHandler := managerservermetric.NewPromHandler(metricPromQuerier, hostDeviceResolverAdapter{edgeDeviceRepo})
 
-	// Loki query proxy. Enables the in-product Logs page to
-	// run LogQL without exposing /loki/* read paths through nginx. The
-	// data plane /loki/api/v1/push route stays auth_request-gated for
-	// ingest only — for the data-plane-vs-control-plane
-	// separation.
-	var logsHandler *managerserverlogs.Handler
-	if cfg.Logs.URL != "" {
-		logsHandler = managerserverlogs.NewHandler(
-			pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "logquery"))),
-		)
-	} else {
-		// Loki disabled — handler installs but every route returns 503.
-		logsHandler = managerserverlogs.NewHandler(nil)
-	}
+	// Log control/query plane. Loki remains the built-in default; selecting an
+	// external Elasticsearch configuration routes every log query directly to
+	// Elasticsearch. Log payloads never traverse this service; Edge collectors
+	// still write directly to the selected data-plane endpoint.
+	lokiLogClient := pkglogquery.NewRuntimeClient(
+		lokiQueryEndpointResolver{resolver: lokiResolver},
+		log.With(slog.String("comp", "logquery")),
+	)
+	logsBackendRepo := managerlogsdata.NewRepo(db)
+	logsBackendSvc := managerbizlogs.NewService(logsBackendRepo, secretUC, lokiLogClient, log.With(slog.String("comp", "logs-backend")))
+	logsBackendSvc.SetLogAlertMigrator(alertUC)
+	logsBackendSvc.SetHostDeviceResolver(edgeDeviceRepo)
+	logsBackendSvc.SetLokiTargetResolver(logsLokiTargetResolver{resolver: pluginEndpointResolver})
+	logsBackendSvc.SetConnectionEdgeInventory(logsConnectionEdgeInventory{edges: edgeUC, configs: pluginConfigUC})
+	logsBackendSvc.SetGrafanaSyncer(grafanaSvc)
+	grafanaSvc.SetLogsDatasourceProvider(logsBackendSvc.SelectedElasticsearchDatasource)
+	go func() {
+		// Reconcile the selected backend after upgrades. Wait until the
+		// embedded Grafana bootstrap has had a chance to persist its SA token.
+		timer := time.NewTimer(15 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-rootCtx.Done():
+			return
+		case <-timer.C:
+		}
+		syncCtx, cancel := context.WithTimeout(rootCtx, 20*time.Second)
+		defer cancel()
+		if err := grafanaSvc.SyncLogsDatasource(syncCtx); err != nil {
+			log.Warn("logs: initial grafana datasource sync failed (retry from integrations)", slog.Any("err", err))
+		} else {
+			log.Info("logs: selected grafana datasource synced at boot")
+		}
+	}()
+	pluginConfigUC.SetRuntimeOverlayProvider(logsRuntimeOverlayProvider{
+		base: logsBackendSvc, hosts: edgeDeviceRepo, devices: deviceUC, clusters: topologyUC,
+	})
+	logsHandler := managerserverlogs.NewHandlerWithServices(lokiLogClient, logsBackendSvc, logsBackendSvc)
 
 	// Tempo query proxy. Mirrors the Loki block above — same role for the
 	// trace signal. Enables the in-product Traces page to run TraceQL /
@@ -1170,6 +1203,7 @@ func main() {
 		MetricIngester: metricIngestSvc,
 		PromIngester:   promWiring,
 		PluginConfigUC: pluginConfigUC,
+		PluginSecrets:  logsBackendSvc,
 		WebshellRouter: webshellRouter,
 		// DeviceResolver wires the post-split edge_id → device_id
 		// resolution path (push pipeline). The biz junction repo is the
@@ -1199,6 +1233,10 @@ func main() {
 	// real-time push to the affected edge.
 	pluginConfigUC.SetNotifier(fbClient)
 	pluginConfigUC.SetDatabaseMetricsSecretWriter(fbClient)
+	logsBackendSvc.SetBackendChangeNotifier(&logsPluginReloadBroadcaster{
+		edges: edgeUC, notifier: fbClient,
+		log: log.With(slog.String("comp", "logs-backend-change-notifier")),
+	})
 
 	// WebSSH HTTP handler — uses fbClient.OpenStream to layer ssh +
 	// pty over a raw byte stream into edge:127.0.0.1:22. SSH client
@@ -1219,13 +1257,11 @@ func main() {
 	// instead of a hard error. Built before the AIOps runtime so
 	// conversational draft tools can reuse the same service path.
 	{
-		previewDeps := managerbizalert.PreviewDeps{}
+		previewDeps := managerbizalert.PreviewDeps{Search: logsBackendSvc}
 		if promQueryClient != nil {
 			previewDeps.Prom = promQueryClient
 		}
-		if cfg.Logs.URL != "" {
-			previewDeps.Log = pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "alert-preview-log")))
-		}
+		previewDeps.Log = lokiLogClient
 		alertSvc.SetPreviewDeps(previewDeps)
 	}
 
@@ -1254,13 +1290,10 @@ func main() {
 	if promQueryClient != nil {
 		promQuerier = promQueryClient
 	}
-	// LogQuerier / TraceQuerier mirror the same pattern: build a client
-	// only when the URL is configured so the corresponding query_logql /
-	// query_traceql tools register conditionally.
-	var logQuerier aiopstools.LogQuerier
-	if cfg.Logs.URL != "" {
-		logQuerier = pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "aiops-logquery")))
-	}
+	// query_logql is wired to the selected-backend service so its stable name
+	// and arguments work for both backends while each keeps its own response
+	// shape. TraceQL remains conditionally available by URL.
+	var logQuerier aiopstools.LogQuerier = logsBackendSvc
 	var traceQuerier aiopstools.TraceQuerier
 	if cfg.Traces.URL != "" {
 		traceQuerier = pkgtracequery.New(cfg.Traces.URL, log.With(slog.String("comp", "aiops-tracequery")))
@@ -1658,15 +1691,10 @@ func main() {
 	imbridgeStreamSupervisor.RegisterFactory("slack", managerbizimbridgeslack.NewStreamFactory(log))
 	go imbridgeStreamSupervisor.Run(rootCtx)
 
-	// @-mention search backend (HLD: ChatInput @-popover). Wires
-	// device + alert biz + Loki client. Any nil dep just means that
-	// type returns no results — graceful for deployments without Loki
-	// or with the alert bounded context disabled.
-	var mentionLogClient *pkglogquery.Client
-	if cfg.Logs.URL != "" {
-		mentionLogClient = pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "mention-logquery")))
-	}
-	mentionSearcher := managerbizaiopsmentions.New(deviceUC, alertUC, mentionLogClient)
+	// @-mention search backend (HLD: ChatInput @-popover). The shared runtime
+	// Loki client follows integration URL, auth and TLS edits without restart.
+	// Nil device/alert dependencies still degrade their corresponding types.
+	mentionSearcher := managerbizaiopsmentions.New(deviceUC, alertUC, lokiLogClient)
 	aiopsHandler.SetMentionSearcher(mentionSearcher)
 	// Provider catalog → /v1/aiops/models. The router has the canonical
 	// list; the handler reads from it via a narrow interface so wiring
@@ -2055,8 +2083,7 @@ func main() {
 	}, log.With(slog.String("comp", "marketplace")))
 	marketplaceHandler := managerservermarketplace.NewHandler(mpUC)
 	// HLD-017 generic secret vault: the single semantics-agnostic credential
-	// store installed skills (and future external-MCP clients) inject from.
-	secretUC := managerbizsecret.NewUsecase(managersecretdata.NewRepo(db))
+	// store installed skills, external MCP clients, and the log backend use.
 	// The network device domain owns polling but resolves encrypted credentials
 	// through this narrow vault facade. Only the credential name is persisted.
 	networkDiscoveryUC.SetCredentialResolver(secretUC)
@@ -2800,13 +2827,9 @@ func main() {
 	}
 	if cfg.Alert.Enabled {
 		eg.Go(func() error { return alertRules.Loop(egCtx) })
-		// Phase-B log_match / log_volume kinds need a Loki
-		// client. nil means those kinds are silently skipped per tick;
-		// they still appear in the rules cache for UI listing.
-		var alertLogQuerier managerbizalert.LogQuerier
-		if cfg.Logs.URL != "" {
-			alertLogQuerier = pkglogquery.New(cfg.Logs.URL, log.With(slog.String("comp", "alert-logquery")))
-		}
+		// Legacy log_match / log_volume kinds still need a Loki client.
+		// New log_search rules use logsBackendSvc below and therefore follow
+		// the same Loki/Elasticsearch history plan as the Logs UI.
 		pipelineEval := managerbizalert.NewPipelineEvaluator(managerbizalert.PipelineEvaluatorOpts{
 			Usecase:         alertUC,
 			Rules:           alertRules,
@@ -2818,7 +2841,8 @@ func main() {
 			Interval:        cfg.Alert.EvaluatorInterval,
 			EdgeLister:      edgeUC,
 			PromQuerier:     alertPromQuerier,
-			LogQuerier:      alertLogQuerier,
+			LogQuerier:      lokiLogClient,
+			LogSearcher:     logsBackendSvc,
 			DeviceIdentityResolver: func(ctx context.Context, deviceID uint64) (managerbizalert.DeviceIdentity, error) {
 				device, err := deviceUC.Get(ctx, deviceID)
 				if err != nil {
@@ -2953,6 +2977,23 @@ type telemetryBackendResolver interface {
 	TLSInsecure(ctx context.Context) bool
 }
 
+type lokiQueryEndpointResolver struct {
+	resolver telemetryBackendResolver
+}
+
+func (r lokiQueryEndpointResolver) ResolveLokiEndpoint(ctx context.Context) (pkglogquery.LokiEndpoint, error) {
+	if r.resolver == nil {
+		return pkglogquery.LokiEndpoint{}, errors.New("Loki query resolver is unavailable")
+	}
+	user, password := r.resolver.Auth(ctx)
+	return pkglogquery.LokiEndpoint{
+		URL:           r.resolver.URL(ctx),
+		BasicUser:     user,
+		BasicPassword: password,
+		TLSInsecure:   r.resolver.TLSInsecure(ctx),
+	}, nil
+}
+
 func (r pluginEndpointResolver) Endpoint(ctx context.Context, plugin string) string {
 	target, err := r.ResolveTelemetryTarget(ctx, plugin)
 	if err != nil {
@@ -2968,7 +3009,7 @@ func (r pluginEndpointResolver) ResolveTelemetryTarget(ctx context.Context, sign
 			if u := edgeReachableLokiURL(r.loki.URL(ctx)); u != "" {
 				user, password := r.loki.Auth(ctx)
 				return managerbizk8s.TelemetryTarget{
-					Endpoint:      u + "/loki/api/v1/push",
+					Endpoint:      u + "/otlp/v1/logs",
 					BasicUser:     user,
 					BasicPassword: password,
 					TLSInsecure:   r.loki.TLSInsecure(ctx),
@@ -2979,7 +3020,7 @@ func (r pluginEndpointResolver) ResolveTelemetryTarget(ctx context.Context, sign
 			return managerbizk8s.TelemetryTarget{}, nil
 		}
 		return managerbizk8s.TelemetryTarget{
-			Endpoint:               strings.TrimRight(r.publicURL, "/") + "/loki/api/v1/push",
+			Endpoint:               strings.TrimRight(r.publicURL, "/") + "/loki/otlp/v1/logs",
 			UseTelemetryCredential: true,
 		}, nil
 	case "traces":
@@ -4135,6 +4176,88 @@ func ongridBasePrompt() string {
 // for the metric PromHandler, which uses a verb-noun method name in its
 // own narrow interface. *managerdevicedata.EdgeDeviceRepo already does
 // the work; this is purely a type-level shim.
+type pluginConfigReloadNotifier interface {
+	NotifyPluginConfigsChanged(ctx context.Context, edgeID uint64) error
+}
+
+// logsPluginReloadBroadcaster turns a selected backend change into bounded,
+// best-effort reload hints for online Edges. The 60-second Edge pull loop is
+// authoritative, so one disconnected Edge never changes the selection result.
+type logsPluginReloadBroadcaster struct {
+	edges    *managerbizedge.Usecase
+	notifier pluginConfigReloadNotifier
+	log      *slog.Logger
+}
+
+type logsConnectionEdgeInventory struct {
+	edges   *managerbizedge.Usecase
+	configs *managerbizedge.PluginConfigUC
+}
+
+func (i logsConnectionEdgeInventory) ListConnectionEdges(ctx context.Context) ([]managerbizlogs.ConnectionEdge, error) {
+	if i.edges == nil {
+		return nil, nil
+	}
+	edges, err := i.edges.List(ctx, managerbizedge.ListFilter{})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]managerbizlogs.ConnectionEdge, 0, len(edges))
+	for _, edge := range edges {
+		if !isHostLogsConnectionEdge(edge) {
+			continue
+		}
+		if i.configs != nil {
+			enabled, enabledErr := i.configs.IsEnabled(ctx, edge.ID, "logs")
+			if enabledErr != nil {
+				return nil, fmt.Errorf("resolve logs policy for Edge %d: %w", edge.ID, enabledErr)
+			}
+			if !enabled {
+				continue
+			}
+		}
+		items = append(items, managerbizlogs.ConnectionEdge{EdgeID: edge.ID, Name: edge.Name, Online: edge.Status == "online"})
+	}
+	return items, nil
+}
+
+// isHostLogsConnectionEdge excludes control-plane-only Edge identities from a
+// log connection check. The real-write check scopes every probe by the linked
+// Host device; an identity without that link (for example the
+// Kubernetes controller) cannot emit or verify such a probe and would make a
+// connection check impossible even though no logs process runs on that identity.
+func isHostLogsConnectionEdge(edge *managermodeledge.Edge) bool {
+	return edge != nil && edge.ID != 0 && edge.DeviceID != nil && *edge.DeviceID != 0
+}
+
+func (b *logsPluginReloadBroadcaster) NotifyLogsBackendChanged(ctx context.Context) error {
+	if b == nil || b.edges == nil || b.notifier == nil {
+		return nil
+	}
+	edges, err := b.edges.List(ctx, managerbizedge.ListFilter{Status: "online"})
+	if err != nil {
+		return fmt.Errorf("list online Edges for logs reload: %w", err)
+	}
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(8)
+	for _, edge := range edges {
+		if edge == nil || edge.ID == 0 {
+			continue
+		}
+		edgeID := edge.ID
+		group.Go(func() error {
+			callCtx, cancel := context.WithTimeout(groupCtx, 5*time.Second)
+			defer cancel()
+			if notifyErr := b.notifier.NotifyPluginConfigsChanged(callCtx, edgeID); notifyErr != nil && b.log != nil {
+				b.log.Warn("logs plugin reload hint failed; periodic pull will retry",
+					slog.Uint64("edge_id", edgeID), slog.Any("err", notifyErr))
+			}
+			return nil
+		})
+	}
+	return group.Wait()
+}
+
 type hostDeviceResolverAdapter struct {
 	repo *managerdevicedata.EdgeDeviceRepo
 }
@@ -5630,7 +5753,7 @@ var flowToolDescZhMap = map[string]string{
 	"send_notification":       "向设置中的通知目标发送消息。",
 	"send_im_message":         "通过指定 IM 应用和群 ID 主动发送消息。",
 	"query_promql":            "用 PromQL 查询指标时序数据。",
-	"query_logql":             "用 LogQL 查询 Loki 日志。",
+	"query_logql":             "查询当前选中的日志后端，并返回该后端对应的结果格式。",
 	"query_traceql":           "用 TraceQL 查询 Tempo 链路。",
 	"list_database_sources":   "列出已发现的数据库指标采集源。",
 	"analyze_database_status": "对数据库指标源做健康巡检（连接/慢查/复制等）。",

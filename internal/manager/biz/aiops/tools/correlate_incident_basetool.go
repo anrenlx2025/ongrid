@@ -196,7 +196,7 @@ func (t *CorrelateIncidentTool) singleCorrelate(ctx context.Context, incidentID 
 		if inc.DeviceID != nil {
 			entries, err := t.queryLogPanel(callCtx, *inc.DeviceID, wStart, wEnd)
 			if err != nil {
-				bundle.Skipped["log_panel"] = "loki query failed: " + err.Error()
+				bundle.Skipped["log_panel"] = "log query failed: " + err.Error()
 			} else {
 				bundle.LogPanel = entries
 			}
@@ -312,8 +312,8 @@ func (t *CorrelateIncidentTool) queryMetricPanel(ctx context.Context, expr strin
 
 // queryLogPanel mirrors Registry.queryLogPanel.
 func (t *CorrelateIncidentTool) queryLogPanel(ctx context.Context, edgeID uint64, start, end time.Time) ([]logEntry, error) {
-	q := fmt.Sprintf(`{edge_id="%d"} |~ "(?i)error|panic|oom|fatal|fail"`, edgeID)
-	res, err := t.logQuery.QueryRange(ctx, logquery.QueryRangeOptions{
+	q := fmt.Sprintf(`{device_id="%d"} |~ "(?i)error|panic|oom|fatal|fail"`, edgeID)
+	res, err := t.logQuery.QueryLogQL(ctx, logquery.QueryRangeOptions{
 		Query:     q,
 		Start:     start,
 		End:       end,
@@ -323,31 +323,7 @@ func (t *CorrelateIncidentTool) queryLogPanel(ctx context.Context, edgeID uint64
 	if err != nil {
 		return nil, err
 	}
-	if res == nil || len(res.Result) == 0 {
-		return nil, nil
-	}
-	var raw []struct {
-		Stream map[string]string `json:"stream"`
-		Values [][2]string       `json:"values"`
-	}
-	if err := json.Unmarshal(res.Result, &raw); err != nil {
-		return nil, fmt.Errorf("decode loki streams: %w", err)
-	}
-	entries := make([]logEntry, 0, 64)
-	for _, st := range raw {
-		for _, v := range st.Values {
-			ts := parseLokiNanoTimestamp(v[0])
-			line := truncateLine(v[1], 200)
-			entries = append(entries, logEntry{Timestamp: ts, Line: line, Labels: st.Stream})
-		}
-	}
-	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].Timestamp.After(entries[j].Timestamp)
-	})
-	if len(entries) > 50 {
-		entries = entries[:50]
-	}
-	return entries, nil
+	return logEntriesFromQueryLogQLResult(res)
 }
 
 // queryTracePanel mirrors Registry.queryTracePanel, including device scope

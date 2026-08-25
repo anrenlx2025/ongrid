@@ -12,6 +12,9 @@ concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
+env:
+  RELEASE_TAG_PATTERN: '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+
 jobs:
   manager-image:
     name: Build manager image (${{ matrix.arch }})
@@ -38,7 +41,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           version="$(tr -d '[:space:]' < VERSION)"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || "$version" != "$tag" ]]; then
+          if [[ ! "$tag" =~ $RELEASE_TAG_PATTERN || "$version" != "$tag" ]]; then
             echo "VERSION ($version) must match release tag ($tag)" >&2
             exit 2
           fi
@@ -85,7 +88,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           version="$(tr -d '[:space:]' < VERSION)"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || "$version" != "$tag" ]]; then
+          if [[ ! "$tag" =~ $RELEASE_TAG_PATTERN || "$version" != "$tag" ]]; then
             echo "VERSION ($version) must match release tag ($tag)" >&2
             exit 2
           fi
@@ -121,7 +124,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           version="$(tr -d '[:space:]' < VERSION)"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || "$version" != "$tag" ]]; then
+          if [[ ! "$tag" =~ $RELEASE_TAG_PATTERN || "$version" != "$tag" ]]; then
             echo "VERSION ($version) must match release tag ($tag)" >&2
             exit 2
           fi
@@ -161,7 +164,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           version="$(tr -d '[:space:]' < VERSION)"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || "$version" != "$tag" ]]; then
+          if [[ ! "$tag" =~ $RELEASE_TAG_PATTERN || "$version" != "$tag" ]]; then
             echo "VERSION ($version) must match release tag ($tag)" >&2
             exit 2
           fi
@@ -233,8 +236,8 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "release tag must match vMAJOR.MINOR.PATCH, got: $tag" >&2
+          if [[ ! "$tag" =~ $RELEASE_TAG_PATTERN ]]; then
+            echo "release tag must match vMAJOR.MINOR.PATCH[-PRERELEASE], got: $tag" >&2
             exit 2
           fi
           version="$(tr -d '[:space:]' < VERSION)"
@@ -305,7 +308,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           version="$(tr -d '[:space:]' < VERSION)"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || "$version" != "$tag" ]]; then
+          if [[ ! "$tag" =~ $RELEASE_TAG_PATTERN || "$version" != "$tag" ]]; then
             echo "VERSION ($version) must match release tag ($tag)" >&2
             exit 2
           fi
@@ -345,8 +348,8 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "release tag must match vMAJOR.MINOR.PATCH, got: $tag" >&2
+          if [[ ! "$tag" =~ $RELEASE_TAG_PATTERN ]]; then
+            echo "release tag must match vMAJOR.MINOR.PATCH[-PRERELEASE], got: $tag" >&2
             exit 2
           fi
           version="$(tr -d '[:space:]' < VERSION)"
@@ -434,6 +437,8 @@ jobs:
           set -euo pipefail
           tag="${{ steps.tag.outputs.tag }}"
           release_notes="$(cat "$RUNNER_TEMP/release-notes.md")"
+          release_flags=()
+          [[ "$tag" == *-* ]] && release_flags+=(--prerelease)
           gh release create "$tag" \
             "dist/out/ongrid-${tag}-linux-amd64.tar.xz" \
             "dist/out/ongrid-${tag}-linux-amd64.tar.xz.sha256" \
@@ -443,4 +448,5 @@ jobs:
             --verify-tag \
             --title "Ongrid ${tag}" \
             --generate-notes \
-            --notes "$release_notes"
+            --notes "$release_notes" \
+            "${release_flags[@]}"

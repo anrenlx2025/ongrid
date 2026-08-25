@@ -56,6 +56,12 @@ func TestBuildBaseTools_FullSetWithAllDeps(t *testing.T) {
 			t.Errorf("BuildBaseTools has extra %q not in closure path (base=%v closure=%v)", n, baseNames, closureNames)
 		}
 	}
+	if containsName(baseNames, "search_logs") || containsName(closureNames, "search_logs") {
+		t.Fatalf("legacy search_logs tool is still exposed (base=%v closure=%v)", baseNames, closureNames)
+	}
+	if countToolName(baseNames, ToolNameQueryLogQL) != 1 || countToolName(closureNames, ToolNameQueryLogQL) != 1 {
+		t.Fatalf("query_logql must be the single log-query tool (base=%v closure=%v)", baseNames, closureNames)
+	}
 }
 
 // TestBuildBaseTools_GraphKernelToolBagCount mirrors the production
@@ -137,4 +143,14 @@ func filterOutTool(names []string, drop string) []string {
 		}
 	}
 	return out
+}
+
+func countToolName(names []string, want string) int {
+	count := 0
+	for _, name := range names {
+		if name == want {
+			count++
+		}
+	}
+	return count
 }

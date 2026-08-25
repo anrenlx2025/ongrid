@@ -82,6 +82,11 @@ type PipelineEvaluatorOpts struct {
 	// (the cache still loads the rows so the UI can list them).
 	LogQuerier LogQuerier
 
+	// LogSearcher is the backend-neutral query service used by log_search.
+	// It queries the currently selected log backend and never accepts a
+	// backend query language from the rule.
+	LogSearcher logquery.Searcher
+
 	DeviceIdentityResolver DeviceIdentityResolver
 
 	Log *slog.Logger
@@ -108,6 +113,7 @@ type PipelineEvaluator struct {
 	edges          EdgeLister
 	prom           PromQuerier
 	logq           LogQuerier
+	logSearcher    logquery.Searcher
 	deviceIdentity DeviceIdentityResolver
 
 	// gaugeSnapshot is the previous tick's (device_id, device_name) set
@@ -156,6 +162,7 @@ func NewPipelineEvaluator(opts PipelineEvaluatorOpts) *PipelineEvaluator {
 		edges:          opts.EdgeLister,
 		prom:           opts.PromQuerier,
 		logq:           opts.LogQuerier,
+		logSearcher:    opts.LogSearcher,
 		deviceIdentity: opts.DeviceIdentityResolver,
 		log:            opts.Log,
 		now:            opts.Now,
@@ -210,6 +217,9 @@ func (e *PipelineEvaluator) evaluate(ctx context.Context) {
 	if e.logq != nil {
 		e.evaluateLogMatch(ctx, now)
 		e.evaluateLogVolume(ctx, now)
+	}
+	if e.logSearcher != nil {
+		e.evaluateLogSearch(ctx, now)
 	}
 }
 
@@ -474,6 +484,7 @@ func deviceDisplay(identity DeviceIdentity) string {
 var nonIdentityLabels = map[string]struct{}{
 	"__name__":      {},
 	"ongrid_source": {},
+	"source_id":     {},
 }
 
 func labelSetKey(m map[string]string) string {

@@ -50,6 +50,9 @@ installer downloads checksum-verified third-party dependencies and the current
 1. Bump the version in `VERSION`, commit the change, and push the matching tag
    to GitHub. The `Release` GitHub Actions workflow publishes runtime images,
    the Helm chart, and the universal thin Linux server package.
+   For release validation, use a matching prerelease such as
+   `v0.14.0-rc.1`; it is marked as a prerelease on GitHub and CNB. Publish
+   `v0.14.0` after validation instead of deleting the candidate artifacts.
 2. The `Release` GitHub Actions workflow runs on `v*.*.*` tag pushes and
    publishes the multi-architecture manager, Web, and Kubernetes Edge images
    plus the matching Helm chart before building the universal server package. The chart is published as an

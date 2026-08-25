@@ -95,9 +95,10 @@ func (r *Registry) BuildBaseTools() *ToolBag {
 	if r.promQuery != nil && r.edges != nil && r.pluginConfigs != nil {
 		out = append(out, NewAnalyzeDatabaseStatusTool(r.promQuery, r.edges, r.devices, r.pluginConfigs, r.log))
 	}
-	// 4: query_logql — gated on Loki client.
+	// 4: query_logql — the stable log-query tool. Its implementation routes
+	// through the selected Loki or Elasticsearch backend.
 	if r.logQuery != nil {
-		out = append(out, NewQueryLogQLTool(r.logQuery, r.log))
+		out = append(out, NewQueryLogQLTool(r.logQuery))
 	}
 	// 5: query_traceql — gated on Tempo client.
 	if r.traceQuery != nil {
@@ -165,9 +166,10 @@ func (r *Registry) BuildBaseTools() *ToolBag {
 	// 13: correlate_incident — needs ALL four signal sources, same as
 	// the closure path (NewRegistry).
 	if r.alertUC != nil && r.promQuery != nil && r.logQuery != nil && r.traceQuery != nil {
-		out = append(out, NewCorrelateIncidentTool(
+		tool := NewCorrelateIncidentTool(
 			r.alertUC, r.promQuery, r.logQuery, r.traceQuery, r.edges, r.devices, r.log,
-		))
+		)
+		out = append(out, tool)
 	}
 
 	// Conversational configuration: draft_config_change is read-only and

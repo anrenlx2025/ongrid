@@ -244,12 +244,12 @@ func (r *Registry) executeCorrelateIncident(ctx context.Context, args json.RawMe
 		bundle.Skipped["metric_panel"] = "prom query client not configured"
 	}
 
-	// Log panel — needs Loki + edge_id (so we can scope the query).
+	// The stable query_logql dependency routes through the selected backend.
 	if r.logQuery != nil {
 		if inc.DeviceID != nil {
 			entries, err := r.queryLogPanel(callCtx, *inc.DeviceID, wStart, wEnd)
 			if err != nil {
-				bundle.Skipped["log_panel"] = "loki query failed: " + err.Error()
+				bundle.Skipped["log_panel"] = "log query failed: " + err.Error()
 			} else {
 				bundle.LogPanel = entries
 			}
@@ -430,12 +430,11 @@ func seriesMagnitude(s metricSeries) float64 {
 	return max
 }
 
-// queryLogPanel asks Loki for the 50 most recent error-ish lines from the
-// edge's stream. Direction=backward gives the LLM the most recent samples
-// first, which is what an operator would scroll to anyway.
+// queryLogPanel asks the selected log backend for the 50 most recent
+// error-ish lines from the device's stream.
 func (r *Registry) queryLogPanel(ctx context.Context, edgeID uint64, start, end time.Time) ([]logEntry, error) {
-	q := fmt.Sprintf(`{edge_id="%d"} |~ "(?i)error|panic|oom|fatal|fail"`, edgeID)
-	res, err := r.logQuery.QueryRange(ctx, logquery.QueryRangeOptions{
+	q := fmt.Sprintf(`{device_id="%d"} |~ "(?i)error|panic|oom|fatal|fail"`, edgeID)
+	res, err := r.logQuery.QueryLogQL(ctx, logquery.QueryRangeOptions{
 		Query:     q,
 		Start:     start,
 		End:       end,
@@ -445,15 +444,45 @@ func (r *Registry) queryLogPanel(ctx context.Context, edgeID uint64, start, end 
 	if err != nil {
 		return nil, err
 	}
-	if res == nil || len(res.Result) == 0 {
+	return logEntriesFromQueryLogQLResult(res)
+}
+
+func logEntriesFromQueryLogQLResult(result logquery.QueryLogQLResult) ([]logEntry, error) {
+	var entries []logEntry
+	switch typed := result.(type) {
+	case *logquery.QueryRangeResult:
+		var err error
+		entries, err = logEntriesFromLokiResult(typed)
+		if err != nil {
+			return nil, err
+		}
+	case *logquery.SearchResult:
+		entries = logEntriesFromSearchResult(typed)
+	default:
+		return nil, fmt.Errorf("unsupported query_logql result type %T", result)
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].Timestamp.After(entries[j].Timestamp)
+	})
+	if len(entries) > 50 {
+		entries = entries[:50]
+	}
+	return entries, nil
+}
+
+func logEntriesFromLokiResult(result *logquery.QueryRangeResult) ([]logEntry, error) {
+	if result == nil || len(result.Result) == 0 {
 		return nil, nil
+	}
+	if result.ResultType != "streams" {
+		return nil, fmt.Errorf("query_logql returned Loki result type %q for a log stream query", result.ResultType)
 	}
 	// Loki streams shape: [{"stream": {labels...}, "values": [[ns, line], ...]}]
 	var raw []struct {
 		Stream map[string]string `json:"stream"`
 		Values [][2]string       `json:"values"`
 	}
-	if err := json.Unmarshal(res.Result, &raw); err != nil {
+	if err := json.Unmarshal(result.Result, &raw); err != nil {
 		return nil, fmt.Errorf("decode loki streams: %w", err)
 	}
 	entries := make([]logEntry, 0, 64)
@@ -464,14 +493,35 @@ func (r *Registry) queryLogPanel(ctx context.Context, edgeID uint64, start, end 
 			entries = append(entries, logEntry{Timestamp: ts, Line: line, Labels: st.Stream})
 		}
 	}
-	// Sort newest first.
-	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].Timestamp.After(entries[j].Timestamp)
-	})
-	if len(entries) > 50 {
-		entries = entries[:50]
-	}
 	return entries, nil
+}
+
+func logEntriesFromSearchResult(result *logquery.SearchResult) []logEntry {
+	if result == nil {
+		return nil
+	}
+	entries := make([]logEntry, 0, len(result.Records))
+	for _, record := range result.Records {
+		labels := make(map[string]string, len(record.ResourceAttributes)+len(record.Attributes)+2)
+		for key, value := range record.ResourceAttributes {
+			labels[key] = value
+		}
+		for key, value := range record.Attributes {
+			labels[key] = value
+		}
+		if record.SeverityText != "" {
+			labels["level"] = strings.ToLower(record.SeverityText)
+		}
+		if record.Backend != "" {
+			labels["backend"] = record.Backend
+		}
+		entries = append(entries, logEntry{
+			Timestamp: record.Timestamp,
+			Line:      truncateLine(record.Message, 200),
+			Labels:    labels,
+		})
+	}
+	return entries
 }
 
 func parseLokiNanoTimestamp(s string) time.Time {

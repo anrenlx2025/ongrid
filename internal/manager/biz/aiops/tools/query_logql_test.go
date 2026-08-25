@@ -14,15 +14,15 @@ import (
 	"github.com/ongridio/ongrid/internal/pkg/logquery"
 )
 
-// fakeLogQuerier captures the last QueryRange call.
+// fakeLogQuerier captures the last QueryLogQL call.
 type fakeLogQuerier struct {
 	mu   sync.Mutex
 	got  logquery.QueryRangeOptions
-	resp *logquery.QueryRangeResult
+	resp logquery.QueryLogQLResult
 	err  error
 }
 
-func (f *fakeLogQuerier) QueryRange(_ context.Context, opts logquery.QueryRangeOptions) (*logquery.QueryRangeResult, error) {
+func (f *fakeLogQuerier) QueryLogQL(_ context.Context, opts logquery.QueryRangeOptions) (logquery.QueryLogQLResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.got = opts
@@ -77,6 +77,34 @@ func TestQueryLogQL_RoundTrip(t *testing.T) {
 func TestQueryLogQL_DescriptionGuidesScopedQueries(t *testing.T) {
 	if !strings.Contains(QueryLogQLDescription, "{}") || !strings.Contains(QueryLogQLDescription, "device_id") {
 		t.Fatalf("description must guide device-scoped LogQL calls: %q", QueryLogQLDescription)
+	}
+}
+
+func TestQueryLogQL_SchemaKeepsEstablishedPipelineContract(t *testing.T) {
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	if err := json.Unmarshal(QueryLogQLSchema, &schema); err != nil {
+		t.Fatalf("decode QueryLogQLSchema: %v", err)
+	}
+	for _, name := range []string{"query", "device_id", "start", "end", "limit", "direction"} {
+		if _, ok := schema.Properties[name]; !ok {
+			t.Errorf("QueryLogQLSchema lost established property %q", name)
+		}
+	}
+	if len(schema.Required) != 1 || schema.Required[0] != "query" {
+		t.Fatalf("required = %v, want [query]", schema.Required)
+	}
+	var limit struct {
+		Minimum int `json:"minimum"`
+		Maximum int `json:"maximum"`
+	}
+	if err := json.Unmarshal(schema.Properties["limit"], &limit); err != nil {
+		t.Fatalf("decode limit schema: %v", err)
+	}
+	if limit.Minimum != 1 || limit.Maximum != logquery.MaxQueryLogQLLimit {
+		t.Fatalf("limit bounds = [%d,%d], want [1,%d]", limit.Minimum, limit.Maximum, logquery.MaxQueryLogQLLimit)
 	}
 }
 

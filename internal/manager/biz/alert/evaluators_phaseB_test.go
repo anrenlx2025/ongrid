@@ -33,6 +33,140 @@ func TestCompileLogMatch_Defaults(t *testing.T) {
 	}
 }
 
+func TestCompileLogSearchAndEvaluateThroughStructuredCounter(t *testing.T) {
+	spec, _ := json.Marshal(map[string]any{
+		"keywords": map[string]any{
+			"include": []string{"error", "panic"},
+			"mode":    "any",
+		},
+		"scope":     map[string]any{"namespaces": []string{"production"}},
+		"window":    "10m",
+		"operator":  ">=",
+		"threshold": 3,
+	})
+	compiled, err := compileLogSearchRule(&model.Rule{
+		ID: 7, RuleKey: "production_errors", Name: "Production errors",
+		Kind: model.RuleKindLogSearch, ScopeType: model.RuleScopeGlobal,
+		Severity: "warning", ConditionsJSON: string(spec),
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if compiled.Window != 10*time.Minute || compiled.Query.Keywords.Mode != logquery.MatchAny {
+		t.Fatalf("compiled rule = %#v", compiled)
+	}
+
+	repo := newFakeRepo()
+	searcher := &scriptedStructuredLogSearcher{count: 4}
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	eval := newPipelineEvaluator(t, repo, &fakeNotifier{},
+		NewStaticRulesProvider(WithLogSearchRules([]LogSearchRule{compiled})),
+		PipelineEvaluatorOpts{
+			LogSearcher: searcher,
+			Cooldown:    time.Minute,
+			Now:         func() time.Time { return now },
+		})
+	eval.EvaluateOnce(context.Background())
+	if len(repo.incidents) != 1 {
+		t.Fatalf("incidents = %d, want 1", len(repo.incidents))
+	}
+	if !searcher.request.Start.Equal(now.Add(-10*time.Minute)) || !searcher.request.End.Equal(now) {
+		t.Fatalf("count range = %s..%s", searcher.request.Start, searcher.request.End)
+	}
+	for _, incident := range repo.incidents {
+		if incident.Value == nil || *incident.Value != 4 {
+			t.Fatalf("incident value = %v, want 4", incident.Value)
+		}
+	}
+}
+
+func TestEvaluateLogSearchComparesAndRecoversEachGroup(t *testing.T) {
+	repo := newFakeRepo()
+	searcher := &scriptedStructuredLogSearcher{groups: []logquery.CountGroup{
+		{Labels: map[string]string{"device_id": "42", "source_id": "journald"}, Count: 3},
+		{Labels: map[string]string{"device_id": "43", "source_id": "journald"}, Count: 1},
+	}}
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	rule := LogSearchRule{
+		RuleKey: "host_errors", Name: "Host errors", ScopeType: model.RuleScopeHost,
+		GroupBy: []string{"device_id", "source_id"}, Window: 5 * time.Minute,
+		WindowText: "5m", Operator: ">=", Threshold: 2,
+	}
+	eval := newPipelineEvaluator(t, repo, &fakeNotifier{},
+		NewStaticRulesProvider(WithLogSearchRules([]LogSearchRule{rule})),
+		PipelineEvaluatorOpts{LogSearcher: searcher, Cooldown: time.Minute, Now: func() time.Time { return now }},
+	)
+	eval.EvaluateOnce(t.Context())
+	if len(repo.incidents) != 1 {
+		t.Fatalf("incidents = %d, want one independently breaching group", len(repo.incidents))
+	}
+	var incident *model.Incident
+	for _, candidate := range repo.incidents {
+		incident = candidate
+	}
+	if incident.DeviceID == nil || *incident.DeviceID != 42 || incident.Value == nil || *incident.Value != 3 {
+		t.Fatalf("incident = %#v", incident)
+	}
+	if strings.Join(searcher.groupBy, ",") != "device_id,source_id" {
+		t.Fatalf("group_by = %v", searcher.groupBy)
+	}
+
+	searcher.groups = []logquery.CountGroup{
+		{Labels: map[string]string{"device_id": "42", "source_id": "journald"}, Count: 1},
+		{Labels: map[string]string{"device_id": "43", "source_id": "journald"}, Count: 1},
+	}
+	eval.EvaluateOnce(t.Context())
+	if incident.Status != model.IncidentStatusResolved {
+		t.Fatalf("incident status = %q, want resolved", incident.Status)
+	}
+}
+
+func TestEvaluateLogSearchKeepsSourceIDInIncidentIdentity(t *testing.T) {
+	repo := newFakeRepo()
+	searcher := &scriptedStructuredLogSearcher{groups: []logquery.CountGroup{
+		{Labels: map[string]string{"device_id": "42", "source_id": "journald"}, Count: 3},
+		{Labels: map[string]string{"device_id": "42", "source_id": "kubernetes:pod"}, Count: 4},
+	}}
+	rule := LogSearchRule{
+		RuleKey: "host_errors", Name: "Host errors", ScopeType: model.RuleScopeHost,
+		GroupBy: []string{"device_id", "source_id"}, Window: 5 * time.Minute,
+		WindowText: "5m", Operator: ">=", Threshold: 2,
+	}
+	eval := newPipelineEvaluator(t, repo, &fakeNotifier{},
+		NewStaticRulesProvider(WithLogSearchRules([]LogSearchRule{rule})),
+		PipelineEvaluatorOpts{LogSearcher: searcher, Cooldown: time.Minute},
+	)
+
+	eval.EvaluateOnce(t.Context())
+	if len(repo.incidents) != 2 {
+		t.Fatalf("incidents = %d, want one per source_id", len(repo.incidents))
+	}
+	sources := make(map[string]bool, len(repo.incidents))
+	for _, incident := range repo.incidents {
+		labels, err := incident.Labels()
+		if err != nil {
+			t.Fatalf("decode incident labels: %v", err)
+		}
+		sources[labels["source_id"]] = true
+	}
+	if !sources["journald"] || !sources["kubernetes:pod"] {
+		t.Fatalf("incident sources = %#v", sources)
+	}
+}
+
+func TestLogSearchGroupKeyIsUnambiguous(t *testing.T) {
+	groupBy := []string{"device_id", "source_id"}
+	first := logSearchGroupKey(groupBy, map[string]string{
+		"device_id": "42,source_id=journald", "source_id": "kubernetes:pod",
+	})
+	second := logSearchGroupKey(groupBy, map[string]string{
+		"device_id": "42", "source_id": "journald,source_id=kubernetes:pod",
+	})
+	if first == second {
+		t.Fatalf("distinct structured-log groups share key %q", first)
+	}
+}
+
 func TestCompileLogMatch_Errors(t *testing.T) {
 	for _, c := range []struct {
 		name, spec string
@@ -172,6 +306,40 @@ func TestBuildLogMatchQuery(t *testing.T) {
 type scriptedLogRange struct {
 	result *logquery.QueryRangeResult
 	err    error
+}
+
+type scriptedStructuredLogSearcher struct {
+	count   uint64
+	groups  []logquery.CountGroup
+	groupBy []string
+	request logquery.SearchRequest
+}
+
+func (*scriptedStructuredLogSearcher) Search(context.Context, logquery.SearchRequest) (*logquery.SearchResult, error) {
+	return &logquery.SearchResult{}, nil
+}
+
+func (s *scriptedStructuredLogSearcher) Count(_ context.Context, req logquery.SearchRequest) (uint64, error) {
+	s.request = req
+	return s.count, nil
+}
+
+func (s *scriptedStructuredLogSearcher) CountGrouped(_ context.Context, req logquery.SearchRequest, groupBy []string) ([]logquery.CountGroup, error) {
+	s.request = req
+	s.groupBy = append([]string(nil), groupBy...)
+	return append([]logquery.CountGroup(nil), s.groups...), nil
+}
+
+func (*scriptedStructuredLogSearcher) Fields(context.Context, time.Time, time.Time, logquery.Scope) ([]logquery.Field, error) {
+	return logquery.AllowedFields(), nil
+}
+
+func (*scriptedStructuredLogSearcher) FieldValues(context.Context, logquery.FieldValuesRequest) ([]string, error) {
+	return nil, nil
+}
+
+func (*scriptedStructuredLogSearcher) Histogram(context.Context, logquery.SearchRequest, time.Duration) ([]logquery.HistogramBucket, error) {
+	return nil, nil
 }
 
 func (s *scriptedLogRange) QueryRange(_ context.Context, _ logquery.QueryRangeOptions) (*logquery.QueryRangeResult, error) {

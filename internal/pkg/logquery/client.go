@@ -83,8 +83,8 @@ func NewWithHTTPClient(baseURL string, hc *http.Client, log *slog.Logger) *Clien
 	return newClient(staticBase{url: strings.TrimRight(baseURL, "/")}, hc, log)
 }
 
-// NewWithResolverAndHTTPClient is the dynamic form. Wired when admin
-// can edit the URL via system_settings (future PR).
+// NewWithResolverAndHTTPClient resolves the URL for each call while keeping a
+// fixed HTTP transport. Use RuntimeClient when auth or TLS can also change.
 func NewWithResolverAndHTTPClient(r BaseURLResolver, hc *http.Client, log *slog.Logger) *Client {
 	return newClient(r, hc, log)
 }

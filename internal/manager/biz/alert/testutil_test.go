@@ -160,6 +160,25 @@ func (r *fakeRepo) UpdateRule(_ context.Context, id uint64, in *model.Rule) erro
 	return errs.ErrNotFound
 }
 
+func (r *fakeRepo) MigrateLegacyLogRules(_ context.Context, migrations []LegacyLogRuleMigration) error {
+	for _, migration := range migrations {
+		found := false
+		for _, rule := range r.rules {
+			if rule.ID != migration.ID || rule.Kind != migration.FromKind {
+				continue
+			}
+			rule.Kind = model.RuleKindLogSearch
+			rule.ConditionsJSON = migration.ConditionsJSON
+			found = true
+			break
+		}
+		if !found {
+			return errs.ErrConflict
+		}
+	}
+	return nil
+}
+
 func (r *fakeRepo) UpdateRuleEnabled(_ context.Context, id uint64, enabled bool) error {
 	for _, rule := range r.rules {
 		if rule.ID == id {

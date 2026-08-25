@@ -53,9 +53,9 @@ type GetProcessListBatchArgs struct {
 
 // ProcessListResultEntry is one slot in the batch envelope.
 type ProcessListResultEntry struct {
-	DeviceID    uint64                          `json:"device_id"`
-	ProcessList *tunnel.GetProcessListResponse  `json:"process_list,omitempty"`
-	Error       string                          `json:"error,omitempty"`
+	DeviceID    uint64                         `json:"device_id"`
+	ProcessList *tunnel.GetProcessListResponse `json:"process_list,omitempty"`
+	Error       string                         `json:"error,omitempty"`
 }
 
 // ProcessListBatchResponse is the wire envelope.

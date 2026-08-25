@@ -1,6 +1,6 @@
-// evaluators_phaseB.go contains the Phase-B evaluators —
-// log_match / log_volume against Loki, trace_latency / trace_error_rate
-// against Prom (spanmetrics).
+// evaluators_phaseB.go contains the Phase-B evaluators — backend-neutral
+// log_search, legacy log_match / log_volume against Loki, and
+// trace_latency / trace_error_rate against Prom (spanmetrics).
 //
 // All four follow the metric_raw recovery pattern: track which dedupe
 // keys fired this tick per rule, and resolve any incident from the
@@ -24,6 +24,100 @@ import (
 	"github.com/ongridio/ongrid/internal/pkg/logquery"
 	"github.com/ongridio/ongrid/internal/pkg/notify"
 )
+
+// evaluateLogSearch runs the backend-neutral count contract. The configured
+// Searcher resolves the currently selected backend, so the same rule works
+// with built-in Loki or external Elasticsearch.
+func (e *PipelineEvaluator) evaluateLogSearch(ctx context.Context, now time.Time) {
+	rules := e.rules.LogSearchRules()
+	if len(rules) == 0 {
+		return
+	}
+	for _, rule := range rules {
+		var evalErr error
+		done := observeEval(model.RuleKindLogSearch, &evalErr)
+		req := rule.Query
+		req.Start = now.Add(-rule.Window)
+		req.End = now
+		req.Cursor = ""
+		req.Limit = 1
+		req.Direction = logquery.SortBackward
+		groups, err := logquery.CountGrouped(ctx, e.logSearcher, req, rule.GroupBy)
+		if err != nil {
+			e.log.Warn("alert: structured log count failed",
+				slog.String("rule", rule.RuleKey),
+				slog.Any("err", err))
+			evalErr = err
+			done()
+			continue
+		}
+
+		fired := make(map[string]struct{}, len(groups))
+		scope := effectiveScope(rule.ScopeType, model.RuleKindLogSearch)
+		for _, group := range groups {
+			value := float64(group.Count)
+			if !compareFloat(value, rule.Operator, rule.Threshold) {
+				continue
+			}
+			groupKey := logSearchGroupKey(rule.GroupBy, group.Labels)
+			dedupeKey := fmt.Sprintf("pipeline:%s:%s", rule.RuleKey, groupKey)
+			fired[dedupeKey] = struct{}{}
+			summary := fmt.Sprintf("%s: log count %d %s %g in %s (labels=%s)",
+				rule.RuleKey, group.Count, rule.Operator, rule.Threshold, rule.WindowText, groupKey)
+			threshold := rule.Threshold
+			var devID *uint64
+			if scope == model.RuleScopeHost {
+				devID = deviceIDFromLabels(group.Labels)
+			}
+			input := FiringInput{
+				ScopeType:  scope,
+				Scope:      scope,
+				Rule:       rule.RuleKey,
+				RuleName:   rule.Name,
+				Severity:   ruleSev(rule.Severity, notify.SeverityWarning),
+				DeviceID:   devID,
+				DedupeKey:  dedupeKey,
+				OccurredAt: now,
+				Title:      summary,
+				Summary:    summary,
+				RunbookURL: rule.RunbookURL,
+				Value:      &value,
+				Threshold:  &threshold,
+				Labels: mergeLabels(rule.Labels, group.Labels, map[string]string{
+					"rule":       rule.RuleKey,
+					"trigger":    "ticker",
+					"log_window": rule.WindowText,
+				}),
+			}
+			res, err := e.uc.RecordFiring(ctx, input)
+			if err != nil {
+				e.log.Warn("alert: record firing log_search failed",
+					slog.String("rule", rule.RuleKey),
+					slog.Any("err", err))
+			} else {
+				e.notify(ctx, res, summary, input.ScopeType, now)
+			}
+		}
+		e.sweepRecovery(ctx, rule.RuleKey, fired, "structured log condition cleared", now)
+		done()
+	}
+}
+
+// logSearchGroupKey preserves the rule's complete group_by identity. The
+// generic labelSetKey intentionally removes collector provenance such as
+// source_id for metric alerts, but source_id is a first-class grouping
+// dimension for structured log rules.
+func logSearchGroupKey(groupBy []string, labels map[string]string) string {
+	if len(groupBy) == 0 {
+		return "structured-log"
+	}
+	parts := make([]string, 0, len(groupBy))
+	for _, field := range groupBy {
+		value := labels[field]
+		parts = append(parts, field+"="+strconv.Itoa(len(value))+":"+value)
+	}
+	return strings.Join(parts, ",")
+}
 
 // evaluateLogMatch runs every enabled log_match rule's count_over_time
 // query and fires for each label-set whose count satisfies operator+threshold.
