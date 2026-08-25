@@ -80,6 +80,8 @@ func TestDeployNginxRoutesLokiOTLPToNativeEndpoint(t *testing.T) {
 		}
 		config := string(body)
 		if !strings.Contains(config, "location = /loki/otlp/v1/logs") ||
+			!strings.Contains(config, "location = /otlp/v1/logs") ||
+			!strings.Contains(config, "rewrite ^ /loki/otlp/v1/logs last;") ||
 			!strings.Contains(config, "proxy_pass http://loki_backend/otlp/v1/logs;") {
 			t.Fatalf("%s does not route authenticated OTLP logs to Loki's native endpoint", relativePath)
 		}
@@ -114,7 +116,7 @@ func TestRenderBuiltInLokiPipeline(t *testing.T) {
 
 	exporters := object(t, root, "exporters")
 	loki := object(t, exporters, "otlphttp/builtin_loki")
-	if got := scalar(t, loki, "logs_endpoint"); got != "https://manager.example.com/loki/otlp/v1/logs" {
+	if got := scalar(t, loki, "logs_endpoint"); got != "https://manager.example.com/otlp/v1/logs" {
 		t.Fatalf("logs_endpoint = %q", got)
 	}
 	headers := object(t, loki, "headers")
@@ -474,7 +476,7 @@ func TestRenderRejectsUnsafeOrDuplicateFileSources(t *testing.T) {
 
 func TestLokiOTLPLogsEndpoint(t *testing.T) {
 	tests := map[string]string{
-		"https://manager.example.com/loki/api/v1/push":  "https://manager.example.com/loki/otlp/v1/logs",
+		"https://manager.example.com/loki/api/v1/push":  "https://manager.example.com/otlp/v1/logs",
 		"https://manager.example.com/loki/otlp":         "https://manager.example.com/loki/otlp/v1/logs",
 		"https://manager.example.com/loki/otlp/v1/logs": "https://manager.example.com/loki/otlp/v1/logs",
 		"https://loki.example.com/otlp":                 "https://loki.example.com/otlp/v1/logs",
