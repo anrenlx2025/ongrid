@@ -243,11 +243,8 @@ func TestBuildReActGraph_RecoversFromToolError(t *testing.T) {
 func TestBudgetStopModel_FinalizesAfterToolBudget(t *testing.T) {
 	t.Parallel()
 	inner := newScriptedChatModel(&schema.Message{
-		Role: schema.Assistant,
-		ToolCalls: []schema.ToolCall{{
-			ID:       "call_again",
-			Function: schema.FunctionCall{Name: "query_logql", Arguments: `{}`},
-		}},
+		Role:    schema.Assistant,
+		Content: "现有日志证据表明 api-gateway 错误率升高，但时间窗仍不足以确认根因。",
 	})
 	wrapped := wrapBudgetStopModel(inner)
 	got, err := wrapped.Generate(context.Background(), []*schema.Message{
@@ -261,8 +258,11 @@ func TestBudgetStopModel_FinalizesAfterToolBudget(t *testing.T) {
 	if got.Role != schema.Assistant || len(got.ToolCalls) != 0 {
 		t.Fatalf("budget stop response = %+v, want assistant without tool calls", got)
 	}
-	if inner.st.generateCalls.Load() != 0 {
-		t.Fatalf("inner model was called %d time(s), want 0", inner.st.generateCalls.Load())
+	if !strings.Contains(got.Content, "错误率升高") {
+		t.Fatalf("budget stop did not use model synthesis: %q", got.Content)
+	}
+	if inner.st.generateCalls.Load() != 1 {
+		t.Fatalf("inner model was called %d time(s), want 1", inner.st.generateCalls.Load())
 	}
 }
 
@@ -290,6 +290,25 @@ func TestBudgetStopModel_IgnoresPriorTurnToolBudget(t *testing.T) {
 	}
 }
 
+func TestBudgetStopModel_PerToolCountResetsAtNewUserTurn(t *testing.T) {
+	t.Parallel()
+	inner := newScriptedChatModel(makeAssistantToolCall("继续查询", "call_new_turn", "query_promql", `{}`))
+	wrapped := wrapBudgetStopModel(inner)
+	history := []*schema.Message{schema.UserMessage("上一轮查询")}
+	for i := 0; i < maxCallsForTool("query_promql"); i++ {
+		history = append(history, schema.ToolMessage(`{"resultType":"vector","result":[]}`, "call_old_"+string(rune('a'+i)), schema.WithToolName("query_promql")))
+	}
+	history = append(history, schema.UserMessage("新一轮继续查询另一个时间窗"))
+
+	got, err := wrapped.Generate(context.Background(), history)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(got.ToolCalls) != 1 || got.ToolCalls[0].Function.Name != "query_promql" {
+		t.Fatalf("new user turn should have a fresh per-tool budget: %+v", got)
+	}
+}
+
 func TestBudgetStopModel_PrunesSameBatchRepeatedToolCalls(t *testing.T) {
 	t.Parallel()
 	calls := make([]schema.ToolCall, 0, maxCallsForTool("query_k8s_snapshot")+3)
@@ -312,10 +331,11 @@ func TestBudgetStopModel_PrunesSameBatchRepeatedToolCalls(t *testing.T) {
 	}
 }
 
-func TestBudgetStopModel_PrunesSameBatchAtTotalBudget(t *testing.T) {
+func TestBudgetStopModel_DoesNotApplyAggregateToolBudget(t *testing.T) {
 	t.Parallel()
-	calls := make([]schema.ToolCall, 0, maxTotalToolCallsPerRun+3)
-	for i := 0; i < maxTotalToolCallsPerRun+3; i++ {
+	const distinctTools = 24
+	calls := make([]schema.ToolCall, 0, distinctTools)
+	for i := 0; i < distinctTools; i++ {
 		calls = append(calls, schema.ToolCall{
 			ID:       "call_tool_" + string(rune('a'+i)),
 			Function: schema.FunctionCall{Name: "tool_" + string(rune('a'+i)), Arguments: `{}`},
@@ -329,32 +349,25 @@ func TestBudgetStopModel_PrunesSameBatchAtTotalBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if len(got.ToolCalls) != maxTotalToolCallsPerRun {
-		t.Fatalf("tool calls = %d, want total budget %d", len(got.ToolCalls), maxTotalToolCallsPerRun)
+	if len(got.ToolCalls) != distinctTools {
+		t.Fatalf("tool calls = %d, want all %d distinct tools", len(got.ToolCalls), distinctTools)
 	}
 }
 
-func TestBudgetStopModel_PruneAllReturnsEvidenceSummary(t *testing.T) {
+func TestBudgetStopModel_PerToolLimitUsesModelSynthesisWithoutRawJSON(t *testing.T) {
 	t.Parallel()
-	inner := newScriptedChatModel(&schema.Message{
-		Role: schema.Assistant,
-		ToolCalls: []schema.ToolCall{{
+	inner := newScriptedChatModel(
+		&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{
 			ID:       "call_extra",
-			Function: schema.FunctionCall{Name: "host_du_summary", Arguments: `{}`},
-		}},
-	})
-	wrapped := wrapBudgetStopModel(inner)
-	history := []*schema.Message{schema.UserMessage("对当前告警做一次深入 RCA")}
-	for i := 0; i < maxTotalToolCallsPerRun-2; i++ {
-		history = append(history, schema.ToolMessage(`{"count":0}`, "call_pad_"+string(rune('a'+i)), schema.WithToolName("query_logql")))
-	}
-	history = append(history,
-		schema.ToolMessage(`{"query":"select:host_du_summary","tools":[{"name":"host_du_summary","parameters":{"type":"object"}}]}`, "call_search", schema.WithToolName("ToolSearch")),
-		schema.ToolMessage(`{"count":1,"incidents":[{"title":"disk_high root filesystem over 90%","severity":"warning"}]}`, "call_incident", schema.WithToolName("query_incidents")),
-		schema.ToolMessage(`{"device_id":1,"results":[{"path":"/","subpaths":[{"subpath":"/var","size_human":"12.7 GiB"}]}]}`, "call_du", schema.WithToolName("host_du_summary")),
-		schema.ToolMessage(`{"device_id":1,"results":[{"files":[{"path":"/swap.img","size_human":"1.9 GiB"}]}]}`, "call_files", schema.WithToolName("host_find_large_files")),
-		schema.ToolMessage(`{"cmd":"du -sh /* | sort -rh | head","results":[{"stdout":"13G\t/var\n4.6G\t/usr\n2.7G\t/opt\n"}]}`, "call_bash", schema.WithToolName("host_bash")),
+			Function: schema.FunctionCall{Name: "query_promql", Arguments: `{}`},
+		}}},
+		&schema.Message{Role: schema.Assistant, Content: "本周 CPU 均值证据存在，但 Prometheus 保留期不足，无法可靠计算上周对比。"},
 	)
+	wrapped := wrapBudgetStopModel(inner)
+	history := []*schema.Message{schema.UserMessage("对比本周和上周 CPU")}
+	for i := 0; i < maxCallsForTool("query_promql"); i++ {
+		history = append(history, schema.ToolMessage(`{"resultType":"matrix","result":[{"values":[[1787212275.995,"0.006107340485348943"]]}]}`, "call_prom_"+string(rune('a'+i)), schema.WithToolName("query_promql")))
+	}
 
 	got, err := wrapped.Generate(context.Background(), history)
 	if err != nil {
@@ -363,14 +376,60 @@ func TestBudgetStopModel_PruneAllReturnsEvidenceSummary(t *testing.T) {
 	if len(got.ToolCalls) != 0 {
 		t.Fatalf("tool calls = %d, want 0", len(got.ToolCalls))
 	}
-	if !strings.Contains(got.Content, "disk_high") || !strings.Contains(got.Content, "/var=12.7 GiB") || !strings.Contains(got.Content, "/swap.img=1.9 GiB") || !strings.Contains(got.Content, "13G /var") {
-		t.Fatalf("content missing evidence summary: %q", got.Content)
+	if !strings.Contains(got.Content, "Prometheus 保留期不足") {
+		t.Fatalf("content missing semantic synthesis: %q", got.Content)
 	}
-	if strings.Contains(got.Content, "select:host_du_summary") {
-		t.Fatalf("content leaked ToolSearch schema evidence: %q", got.Content)
+	if strings.Contains(got.Content, "1787212275") || strings.Contains(got.Content, "resultType") {
+		t.Fatalf("content leaked raw PromQL evidence: %q", got.Content)
 	}
-	if !strings.Contains(got.Content, "下一步") {
-		t.Fatalf("content missing next-step guidance: %q", got.Content)
+	if inner.generateCalls() != 2 {
+		t.Fatalf("model calls = %d, want initial decision plus synthesis", inner.generateCalls())
+	}
+}
+
+func TestBudgetStopModel_PerToolLimitAllowsDifferentEvidenceTool(t *testing.T) {
+	t.Parallel()
+	inner := newScriptedChatModel(
+		makeAssistantToolCall("继续查询指标", "call_prom_over", "query_promql", `{}`),
+		makeAssistantToolCall("改查同期告警", "call_alerts", "query_incidents", `{}`),
+	)
+	wrapped := wrapBudgetStopModel(inner)
+	history := []*schema.Message{schema.UserMessage("做一次跨信号深度排查")}
+	for i := 0; i < maxCallsForTool("query_promql"); i++ {
+		history = append(history, schema.ToolMessage(`{"resultType":"vector","result":[]}`, "call_metric_"+string(rune('a'+i)), schema.WithToolName("query_promql")))
+	}
+
+	got, err := wrapped.Generate(context.Background(), history)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(got.ToolCalls) != 1 || got.ToolCalls[0].Function.Name != "query_incidents" {
+		t.Fatalf("different evidence tool should remain available: %+v", got)
+	}
+}
+
+func TestBudgetStopModel_FallbackIsLocalizedAndNeverLeaksRawJSON(t *testing.T) {
+	t.Parallel()
+	retryCall := makeAssistantToolCall("", "call_retry", "query_promql", `{}`)
+	inner := newScriptedChatModel(retryCall, retryCall)
+	wrapped := wrapBudgetStopModel(inner)
+	history := []*schema.Message{
+		schema.SystemMessage("Respond in English."),
+		schema.UserMessage("Compare CPU week over week"),
+	}
+	for i := 0; i < maxCallsForTool("query_promql"); i++ {
+		history = append(history, schema.ToolMessage(`{"resultType":"matrix","result":[{"values":[[1787212275.995,"0.006107340485348943"]]}]}`, "call_en_"+string(rune('a'+i)), schema.WithToolName("query_promql")))
+	}
+
+	got, err := wrapped.Generate(context.Background(), history)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(got.ToolCalls) != 0 || !strings.Contains(got.Content, "No raw tool output is shown") {
+		t.Fatalf("fallback = %+v", got)
+	}
+	if strings.Contains(got.Content, "1787212275") || strings.Contains(got.Content, "resultType") {
+		t.Fatalf("fallback leaked raw evidence: %q", got.Content)
 	}
 }
 

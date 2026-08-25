@@ -35,18 +35,26 @@ func TestConfirmedDeviceIDs(t *testing.T) {
 	}
 }
 
-func TestResolveTurnRequiresCaptureTarget(t *testing.T) {
+func TestResolveTurnProposesPacketCapture(t *testing.T) {
 	plan, clarification := resolveTurn(&Request{UserText: "抓 60 秒 HTTPS 流量", Role: "admin"})
-	if plan.Decision != DecisionClarify || plan.Phase != PhaseClarify || clarification == "" {
-		t.Fatalf("resolveTurn missing target = %+v, %q", plan, clarification)
+	if plan.Decision != DecisionPropose || plan.Phase != PhasePropose || clarification != "" {
+		t.Fatalf("resolveTurn missing current-turn target = %+v, %q; want semantic resolution then proposal", plan, clarification)
 	}
 	plan, _ = resolveTurn(&Request{UserText: "抓包", Role: "admin", Mentions: []Mention{{Type: "device", ID: "24"}}})
-	if plan.Decision != DecisionOperate || plan.Phase != PhaseOperate || plan.Observe() != PhaseObserve {
+	if plan.Decision != DecisionPropose || plan.Phase != PhasePropose || plan.Observe() != PhasePropose {
 		t.Fatalf("resolveTurn selected target = %+v", plan)
 	}
 	plan, clarification = resolveTurn(&Request{UserText: "抓 60 秒 tcp port 443 的包", Role: "admin"})
-	if plan.Decision != DecisionClarify || clarification == "" {
+	if plan.Decision != DecisionPropose || clarification != "" {
 		t.Fatalf("resolveTurn packet wording = %+v, %q", plan, clarification)
+	}
+	plan, clarification = resolveTurn(&Request{UserText: "Capture packets on this device", Role: "admin"})
+	if plan.Decision != DecisionPropose || clarification != "" {
+		t.Fatalf("resolveTurn English capture without current target = %+v, %q", plan, clarification)
+	}
+	plan, clarification = resolveTurn(&Request{UserText: "Capture packets on device_id=24 interface eth0", Role: "admin"})
+	if plan.Decision != DecisionPropose || clarification != "" {
+		t.Fatalf("resolveTurn English capture with current target = %+v, %q", plan, clarification)
 	}
 	plan, clarification = resolveTurn(&Request{UserText: "停止刚才的抓包任务", Role: "admin"})
 	if plan.Decision == DecisionClarify || clarification != "" {
@@ -95,7 +103,7 @@ func TestResolveTurnClarifiesAmbiguousPacketPath(t *testing.T) {
 	}
 }
 
-func TestResolveTurnRequiresHostTargetForHostBoundOps(t *testing.T) {
+func TestResolveTurnLetsLLMUnderstandReadOnlyHostRequests(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
@@ -105,12 +113,15 @@ func TestResolveTurnRequiresHostTargetForHostBoundOps(t *testing.T) {
 		{name: "process", text: "找一下占内存最高的进程"},
 		{name: "interface", text: "检查网络接口错误包"},
 		{name: "dns", text: "DNS 解析失败了，帮我排查"},
+		{name: "english disk", text: "Which disk is using the most space on this device?"},
+		{name: "english directory", text: "Show me the largest directories on this host"},
+		{name: "english process", text: "Find the process using the most memory"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			plan, clarification := resolveTurn(&Request{UserText: tt.text, Role: "admin"})
-			if plan.Decision != DecisionClarify || plan.Phase != PhaseClarify || clarification == "" {
-				t.Fatalf("resolveTurn(%q) = %+v, %q; want clarify", tt.text, plan, clarification)
+			if plan.Decision == DecisionClarify || clarification != "" {
+				t.Fatalf("resolveTurn(%q) = %+v, %q; want LLM understand path", tt.text, plan, clarification)
 			}
 		})
 	}

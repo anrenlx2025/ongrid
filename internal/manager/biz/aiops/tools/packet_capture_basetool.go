@@ -161,7 +161,8 @@ func (t *CapturePCAPTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 		// artifact; it does not change the managed host configuration. Keeping
 		// it read-class avoids applying the SOP gate intended for restart and
 		// configuration changes to an explicit, time-bounded diagnostic request.
-		Class: "read",
+		Class:        "read",
+		Confirmation: basetool.ConfirmationRequired,
 	}, nil
 }
 
@@ -193,7 +194,7 @@ func (t *CapturePCAPTool) InvokableRun(ctx context.Context, argsJSON string, opt
 		targets = append(targets, pcapbiz.SessionTarget{DeviceID: in.DeviceID, Interface: strings.TrimSpace(in.Interface)})
 	}
 	for _, target := range targets {
-		if !captureTargetExplicitlyConfirmed(resolved.UserText, resolved.ConfirmedDeviceIDs, target.DeviceID) {
+		if !resolved.HumanApproved && !captureTargetExplicitlyConfirmed(resolved.UserText, resolved.ConfirmedDeviceIDs, target.DeviceID) {
 			return "", fmt.Errorf("%s: device_id=%d was not explicitly confirmed by the user; ask the user to select or confirm the target device before capturing", ToolNameCapturePCAP, target.DeviceID)
 		}
 	}

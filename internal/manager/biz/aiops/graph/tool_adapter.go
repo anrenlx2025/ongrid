@@ -28,7 +28,6 @@ type toolMemo struct {
 	mu     sync.Mutex
 	m      map[string]string // (tool\x00args) -> result, identical-call cache
 	counts map[string]int    // tool name -> distinct executions this run
-	total  int               // all distinct executions this run
 	last   map[string]string // tool name -> most recent successful result this run
 }
 
@@ -61,20 +60,15 @@ func (t *toolMemo) bump(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.counts[name]++
-	t.total++
 }
 
-func (t *toolMemo) reserve(name string, perToolLimit, totalLimit int) (int, bool) {
+func (t *toolMemo) reserve(name string, perToolLimit int) (int, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if perToolLimit > 0 && t.counts[name] >= perToolLimit {
 		return t.counts[name], false
 	}
-	if totalLimit > 0 && t.total >= totalLimit {
-		return t.counts[name], false
-	}
 	t.counts[name]++
-	t.total++
 	return t.counts[name], true
 }
 
@@ -106,19 +100,13 @@ const (
 // which forces the agent to answer from what it already gathered. Generous
 // enough that normal multi-step investigation isn't clipped. A 30-call cap
 // merely turns a wrong route into a long, expensive failure, so the general
-// limit is intentionally small and evidence tools have a stricter limit.
-const maxToolCallsPerRun = 6
-
-const maxTotalToolCallsPerRun = 8
+// limit is intentionally small. There is deliberately no aggregate cap:
+// different tools contribute different evidence, so only repeated use of the
+// same tool is circuit-broken within one user turn.
+const maxToolCallsPerRun = 10
 
 func maxCallsForTool(name string) int {
 	switch name {
-	case "ToolSearch":
-		return 2
-	case toolNameQueryPromQL, "query_logql", "query_traceql":
-		return 4
-	case "host_bash", "query_k8s_snapshot", "AgentTool":
-		return 4
 	case "draft_config_change":
 		// Only a confirmable config_draft increments this counter;
 		// config_validation_failed remains retryable so the model can repair
@@ -225,9 +213,9 @@ func toolResultJSON(fields map[string]interface{}) string {
 // maxToolCallsPerRun. Shaped like a normal JSON tool result so the LLM reads
 // it as data and (re)directs to answering.
 func toolBudgetExceeded(name string, n int) string {
-	instruction := fmt.Sprintf("TERMINAL TOOL BUDGET RESULT. You have already called %q %d times in the current user turn — that is the per-tool limit for this turn only and it expires on the next user message. Your NEXT assistant message MUST be the final answer. Do NOT call this tool again. Do NOT call any substitute tool just to continue the same line of investigation. Answer from the results already gathered; if they're insufficient, state exactly what signal is missing.", name, n)
+	instruction := fmt.Sprintf("PER-TOOL CIRCUIT BREAKER. You have already called %q %d times in the current user turn — that limit applies only to this tool and expires on the next user message. Do NOT call this tool again. Synthesize from gathered evidence, or call a different tool only when it provides materially different evidence. Do not substitute another tool merely to continue the same query loop.", name, n)
 	if name == toolNameQueryPromQL {
-		instruction = fmt.Sprintf("TERMINAL TOOL BUDGET RESULT. You have already called %q %d times in the current user turn. Stop issuing one PromQL call per device/metric/mountpoint. Your NEXT assistant message MUST be the final answer from gathered data; if the data is insufficient, say which single aggregated PromQL expression should be run next time using sum/topk and by(device_id, mountpoint, fstype). Do NOT call another tool in this turn.", name, n)
+		instruction = fmt.Sprintf("PER-TOOL CIRCUIT BREAKER. You have already called %q %d times in the current user turn. Do not call query_promql again this turn. Synthesize from gathered metrics, or use a different telemetry tool only when it provides materially different evidence. If metric evidence is insufficient, explain what is missing and suggest one aggregated PromQL expression for the next user turn.", name, n)
 	}
 	b, err := json.Marshal(struct {
 		Status      string `json:"status"`
@@ -241,7 +229,7 @@ func toolBudgetExceeded(name string, n int) string {
 		Tool:        name,
 		Calls:       n,
 		Scope:       "current_user_turn",
-		FinalAnswer: true,
+		FinalAnswer: false,
 		Instruction: instruction,
 	})
 	if err != nil {
@@ -444,7 +432,7 @@ func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON stri
 		}
 		if a.cacheName != "" {
 			if reservesBeforeExecution(a.cacheName) {
-				if n, ok := a.memo.reserve(a.cacheName, maxCallsForTool(a.cacheName), maxTotalToolCallsPerRun); !ok {
+				if n, ok := a.memo.reserve(a.cacheName, maxCallsForTool(a.cacheName)); !ok {
 					return toolBudgetExceeded(a.cacheName, n), nil
 				}
 			} else if a.memo.count(a.cacheName) >= maxCallsForTool(a.cacheName) {

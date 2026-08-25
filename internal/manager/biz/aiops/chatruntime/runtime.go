@@ -41,7 +41,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -939,15 +938,11 @@ func resolveTurn(req *Request) (TurnPlan, string) {
 		return plan, "不能确定 NAT 或网关路径。要判断这个包是否经过 NAT 或网关，需要先明确具体包或会话：请提供 `pcap-session-*`、源/目的地址、端口、协议、时间窗，或说明从哪台 edge 到哪台设备/服务。没有这些信息我不能推断包走向。"
 	}
 	captureIntent := isStartCaptureIntent(req.UserText)
-	hostTargetIntent := requiresHostTarget(req.UserText)
-	hasTarget := hasExplicitHostTarget(req)
-	plan := PlanTurn(ResolvedFacts{Missing: (captureIntent || hostTargetIntent) && !hasTarget, Permitted: req.Role != "viewer", LongRunning: captureIntent})
-	if plan.Decision == DecisionClarify {
-		if captureIntent {
-			return plan, "要开始抓包，请先选择目标设备（使用 @ 选择设备），或明确提供 `device_id` 和网卡接口。"
-		}
-		return plan, "这个操作需要先确定目标设备。请使用 @ 选择设备，或明确提供 `device_id`。"
-	}
+	// Semantic target resolution stays in Understand with full history. A
+	// sensitive candidate such as capture transitions to Propose at the shared
+	// tool gate, which freezes tool+args and emits the existing confirmation
+	// card before execution.
+	plan := PlanTurn(ResolvedFacts{Permitted: req.Role != "viewer", NeedsConfirmation: captureIntent, LongRunning: captureIntent})
 	return plan, ""
 }
 
@@ -1015,6 +1010,7 @@ func isStartCaptureIntent(userText string) bool {
 	}
 	return strings.Contains(text, "pcap") ||
 		strings.Contains(text, "packet capture") ||
+		strings.Contains(text, "capture packet") ||
 		strings.Contains(text, "tcp port") ||
 		strings.Contains(text, "udp port") ||
 		strings.Contains(userText, "抓包") ||
@@ -1039,57 +1035,6 @@ func hasReadOnlyCaptureIntent(userText string) bool {
 func isCancelIntent(userText string) bool {
 	text := strings.ToLower(userText)
 	for _, phrase := range []string{"停止", "取消", "终止", "stop", "cancel", "abort"} {
-		if strings.Contains(text, phrase) || strings.Contains(userText, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasExplicitHostTarget(req *Request) bool {
-	if req == nil {
-		return false
-	}
-	text := strings.ToLower(req.UserText)
-	if len(confirmedDeviceIDs(req.Mentions)) > 0 || strings.Contains(text, "device_id") || strings.Contains(req.UserText, "@") {
-		return true
-	}
-	targetMarkers := []string{"edge-", "vm-", "node-", "host-", "server-", "device-"}
-	for _, marker := range targetMarkers {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return ipv4LikeRe.MatchString(text)
-}
-
-var ipv4LikeRe = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
-
-func requiresHostTarget(userText string) bool {
-	text := strings.ToLower(userText)
-	zh := userText
-	if hasGlobalOrReadOnlyIntent(userText) {
-		return false
-	}
-	hostIntentPhrases := []string{
-		"磁盘", "目录", "文件", "大文件", "进程", "端口", "服务重启", "重启服务", "网络接口", "网卡", "dns", "连通性",
-		"disk", "directory", "file", "process", "port", "restart service", "interface", "reachability",
-	}
-	for _, phrase := range hostIntentPhrases {
-		if strings.Contains(text, phrase) || strings.Contains(zh, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasGlobalOrReadOnlyIntent(userText string) bool {
-	text := strings.ToLower(userText)
-	globalPhrases := []string{
-		"列出", "所有", "各设备", "当前可用", "指标名", "promql", "源码", "实现", "知识", "内置知识", "产物", "会话", "报告",
-		"list", "all", "fleet", "metric catalog", "source", "code", "knowledge", "artifact", "report", "session",
-	}
-	for _, phrase := range globalPhrases {
 		if strings.Contains(text, phrase) || strings.Contains(userText, phrase) {
 			return true
 		}

@@ -197,11 +197,12 @@ func (t *ConfigTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 		}, nil
 	case configToolApplyChange:
 		return &basetool.ToolInfo{
-			Name:        ToolNameApplyConfigChange,
-			Description: "Apply a previously confirmed new alert-rule configuration draft.",
-			WhenToUse:   "MUTATING. Use only after the user explicitly confirms an alert-rule config_draft. Requires confirmed=true, an admin caller, domain=alert_rule, action=create, and the payload from the draft.",
-			Parameters:  applyConfigChangeSchema,
-			Class:       "write",
+			Name:         ToolNameApplyConfigChange,
+			Description:  "Apply a previously confirmed new alert-rule configuration draft.",
+			WhenToUse:    "MUTATING. Use only after the user explicitly confirms an alert-rule config_draft. Requires confirmed=true, an admin caller, domain=alert_rule, action=create, and the payload from the draft.",
+			Parameters:   applyConfigChangeSchema,
+			Class:        "write",
+			Confirmation: basetool.ConfirmationSelfManaged,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown config tool kind %q", t.kind)

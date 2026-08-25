@@ -63,15 +63,15 @@
 
 **AMD64**
 ```bash
-wget https://github.com/ongridio/ongrid/releases/download/v0.12.0/ongrid-v0.12.0-linux-amd64.tar.xz
-tar -xf ongrid-v0.12.0-linux-amd64.tar.xz && cd ongrid-v0.12.0-linux-amd64
+wget https://github.com/ongridio/ongrid/releases/download/v0.13.4/ongrid-v0.13.4-linux-amd64.tar.xz
+tar -xf ongrid-v0.13.4-linux-amd64.tar.xz && cd ongrid-v0.13.4-linux-amd64
 sudo ./install.sh
 ```
 
 **ARM64**
 ```bash
-wget https://github.com/ongridio/ongrid/releases/download/v0.12.0/ongrid-v0.12.0-linux-arm64.tar.xz
-tar -xf ongrid-v0.12.0-linux-arm64.tar.xz && cd ongrid-v0.12.0-linux-arm64
+wget https://github.com/ongridio/ongrid/releases/download/v0.13.4/ongrid-v0.13.4-linux-arm64.tar.xz
+tar -xf ongrid-v0.13.4-linux-arm64.tar.xz && cd ongrid-v0.13.4-linux-arm64
 sudo ./install.sh
 ```
 
@@ -79,10 +79,10 @@ sudo ./install.sh
 
 ```bash
 # AMD64
-wget https://ongrid.cloud/dl/ongrid-v0.12.0-linux-amd64.tar.xz
+wget https://ongrid.cloud/dl/ongrid-v0.13.4-linux-amd64.tar.xz
 
 # ARM64
-wget https://ongrid.cloud/dl/ongrid-v0.12.0-linux-arm64.tar.xz
+wget https://ongrid.cloud/dl/ongrid-v0.13.4-linux-arm64.tar.xz
 ```
 
 ## 产品导览
@@ -191,7 +191,7 @@ Ongrid 名称、Logo、域名和相关品牌资产不随 AGPLv3 授权，见
 ## 加入群组
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/175ee822-c557-48c4-aedf-a7e1dc8de4b7" alt="Ongrid 微信群二维码" width="200" />
+  <img src="docs/assets/community/wechat-group-qr.jpg" alt="Ongrid 微信群二维码" width="200" />
 </p>
 
 

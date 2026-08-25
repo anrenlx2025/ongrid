@@ -200,6 +200,7 @@ type ApprovalPending struct {
 	ApprovalID  string
 	ToolCallID  string
 	Kind        string
+	ToolName    string
 	Command     string
 	Credentials []string
 }
@@ -821,7 +822,7 @@ func filterToolsForAgentRole(bag []basetool.BaseTool, agentDef *Agent, isCoordin
 		// read-only artifact with no infra side-effect, so the write gate /
 		// viewer downgrade shouldn't hide them — generating a page is not a
 		// dangerous write the way arbitrary host exec is.
-		if viewerOnly && info.Class != "read" && !alwaysAvailableTools[info.Name] {
+		if viewerOnly && (info.Class != "read" || info.Confirmation == basetool.ConfirmationRequired) && !alwaysAvailableTools[info.Name] {
 			continue
 		}
 		// Dynamic tools (runtime-discovered: MCP servers HLD-018, and any future

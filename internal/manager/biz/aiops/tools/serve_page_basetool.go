@@ -52,11 +52,12 @@ const servePageWhenToUse = "把你生成的 HTML 报告 / 临时状态面板托�
 // Info — Class=write: it publishes a page (side-effecting) but not destructive.
 func (t *ServePageTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 	return &basetool.ToolInfo{
-		Name:        ToolNameServePage,
-		Description: "Host a generated HTML page at an internal, shareable URL (a diagnostic report / status panel). Returns the URL to give the user.",
-		WhenToUse:   servePageWhenToUse,
-		Parameters:  servePageSchema,
-		Class:       "write",
+		Name:         ToolNameServePage,
+		Description:  "Host a generated HTML page at an internal, shareable URL (a diagnostic report / status panel). Returns the URL to give the user.",
+		WhenToUse:    servePageWhenToUse,
+		Parameters:   servePageSchema,
+		Class:        "write",
+		Confirmation: basetool.ConfirmationNotRequired,
 	}, nil
 }
 

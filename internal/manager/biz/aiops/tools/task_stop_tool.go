@@ -54,11 +54,12 @@ type taskStopArgs struct {
 // Info returns the tool metadata.
 func (t *TaskStopTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 	return &basetool.ToolInfo{
-		Name:        TaskStopToolName,
-		Description: "Stop a previously-spawned sub-agent worker.",
-		WhenToUse:   taskStopWhenToUse,
-		Parameters:  json.RawMessage(taskStopSchema),
-		Class:       "write",
+		Name:         TaskStopToolName,
+		Description:  "Stop a previously-spawned sub-agent worker.",
+		WhenToUse:    taskStopWhenToUse,
+		Parameters:   json.RawMessage(taskStopSchema),
+		Class:        "write",
+		Confirmation: basetool.ConfirmationNotRequired,
 	}, nil
 }
 

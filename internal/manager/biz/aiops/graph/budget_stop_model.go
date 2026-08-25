@@ -23,60 +23,95 @@ func wrapBudgetStopModel(inner einomodel.ToolCallingChatModel) einomodel.ToolCal
 }
 
 func (m *budgetStopModel) Generate(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
-	if msg, ok := finalAnswerAfterToolBudget(input); ok {
-		return msg, nil
+	if env, ok := latestTerminalToolBudget(input); ok {
+		return m.synthesizeAfterToolBudget(ctx, input, env.Tool, opts...)
 	}
 	msg, err := m.inner.Generate(ctx, input, opts...)
 	if err != nil {
 		return nil, err
 	}
-	return pruneToolCallsForBudget(input, msg), nil
+	pruned, exhaustedTool := pruneToolCallsForBudget(input, msg)
+	if exhaustedTool != "" {
+		return m.synthesizeAfterToolBudget(ctx, input, exhaustedTool, opts...)
+	}
+	return pruned, nil
 }
 
 func (m *budgetStopModel) Stream(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
-	if msg, ok := finalAnswerAfterToolBudget(input); ok {
+	if env, ok := latestTerminalToolBudget(input); ok {
+		msg, err := m.synthesizeAfterToolBudget(ctx, input, env.Tool, opts...)
+		if err != nil {
+			return nil, err
+		}
 		return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 	}
 	return m.inner.Stream(ctx, input, opts...)
 }
 
-func pruneToolCallsForBudget(history []*schema.Message, msg *schema.Message) *schema.Message {
+func (m *budgetStopModel) synthesizeAfterToolBudget(ctx context.Context, input []*schema.Message, tool string, opts ...einomodel.Option) (*schema.Message, error) {
+	tool = strings.TrimSpace(tool)
+	if tool == "" {
+		tool = "tool"
+	}
+	reminder := schema.SystemMessage("The per-tool circuit breaker for `" + tool + "` has been reached in this user turn. Do not call that tool again. Either synthesize the answer from existing evidence or call a different tool only when it provides materially different evidence. Follow the configured response language, explain evidence limits honestly, and never paste raw tool JSON or internal reasoning.")
+	prompt := make([]*schema.Message, 0, len(input)+1)
+	prompt = append(prompt, input...)
+	prompt = append(prompt, reminder)
+	msg, err := m.inner.Generate(ctx, prompt, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if msg == nil {
+		return &schema.Message{Role: schema.Assistant, Content: budgetPrunedFinalContent(input, tool)}, nil
+	}
+	if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) != "" {
+		return msg, nil
+	}
+	pruned, stillExhausted := pruneToolCallsForBudget(input, msg)
+	if stillExhausted == "" && pruned != nil && (len(pruned.ToolCalls) > 0 || strings.TrimSpace(pruned.Content) != "") {
+		return pruned, nil
+	}
+	cp := *msg
+	cp.Role = schema.Assistant
+	cp.ToolCalls = nil
+	cp.Content = budgetPrunedFinalContent(input, tool)
+	return &cp, nil
+}
+
+func pruneToolCallsForBudget(history []*schema.Message, msg *schema.Message) (*schema.Message, string) {
 	if msg == nil || len(msg.ToolCalls) == 0 {
-		return msg
+		return msg, ""
 	}
 	if guarded := guardUnresolvedDeviceTarget(history, msg); guarded != nil {
-		return guarded
+		return guarded, ""
 	}
-	perToolCounts, total := priorToolCounts(history)
+	perToolCounts := priorToolCounts(history)
 	kept := make([]schema.ToolCall, 0, len(msg.ToolCalls))
+	exhaustedTool := ""
 	for _, call := range msg.ToolCalls {
 		name := strings.TrimSpace(call.Function.Name)
 		if name == "" {
 			continue
 		}
-		if total >= maxTotalToolCallsPerRun {
-			continue
-		}
 		if perToolCounts[name] >= maxCallsForTool(name) {
+			if exhaustedTool == "" {
+				exhaustedTool = name
+			}
 			continue
 		}
 		perToolCounts[name]++
-		total++
 		kept = append(kept, call)
 	}
 	if len(kept) == len(msg.ToolCalls) {
-		return msg
+		return msg, ""
 	}
 	cp := *msg
 	cp.ToolCalls = kept
 	if len(kept) == 0 {
-		tool := "tool"
-		if len(msg.ToolCalls) > 0 {
-			tool = strings.TrimSpace(msg.ToolCalls[0].Function.Name)
-		}
-		cp.Content = budgetPrunedFinalContent(history, tool)
+		cp.Content = budgetPrunedFinalContent(history, exhaustedTool)
+		return &cp, exhaustedTool
 	}
-	return &cp
+	return &cp, ""
 }
 
 func guardUnresolvedDeviceTarget(history []*schema.Message, msg *schema.Message) *schema.Message {
@@ -144,9 +179,8 @@ func containsHostScopedToolCall(calls []schema.ToolCall) bool {
 	return false
 }
 
-func priorToolCounts(messages []*schema.Message) (map[string]int, int) {
+func priorToolCounts(messages []*schema.Message) map[string]int {
 	counts := make(map[string]int)
-	total := 0
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
 		if msg == nil {
@@ -163,26 +197,18 @@ func priorToolCounts(messages []*schema.Message) (map[string]int, int) {
 			continue
 		}
 		counts[name]++
-		total++
 	}
-	return counts, total
+	return counts
 }
 
 func budgetPrunedFinalContent(messages []*schema.Message, tool string) string {
 	if strings.TrimSpace(tool) == "" {
 		tool = "tool"
 	}
-	evidence := summarizeRecentToolEvidence(messages)
 	if wantsEnglishResponse(messages) {
-		if evidence == "" {
-			return "I have converged this investigation instead of issuing more `" + tool + "` calls. The evidence collected so far is not enough for a confident conclusion; send a narrower target or time window and I can continue in the next message."
-		}
-		return "I have converged this investigation instead of issuing more `" + tool + "` calls.\n\nBased on the evidence already collected:\n" + evidence + "\n\nNext step: use these findings as the current conclusion. If you need deeper proof, continue with a narrower target or time window."
+		return "This turn reached the per-tool safety limit for `" + tool + "`, and the model did not produce a usable synthesis. No raw tool output is shown. Send a narrower target or time window to continue in a new turn."
 	}
-	if evidence == "" {
-		return "我已收敛本轮排查，没有继续发散调用 `" + tool + "`。当前证据还不足以形成可靠结论；请在下一条消息补充更明确的目标或时间窗，我再继续。"
-	}
-	return "我已收敛本轮排查，没有继续发散调用 `" + tool + "`。\n\n当前结论先按本轮已经拿到的证据处理：\n" + evidence + "\n\n下一步：优先处理上述最明确的异常点；如果需要更深的证据，请在下一条消息指定更窄的目标或时间窗。"
+	return "本轮 `" + tool + "` 已达到单工具安全上限，模型未能生成可用的归纳结论。这里不会展示工具原始结果；请在下一条消息给出更窄的目标或时间窗后继续。"
 }
 
 func summarizeRecentToolEvidence(messages []*schema.Message) string {

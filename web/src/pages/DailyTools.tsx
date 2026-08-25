@@ -157,6 +157,7 @@ export default function DailyToolsPage() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [historyHydrated, setHistoryHydrated] = useState(false);
   const pendingRestoredRunIDsRef = useRef(new Set<string>());
+  const capturePollInFlightRef = useRef(new Set<string>());
 
   const [ping, setPing] = useState<PingForm>({ host: '', count: '4', timeout_ms: '3000' });
   const [dns, setDNS] = useState<DNSForm>({ host: '', timeout_ms: '3000' });
@@ -287,6 +288,8 @@ export default function DailyToolsPage() {
   }
 
   async function pollCaptureRun(run: CaptureQuickRun) {
+    if (capturePollInFlightRef.current.has(run.id)) return;
+    capturePollInFlightRef.current.add(run.id);
     try {
       if (run.sessionID) {
         const out = await refreshPacketCaptureSession(run.sessionID);
@@ -298,6 +301,8 @@ export default function DailyToolsPage() {
       applyCapturePoll(run, captures, captureQuickLink(captures[0]));
     } catch (err) {
       appendCaptureLog(run.id, { stream: 'stderr', message: err instanceof ApiError ? err.message : (err as Error).message });
+    } finally {
+      capturePollInFlightRef.current.delete(run.id);
     }
   }
 

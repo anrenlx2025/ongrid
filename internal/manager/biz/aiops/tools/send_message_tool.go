@@ -12,7 +12,7 @@ import (
 )
 
 // SendMessageTool continues a worker by sending a follow-up message
-//The wire name "SendMessage" matches claude-code's
+// The wire name "SendMessage" matches claude-code's
 // catalog so the LLM picks the right tool by name.
 type SendMessageTool struct {
 	spawner WorkerSpawner
@@ -59,11 +59,12 @@ type sendMessageArgs struct {
 // Info returns the tool metadata.
 func (t *SendMessageTool) Info(_ context.Context) (*basetool.ToolInfo, error) {
 	return &basetool.ToolInfo{
-		Name:        SendMessageToolName,
-		Description: "Send a follow-up message to a previously-spawned sub-agent worker.",
-		WhenToUse:   sendMessageWhenToUse,
-		Parameters:  json.RawMessage(sendMessageSchema),
-		Class:       "write",
+		Name:         SendMessageToolName,
+		Description:  "Send a follow-up message to a previously-spawned sub-agent worker.",
+		WhenToUse:    sendMessageWhenToUse,
+		Parameters:   json.RawMessage(sendMessageSchema),
+		Class:        "write",
+		Confirmation: basetool.ConfirmationNotRequired,
 	}, nil
 }
 
