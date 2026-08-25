@@ -268,6 +268,12 @@ func TestRenderJournaldIsEnabledByDefault(t *testing.T) {
 		t.Fatal("journald receiver must be enabled by default")
 	}
 	operators := list(t, asObject(t, receiver)["operators"])
+	for _, operator := range operators[:len(operators)-1] {
+		field := scalar(t, asObject(t, operator), "field")
+		if field != `resource["device_id"]` && field != `resource["ongrid_source"]` {
+			t.Fatalf("journald resource field = %q", field)
+		}
+	}
 	message := asObject(t, operators[len(operators)-1])
 	if scalar(t, message, "id") != "journald-message" || scalar(t, message, "type") != "move" ||
 		scalar(t, message, "from") != "body.MESSAGE" || scalar(t, message, "to") != "body" {

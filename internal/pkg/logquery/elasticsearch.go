@@ -370,8 +370,9 @@ func (c *ElasticsearchClient) Histogram(ctx context.Context, req SearchRequest, 
 	if err != nil {
 		return nil, err
 	}
-	maxBound := req.End.Add(-time.Nanosecond).UTC().Format(time.RFC3339Nano)
-	minBound := req.Start.UTC().Format(time.RFC3339Nano)
+	elasticsearchStart := req.Start.Truncate(time.Millisecond)
+	maxBound := elasticsearchStart.Add(req.End.Sub(req.Start)).Add(-time.Nanosecond).UTC().Format(time.RFC3339Nano)
+	minBound := elasticsearchStart.UTC().Format(time.RFC3339Nano)
 	dateHistogram := map[string]any{
 		"field":          "@timestamp",
 		"fixed_interval": elasticsearchDuration(interval),
@@ -385,7 +386,7 @@ func (c *ElasticsearchClient) Histogram(ctx context.Context, req SearchRequest, 
 			"max": maxBound,
 		},
 	}
-	if offset := elasticsearchHistogramOffset(req.Start, interval); offset > 0 {
+	if offset := elasticsearchHistogramOffset(elasticsearchStart, interval); offset > 0 {
 		dateHistogram["offset"] = elasticsearchDuration(offset)
 	}
 	body := map[string]any{
@@ -417,7 +418,7 @@ func (c *ElasticsearchClient) Histogram(ctx context.Context, req SearchRequest, 
 		if err != nil {
 			return nil, fmt.Errorf("logquery: decode Elasticsearch histogram timestamp: %w", err)
 		}
-		buckets = append(buckets, HistogramBucket{Start: ts.UTC(), Count: bucket.DocCount})
+		buckets = append(buckets, HistogramBucket{Start: req.Start.Add(ts.Sub(elasticsearchStart)).UTC(), Count: bucket.DocCount})
 	}
 	return buckets, nil
 }

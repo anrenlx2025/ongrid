@@ -233,7 +233,8 @@ func TestMaxESSearchResponseBytesUsesFixedHardLimit(t *testing.T) {
 }
 
 func TestElasticsearchClient_HistogramAlignsBucketsToRequestStart(t *testing.T) {
-	start := time.Date(2026, 8, 18, 10, 0, 30, 0, time.UTC)
+	start := time.Date(2026, 8, 18, 10, 0, 30, 323_000, time.UTC)
+	elasticsearchStart := start.Truncate(time.Millisecond)
 	end := start.Add(2*time.Minute + 30*time.Second)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/_search") {
@@ -254,9 +255,9 @@ func TestElasticsearchClient_HistogramAlignsBucketsToRequestStart(t *testing.T) 
 			t.Fatalf("histogram is missing hard_bounds: %#v", histogram)
 		}
 		writeTestJSON(t, w, map[string]any{"aggregations": map[string]any{"timeline": map[string]any{"buckets": []any{
-			map[string]any{"key_as_string": start.Format(time.RFC3339Nano), "doc_count": 2},
-			map[string]any{"key_as_string": start.Add(time.Minute).Format(time.RFC3339Nano), "doc_count": 3},
-			map[string]any{"key_as_string": start.Add(2 * time.Minute).Format(time.RFC3339Nano), "doc_count": 1},
+			map[string]any{"key_as_string": elasticsearchStart.Format(time.RFC3339Nano), "doc_count": 2},
+			map[string]any{"key_as_string": elasticsearchStart.Add(time.Minute).Format(time.RFC3339Nano), "doc_count": 3},
+			map[string]any{"key_as_string": elasticsearchStart.Add(2 * time.Minute).Format(time.RFC3339Nano), "doc_count": 1},
 		}}}})
 	}))
 	t.Cleanup(server.Close)

@@ -403,7 +403,7 @@ func resourceAddOperators(resource map[string]interface{}) []interface{} {
 	for _, key := range keys {
 		operators = append(operators, map[string]interface{}{
 			"id": "resource-" + jobNameSafe(key), "type": "add",
-			"field": fmt.Sprintf(`resource.attributes["%s"]`, key), "value": resource[key],
+			"field": fmt.Sprintf(`resource["%s"]`, key), "value": resource[key],
 		})
 	}
 	return operators
