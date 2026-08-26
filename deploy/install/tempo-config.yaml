@@ -22,7 +22,7 @@ ingester:
 
 compactor:
   compaction:
-    block_retention: 168h            # 7 days (ADR-013 §决策第 4 条)
+    block_retention: "${TEMPO_BLOCK_RETENTION:-168h}"
     compacted_block_retention: 1h
     compaction_window: 1h
     max_block_bytes: 100_000_000     # ~100 MB blocks

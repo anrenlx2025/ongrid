@@ -111,10 +111,8 @@ func (s *Service) Set(ctx context.Context, category, key, value string, sensitiv
 	if category == "" || key == "" {
 		return fmt.Errorf("%w: category/key required", errs.ErrInvalid)
 	}
-	if category == model.CategoryAgent {
-		if err := validateAgentSetting(key, value); err != nil {
-			return err
-		}
+	if err := validateSetting(category, key, value); err != nil {
+		return err
 	}
 	if _, err := s.repo.Set(ctx, category, key, value, sensitive); err != nil {
 		return err
@@ -142,10 +140,8 @@ func (s *Service) SetBatch(ctx context.Context, settings []model.Setting) error 
 		if settings[i].Category == "" || settings[i].Key == "" {
 			return fmt.Errorf("%w: category/key required", errs.ErrInvalid)
 		}
-		if settings[i].Category == model.CategoryAgent {
-			if err := validateAgentSetting(settings[i].Key, settings[i].Value); err != nil {
-				return err
-			}
+		if err := validateSetting(settings[i].Category, settings[i].Key, settings[i].Value); err != nil {
+			return err
 		}
 	}
 	if err := s.repo.SetBatch(ctx, settings); err != nil {
@@ -161,6 +157,39 @@ func (s *Service) SetBatch(ctx context.Context, settings []model.Setting) error 
 		slog.Int("count", len(settings)),
 		slog.String("category", settings[0].Category),
 	)
+	return nil
+}
+
+func validateSetting(category, key, value string) error {
+	switch category {
+	case model.CategoryAgent:
+		return validateAgentSetting(key, value)
+	case model.CategoryObservability:
+		return validateObservabilitySetting(key, value)
+	default:
+		return nil
+	}
+}
+
+func validateObservabilitySetting(key, value string) error {
+	switch key {
+	case model.KeyPrometheusRetentionTime, model.KeyLokiRetentionPeriod, model.KeyTempoBlockRetention:
+		return validateBoundedUnit(key, value, "h", 24, 24*3650)
+	case model.KeyPrometheusRetentionSize:
+		return validateBoundedUnit(key, value, "GB", 1, 10240)
+	default:
+		return fmt.Errorf("%w: unsupported observability setting %q", errs.ErrInvalid, key)
+	}
+}
+
+func validateBoundedUnit(key, value, unit string, min, max int) error {
+	if !strings.HasSuffix(value, unit) {
+		return fmt.Errorf("%w: %s must use %s", errs.ErrInvalid, key, unit)
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(value, unit))
+	if err != nil || n < min || n > max {
+		return fmt.Errorf("%w: %s must be between %d%s and %d%s", errs.ErrInvalid, key, min, unit, max, unit)
+	}
 	return nil
 }
 

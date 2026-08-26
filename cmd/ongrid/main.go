@@ -515,7 +515,7 @@ func main() {
 	// take effect on the edge's next reload (push or 60s safety-net poll).
 	lokiResolver := managerbizsetting.NewLokiResolver(settingSvc, cfg.Logs.URL)
 	tempoResolver := managerbizsetting.NewTempoResolver(settingSvc, cfg.Traces.URL)
-	settingHandler := managerserversetting.NewHandler(settingSvc)
+	settingHandler := managerserversetting.NewHandler(settingSvc, managerbizsetting.NewObservabilityApplierFromEnv(settingSvc, log))
 
 	// Grafana integration biz layer (PR-2). Wraps the pkg/grafana HTTP
 	// client and reads creds from system_settings on every Test/Sync call.

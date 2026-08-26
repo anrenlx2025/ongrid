@@ -111,6 +111,8 @@ for arch in amd64 arm64; do
     "$package_root/pcap-parser-auth.sh" \
     "$package_root/docker-compose.yml" \
     "$package_root/prometheus.yml" \
+    "$package_root/loki-config.yaml" \
+    "$package_root/tempo-config.yaml" \
     "$package_root/edge/fetch-edge-assets.sh" \
     "$package_root/edge/verify-edge-deps-archive.sh" \
     "$package_root/edge/edge-assets-lib.sh" \
@@ -124,6 +126,18 @@ for arch in amd64 arm64; do
   tar -xf "$archive" -C "$extract_dir"
   grep -Fqx 'vtest' "$extract_dir/$package_root/VERSION"
   grep -Fqx 'ONGRID_VERSION=vtest' "$extract_dir/$package_root/.env.example"
+  grep -Fqx 'ONGRID_PROM_RETENTION_TIME=2160h' "$extract_dir/$package_root/.env.example"
+  grep -Fqx 'ONGRID_PROM_RETENTION_SIZE=20GB' "$extract_dir/$package_root/.env.example"
+  grep -Fqx 'ONGRID_LOKI_RETENTION_PERIOD=720h' "$extract_dir/$package_root/.env.example"
+  grep -Fqx 'ONGRID_TEMPO_BLOCK_RETENTION=168h' "$extract_dir/$package_root/.env.example"
+  grep -Fq -- '--storage.tsdb.retention.time=${ONGRID_PROM_RETENTION_TIME:-2160h}' \
+    "$extract_dir/$package_root/docker-compose.yml"
+  grep -Fq -- '--storage.tsdb.retention.size=${ONGRID_PROM_RETENTION_SIZE:-20GB}' \
+    "$extract_dir/$package_root/docker-compose.yml"
+  grep -Fq 'retention_period: "${LOKI_RETENTION_PERIOD:-720h}"' \
+    "$extract_dir/$package_root/loki-config.yaml"
+  grep -Fq 'block_retention: "${TEMPO_BLOCK_RETENTION:-168h}"' \
+    "$extract_dir/$package_root/tempo-config.yaml"
   grep -Fxq 'ONGRID_EDGE_DEPS_TAG=edge-deps-test' \
     "$extract_dir/$package_root/edge/edge-artifacts.env"
   grep -Fxq 'ONGRID_EDGE_TARGETS=linux-amd64 linux-arm64' \

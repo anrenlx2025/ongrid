@@ -101,6 +101,28 @@ describe('SettingsIntegrations log backend presentation', () => {
     vi.restoreAllMocks();
   });
 
+  it('places built-in storage limits under each integration advanced section', async () => {
+    vi.mocked(getLogBackend).mockResolvedValue(backend('unselected', 'loki'));
+
+    render(
+      <MemoryRouter initialEntries={['/settings/integrations']}>
+        <SettingsIntegrations />
+      </MemoryRouter>,
+    );
+
+    const prometheus = (await screen.findByRole('heading', { name: 'Prometheus 集成' })).closest('section');
+    const loki = await screen.findByRole('region', { name: 'Loki 日志后端配置' });
+    const tempo = (await screen.findByRole('heading', { name: 'Tempo 集成（链路）' })).closest('section');
+    expect(prometheus).not.toBeNull();
+    expect(tempo).not.toBeNull();
+    expect(within(prometheus!).getByRole('button', { name: '高级配置：内置存储限制' })).toBeVisible();
+    expect(within(loki).getByRole('button', { name: '高级配置：内置存储限制' })).toBeVisible();
+    expect(within(tempo!).getByRole('button', { name: '高级配置：内置存储限制' })).toBeVisible();
+
+    fireEvent.click(within(prometheus!).getByRole('button', { name: '高级配置：内置存储限制' }));
+    expect(await within(prometheus!).findByText('仅对 Ongrid 内置 Prometheus 生效。')).toBeVisible();
+  });
+
   it('selects Loki immediately and leaves device verification to the separate action', async () => {
     let currentBackend = backend('selected');
     const activeLoki = {

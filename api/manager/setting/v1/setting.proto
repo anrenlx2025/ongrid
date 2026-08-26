@@ -6,6 +6,11 @@ option go_package = "github.com/ongridio/ongrid/api/gen/manager/setting/v1;setti
 
 // SettingService 管理管理员可编辑的运行时配置。
 service SettingService {
+    // ApplyBuiltInObservabilityLimits saves storage limits and recreates only
+    // the selected built-in Compose service in explicitly enabled test setups.
+    // HTTP implementation:
+    // POST /api/v1/system-settings/observability/{service}/apply.
+    rpc ApplyBuiltInObservabilityLimits(ApplyBuiltInObservabilityLimitsRequest) returns (ApplyBuiltInObservabilityLimitsResponse);
     // ValidateLLMConfiguration 使用未落库的草稿配置发起最小模型请求，
     // 返回可机器识别的失败原因。HTTP 实现：
     // POST /api/v1/integrations/llm/test。
@@ -14,6 +19,17 @@ service SettingService {
     // 全部通过后原子保存；空 api_key 表示显式禁用该提供商。
     // HTTP 实现：POST /api/v1/integrations/llm/validate-and-save。
     rpc ValidateAndSaveLLMConfiguration(ValidateAndSaveLLMConfigurationRequest) returns (ValidateAndSaveLLMConfigurationResponse);
+}
+
+message ApplyBuiltInObservabilityLimitsRequest {
+    // service is one of prometheus, loki, or tempo.
+    string service = 1 [json_name = "service"];
+    // values accepts only the documented retention keys for service.
+    map<string, string> values = 2 [json_name = "values"];
+}
+
+message ApplyBuiltInObservabilityLimitsResponse {
+    string status = 1 [json_name = "status"];
 }
 
 message ValidateLLMConfigurationRequest {

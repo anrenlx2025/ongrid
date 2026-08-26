@@ -43,6 +43,17 @@ export function deleteSetting(category: string, key: string): Promise<void> {
   );
 }
 
+export function applyObservabilityLimits(
+  service: 'prometheus' | 'loki' | 'tempo',
+  values: Record<string, string>,
+): Promise<{ status: string }> {
+  return request<{ status: string }>(
+    'POST',
+    `/system-settings/observability/${service}/apply`,
+    { values },
+  );
+}
+
 // revealSetting returns the cleartext value for a sensitive row. Admin-only.
 // The UI uses this to populate sensitive inputs as ●●●●●● by default
 // while still allowing an eye-toggle reveal of the actual chars.
