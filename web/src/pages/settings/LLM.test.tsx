@@ -52,6 +52,27 @@ beforeEach(() => {
 });
 
 describe('SettingsLLM configuration probe', () => {
+  it('shows configured providers and adds another provider on demand', async () => {
+    server.use(
+      http.get('/api/v1/system-settings', () => HttpResponse.json({ items: baseRows(), total: 4 })),
+      http.get('/api/v1/system-settings/llm/openai_api_key/reveal', () => HttpResponse.json({ value: 'secret-key' })),
+    );
+
+    await renderPage();
+    await openAIControls();
+    expect(screen.queryByTestId('llm-provider-anthropic')).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await act(async () => {
+      await user.click(screen.getByText('添加模型供应商'));
+      await user.click(within(screen.getByTestId('llm-provider-picker')).getByRole('button', { name: /Anthropic/ }));
+    });
+
+    const anthropicCard = await screen.findByTestId('llm-provider-anthropic');
+    await waitFor(() => expect(within(anthropicCard).queryByText('加载中…')).not.toBeInTheDocument());
+    expect(screen.queryByTestId('llm-provider-gemini')).not.toBeInTheDocument();
+  });
+
   it('shows a distinct model-not-found reason for the current draft', async () => {
     let probeBody: Record<string, unknown> | null = null;
     const rows = baseRows();

@@ -193,10 +193,33 @@ export default function SettingsLLM() {
   // first (OpenAI / Anthropic / Gemini). Keeps the page in the order
   // operators are most likely to fill in.
   const providers = orderedProviders(locale);
+  const [settings, setSettings] = useState<SystemSetting[] | null>(null);
+  const [visibleProviderIDs, setVisibleProviderIDs] = useState<LLMProviderID[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listSettings('llm')
+      .then((r) => {
+        if (cancelled) return;
+        const items = r.items as SystemSetting[];
+        setSettings(items);
+        setVisibleProviderIDs(
+          LLM_PROVIDERS.filter((meta) => providerConfigured(items, meta)).map((meta) => meta.id),
+        );
+      })
+      .catch((e) => {
+        if (!cancelled) setLoadError(e instanceof ApiError ? e.message : (e as Error).message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const visibleProviders = providers.filter((meta) => visibleProviderIDs.includes(meta.id));
+  const availableProviders = providers.filter((meta) => !visibleProviderIDs.includes(meta.id));
+
   return (
-    // One Card per provider (Integrations-style), instead of nesting
-    // all 6 inside a single big card. Lets each provider have its own
-    // breathing room + per-provider hint copy on the card.
     <div className="space-y-4">
       <div className="rounded-lg border border-zinc-800/60 bg-zinc-900/30 px-4 py-3 text-[12px] text-zinc-400">
         <div className="mb-1 flex items-center gap-2 text-zinc-200">
@@ -210,17 +233,80 @@ export default function SettingsLLM() {
           {tr('测试配置会由 Manager 对列表中的每个模型发起一次最小请求，可能消耗少量 token；非空配置保存前必须全部验证通过。', 'The Manager tests every listed model with one minimal request, which may consume a few tokens; all models in a non-empty configuration must pass before saving.')}
         </div>
       </div>
-      {providers.map((meta) => (
-        <LLMProviderCard key={meta.id} meta={meta} />
-      ))}
+      {loadError ? (
+        <Card className="p-4 text-sm text-red-400">{loadError}</Card>
+      ) : settings === null ? (
+        <Card className="flex h-24 items-center justify-center text-sm text-zinc-500">
+          <Loader2 size={14} className="mr-2 animate-spin" /> {tr('加载模型配置…', 'Loading model configuration…')}
+        </Card>
+      ) : (
+        <>
+          {availableProviders.length > 0 && (
+            <ProviderPicker
+              providers={availableProviders}
+              onAdd={(id) => setVisibleProviderIDs((current) => [...current, id])}
+            />
+          )}
+          {visibleProviders.map((meta) => (
+            <LLMProviderCard key={meta.id} meta={meta} initialSettings={settings} />
+          ))}
+        </>
+      )}
     </div>
   );
 }
 
-function LLMProviderCard({ meta }: { meta: LLMProviderMeta }) {
+function providerConfigured(items: SystemSetting[], meta: LLMProviderMeta): boolean {
+  const hasAPIKey = items.some((item) => item.key === meta.keyAPIKey && (item.value ?? '').trim() !== '');
+  const hasBaseURL = items.some((item) => item.key === meta.keyBaseURL && (item.value ?? '').trim() !== '');
+  return hasAPIKey && (!meta.custom || hasBaseURL);
+}
+
+function ProviderPicker({
+  providers,
+  onAdd,
+}: {
+  providers: LLMProviderMeta[];
+  onAdd(id: LLMProviderID): void;
+}) {
+  const { tr } = useI18n();
+  return (
+    <Card className="p-0" data-testid="llm-provider-picker">
+      <details>
+        <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-medium text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500 [&::-webkit-details-marker]:hidden">
+          <Plus size={15} />
+          <span>{tr('添加模型供应商', 'Add model provider')}</span>
+          <span className="ml-auto text-xs font-normal text-zinc-500">
+            {tr(`${providers.length} 个可选`, `${providers.length} available`)}
+          </span>
+        </summary>
+        <div className="divide-y divide-zinc-800/60 border-t border-zinc-800/60">
+          {providers.map((meta) => (
+            <button
+              key={meta.id}
+              type="button"
+              onClick={() => onAdd(meta.id)}
+              className="flex min-h-11 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-zinc-800/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500"
+            >
+              <ProviderIcon provider={meta.id} size={18} />
+              <span className="min-w-0">
+                <span className="block text-sm text-zinc-200">{tr(meta.label, meta.labelEn ?? meta.label)}</span>
+                <span className="block truncate text-[11px] text-zinc-500">{tr(meta.hintZh, meta.hintEn)}</span>
+              </span>
+              <Plus size={14} className="ml-auto shrink-0 text-zinc-500" />
+            </button>
+          ))}
+        </div>
+      </details>
+    </Card>
+  );
+}
+
+function LLMProviderCard({ meta, initialSettings }: { meta: LLMProviderMeta; initialSettings: SystemSetting[] }) {
   const { tr } = useI18n();
   const [server, setServer] = useState<LLMProviderForm>(emptyLLMForm);
   const [draft, setDraft] = useState<LLMProviderForm>(emptyLLMForm);
+  const [configured, setConfigured] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -230,13 +316,13 @@ function LLMProviderCard({ meta }: { meta: LLMProviderMeta }) {
   const [probe, setProbe] = useState<LLMProbeState>({ kind: 'idle' });
   const probeVersion = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (initial?: SystemSetting[]) => {
     setLoading(true);
     setErr(null);
     try {
-      const r = await listSettings('llm');
+      const items = initial ?? (await listSettings('llm')).items as SystemSetting[];
       const next: LLMProviderForm = { ...emptyLLMForm, models: [] };
-      for (const it of r.items as SystemSetting[]) {
+      for (const it of items) {
         if (it.key === meta.keyBaseURL) next.base_url = it.value ?? '';
         if (it.key === meta.keyDefaultModel) next.default_model = it.value ?? '';
         if (it.key === meta.keyModels && it.value) {
@@ -250,7 +336,7 @@ function LLMProviderCard({ meta }: { meta: LLMProviderMeta }) {
           }
         }
       }
-      const apiRow = (r.items as SystemSetting[]).find((it) => it.key === meta.keyAPIKey);
+      const apiRow = items.find((it) => it.key === meta.keyAPIKey);
       if (apiRow && (apiRow.value ?? '') !== '') {
         try {
           const real = await revealSetting('llm', meta.keyAPIKey);
@@ -261,6 +347,7 @@ function LLMProviderCard({ meta }: { meta: LLMProviderMeta }) {
       }
       setServer(next);
       setDraft(next);
+      setConfigured(providerConfigured(items, meta));
       setRevealed(false);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : (e as Error).message);
@@ -270,8 +357,8 @@ function LLMProviderCard({ meta }: { meta: LLMProviderMeta }) {
   }, [meta]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void refresh(initialSettings);
+  }, [initialSettings, refresh]);
 
   const dirty =
     draft.api_key !== server.api_key ||
@@ -417,10 +504,6 @@ function LLMProviderCard({ meta }: { meta: LLMProviderMeta }) {
       setSaving(false);
     }
   };
-
-  // A custom provider also needs a base URL to be reachable; the named
-  // providers have a working default endpoint, so a key alone suffices.
-  const configured = server.api_key.trim() !== '' && (!meta.custom || server.base_url.trim() !== '');
 
   return (
     <Card className="p-5" data-testid={`llm-provider-${meta.id}`}>
