@@ -45,6 +45,18 @@ const (
 	CategoryPlatform  = "platform"  // platform-wide infrastructure behaviour toggles
 )
 
+const CategoryObservability = "observability"
+
+// Well-known keys under CategoryObservability. The integration cards persist
+// these values before an explicitly enabled test-environment applicator updates
+// the matching ONGRID_* variables and recreates the selected built-in service.
+const (
+	KeyPrometheusRetentionTime = "prometheus_retention_time"
+	KeyPrometheusRetentionSize = "prometheus_retention_size"
+	KeyLokiRetentionPeriod     = "loki_retention_period"
+	KeyTempoBlockRetention     = "tempo_block_retention"
+)
+
 // Well-known keys under CategoryPlatform.
 const (
 	// KeyNetworkDiscoveryEnabled controls whether the manager accepts passive

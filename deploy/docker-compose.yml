@@ -238,8 +238,8 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=90d
-      - --storage.tsdb.retention.size=20GB
+      - --storage.tsdb.retention.time=${ONGRID_PROM_RETENTION_TIME:-2160h}
+      - --storage.tsdb.retention.size=${ONGRID_PROM_RETENTION_SIZE:-20GB}
       - --web.enable-remote-write-receiver
       - --web.enable-lifecycle
       - --web.external-url=/prometheus/
@@ -266,8 +266,11 @@ services:
     image: docker.cnb.cool/ongridio/ongrid/loki:3.4.0
     container_name: ongrid-loki
     restart: unless-stopped
+    environment:
+      LOKI_RETENTION_PERIOD: ${ONGRID_LOKI_RETENTION_PERIOD:-720h}
     command:
       - -config.file=/etc/loki/local-config.yaml
+      - -config.expand-env=true
     volumes:
       - loki_data:/loki
       - ./install/loki-config.yaml:/etc/loki/local-config.yaml:ro
@@ -282,8 +285,11 @@ services:
     image: docker.cnb.cool/ongridio/ongrid/tempo:2.10.0
     container_name: ongrid-tempo
     restart: unless-stopped
+    environment:
+      TEMPO_BLOCK_RETENTION: ${ONGRID_TEMPO_BLOCK_RETENTION:-168h}
     command:
       - -config.file=/etc/tempo/tempo.yaml
+      - -config.expand-env=true
     volumes:
       - tempo_data:/var/tempo
       - ./install/tempo-config.yaml:/etc/tempo/tempo.yaml:ro

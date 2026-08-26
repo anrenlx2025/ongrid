@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -19,6 +20,7 @@ import (
 	bizaudit "github.com/ongridio/ongrid/internal/manager/biz/audit"
 	bizsetting "github.com/ongridio/ongrid/internal/manager/biz/setting"
 	auditmodel "github.com/ongridio/ongrid/internal/manager/model/audit"
+	settingmodel "github.com/ongridio/ongrid/internal/manager/model/setting"
 	auditmw "github.com/ongridio/ongrid/internal/manager/server/middleware"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
@@ -34,11 +36,14 @@ type SettingService interface {
 }
 
 type Handler struct {
-	svc SettingService
+	svc     SettingService
+	applier *bizsetting.ObservabilityApplier
 }
 
 // NewHandler builds a handler serving the /v1/system-settings surface.
-func NewHandler(svc SettingService) *Handler { return &Handler{svc: svc} }
+func NewHandler(svc SettingService, applier *bizsetting.ObservabilityApplier) *Handler {
+	return &Handler{svc: svc, applier: applier}
+}
 
 // Register attaches the routes under a chi.Router that already has the
 // auth middleware in front of it (see cmd/ongrid).
@@ -47,6 +52,61 @@ func (h *Handler) Register(r chi.Router) {
 	r.Put("/v1/system-settings/{category}/{key}", h.put)
 	r.Delete("/v1/system-settings/{category}/{key}", h.delete)
 	r.Get("/v1/system-settings/{category}/{key}/reveal", h.reveal)
+	r.Post("/v1/system-settings/observability/{service}/apply", h.applyObservability)
+}
+
+type applyObservabilityReq struct {
+	Values map[string]string `json:"values"`
+}
+
+// @Summary Save and apply built-in observability storage limits
+// @Tags settings
+// @Accept json
+// @Produce json
+// @Param service path string true "Built-in service: prometheus, loki, or tempo"
+// @Param body body applyObservabilityReq true "Storage limits"
+// @Success 200 {object} map[string]string
+// @Failure 400 {object} errorBody
+// @Failure 401 {object} errorBody
+// @Failure 403 {object} errorBody
+// @Failure 409 {object} errorBody
+// @Failure 500 {object} errorBody
+// @Failure 501 {object} errorBody
+// @Router /api/v1/system-settings/observability/{service}/apply [post]
+func (h *Handler) applyObservability(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+	if h.applier == nil || !h.applier.Enabled() {
+		writeErr(w, fmt.Errorf("%w: direct apply is not enabled for this deployment", errs.ErrNotWiredYet))
+		return
+	}
+	service := chi.URLParam(r, "service")
+	var req applyObservabilityReq
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeErr(w, errors.Join(errs.ErrInvalid, err))
+		return
+	}
+	auditmw.SetAuditEvent(r, bizaudit.Event{
+		Action:       auditmodel.ActionSettingUpdate,
+		ResourceType: auditmodel.ResourceSetting,
+		ResourceID:   settingmodel.CategoryObservability + "/" + service,
+		Payload:      map[string]any{"category": settingmodel.CategoryObservability, "service": service},
+	})
+	if err := h.applier.SaveAndApply(r.Context(), service, req.Values); err != nil {
+		if errors.Is(err, errs.ErrInvalid) || errors.Is(err, errs.ErrConflict) || errors.Is(err, errs.ErrNotWiredYet) {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, errorBody{
+			Error: "could not save and apply the built-in component limits",
+			Code:  "apply-failed",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "applied"})
 }
 
 type listResp struct {
@@ -259,6 +319,10 @@ func errCode(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, errs.ErrInvalid):
 		return http.StatusBadRequest
+	case errors.Is(err, errs.ErrConflict):
+		return http.StatusConflict
+	case errors.Is(err, errs.ErrNotWiredYet):
+		return http.StatusNotImplemented
 	default:
 		return http.StatusInternalServerError
 	}
@@ -274,6 +338,10 @@ func errSlug(err error) string {
 		return "not-found"
 	case errors.Is(err, errs.ErrInvalid):
 		return "invalid-argument"
+	case errors.Is(err, errs.ErrConflict):
+		return "conflict"
+	case errors.Is(err, errs.ErrNotWiredYet):
+		return "not-wired"
 	default:
 		return "internal"
 	}

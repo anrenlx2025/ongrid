@@ -58,6 +58,7 @@ import { ApiError } from '@/api/client';
 import { Button, Card } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { useI18n } from '@/i18n/locale';
+import BuiltInStorageAdvanced from './Advanced';
 
 // Settings → 集成. Four cards, all backend-driven, parallel naming:
 //   - Prometheus 集成   → system_settings.prom; manager reads on every
@@ -318,6 +319,7 @@ function PrometheusCard() {
         {err && <span className="text-xs text-red-400">{err}</span>}
       </div>
       <PromProbeLine probe={probe} />
+      <BuiltInStorageAdvanced service="prometheus" />
     </Card>
   );
 }
@@ -1564,6 +1566,7 @@ function LokiCard({ current, backend, exploreUrl, onBackendChange }: { current: 
       {switchMessage && <p className="mt-3 text-xs text-emerald-400">✓ {switchMessage}</p>}
       <ConnectionCheckProgress value={connectionCheck} error={connectionCheckError} />
       <ProbeLine probe={probe} okLabel={tr('✓ Loki 可达，/ready 返回成功', '✓ Loki reachable, /ready returned success')} />
+      <BuiltInStorageAdvanced service="loki" />
     </section>
   );
 }
@@ -1758,6 +1761,7 @@ function TempoCard() {
         {err && <span className="break-all text-xs text-red-400">{err}</span>}
       </div>
       <ProbeLine probe={probe} okLabel={tr('✓ Tempo 连接测试成功', '✓ Tempo connection test succeeded')} />
+      <BuiltInStorageAdvanced service="tempo" />
     </Card>
   );
 }

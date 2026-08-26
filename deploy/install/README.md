@@ -379,7 +379,7 @@ ADR-009 之后 Prometheus 升级为**核心服务**。默认随 `install.sh` / `
 1. **被动接收 manager remote_write**：edge 通过 `push_prom_samples` 把开集 series 推到 manager，manager 自动加 `edge_id` + `ongrid_source` label 后转发到 prometheus 的 remote_write 接收口（CLI flag `--web.enable-remote-write-receiver` 已开）。
 2. **服务 AI agent 的 `query_promql` 工具**：aiops tool registry 在 `cfg.Prom.Enabled=true` 时注册该工具，让 LLM 通过 `/api/v1/query_range` 跑任意 PromQL（30s 超时硬约束）。
 
-数据保留：默认 90 天 / 20GB cap，由 docker-compose 中的 `--storage.tsdb.retention.time=90d` 和 `--storage.tsdb.retention.size=20GB` flag 控制。要调整，编辑 `/opt/ongrid/docker-compose.yml` 后 `docker compose up -d` 重起 prometheus 服务。
+数据保留：Prometheus 默认 90 天 / 20GB，Loki 默认 30 天，Tempo 默认 7 天。在显式启用受控 Compose applicator 的测试环境中，可在「设置 → 集成」展开对应组件的「高级配置：内置存储限制」，点击一次「保存并应用」；接口只允许更新这四个保留参数并重建选中的内置组件，不接受任意命令。启用时需给宿主机上的 Manager 设置 `ONGRID_OBSERVABILITY_COMPOSE_DIR`、`ONGRID_OBSERVABILITY_ENV_FILE`、`ONGRID_OBSERVABILITY_COMPOSE_FILES`（逗号分隔）以及可选的 `ONGRID_OBSERVABILITY_COMPOSE_PROJECT`。默认生产部署不授予 Manager Docker 控制权，仍由运维侧管理 `/opt/ongrid/.env` 中的 `ONGRID_PROM_RETENTION_TIME`、`ONGRID_PROM_RETENTION_SIZE`、`ONGRID_LOKI_RETENTION_PERIOD`、`ONGRID_TEMPO_BLOCK_RETENTION`。这些限制不影响外部数据源。
 
 **关闭** AI PromQL 链路（保留容器但 manager 不转发）：
 

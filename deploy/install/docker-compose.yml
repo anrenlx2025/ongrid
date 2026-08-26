@@ -340,7 +340,7 @@ services:
   # Receives remote_write pushes from the manager (open-set edge samples
   # via push_prom_samples) and serves PromQL to the aiops query_promql
   # tool. Not published to host — manager reaches it on the docker network
-  # at http://prometheus:9090/prometheus. Retention: 90d / 20GB cap.
+  # at http://prometheus:9090/prometheus. Retention defaults: 90d / 20GB cap.
   prometheus:
     image: docker.cnb.cool/ongridio/ongrid/prometheus:v2.54.0
     container_name: ongrid-prometheus
@@ -348,8 +348,8 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=90d
-      - --storage.tsdb.retention.size=20GB
+      - --storage.tsdb.retention.time=${ONGRID_PROM_RETENTION_TIME:-2160h}
+      - --storage.tsdb.retention.size=${ONGRID_PROM_RETENTION_SIZE:-20GB}
       - --web.enable-remote-write-receiver
       - --web.enable-lifecycle
       - --web.external-url=/prometheus/
@@ -387,8 +387,11 @@ services:
     image: docker.cnb.cool/ongridio/ongrid/loki:3.4.0
     container_name: ongrid-loki
     restart: unless-stopped
+    environment:
+      LOKI_RETENTION_PERIOD: ${ONGRID_LOKI_RETENTION_PERIOD:-720h}
     command:
       - -config.file=/etc/loki/local-config.yaml
+      - -config.expand-env=true
     volumes:
       # Loki TSDB / chunks on host. Loki runs as uid 10001; chowned by
       # install.sh. For production externalisation, point ONGRID_LOG_URL
@@ -409,8 +412,11 @@ services:
     image: docker.cnb.cool/ongridio/ongrid/tempo:2.10.0
     container_name: ongrid-tempo
     restart: unless-stopped
+    environment:
+      TEMPO_BLOCK_RETENTION: ${ONGRID_TEMPO_BLOCK_RETENTION:-168h}
     command:
       - -config.file=/etc/tempo/tempo.yaml
+      - -config.expand-env=true
     volumes:
       # Tempo blocks on host. Tempo runs as uid 10001 (same as Loki);
       # chowned by install.sh. For production externalisation, point

@@ -215,6 +215,38 @@ func TestServiceSetBatchValidatesAgentLLMTimeout(t *testing.T) {
 	}
 }
 
+func TestServiceSetValidatesObservabilityLimits(t *testing.T) {
+	svc := New(newFakeRepo(), nil)
+	ctx := context.Background()
+	tests := []struct {
+		name  string
+		key   string
+		value string
+		valid bool
+	}{
+		{name: "minimum duration", key: model.KeyLokiRetentionPeriod, value: "24h", valid: true},
+		{name: "maximum duration", key: model.KeyTempoBlockRetention, value: "87600h", valid: true},
+		{name: "duration too short", key: model.KeyPrometheusRetentionTime, value: "23h"},
+		{name: "duration wrong unit", key: model.KeyLokiRetentionPeriod, value: "7d"},
+		{name: "duration with whitespace", key: model.KeyLokiRetentionPeriod, value: " 24h"},
+		{name: "minimum size", key: model.KeyPrometheusRetentionSize, value: "1GB", valid: true},
+		{name: "size too large", key: model.KeyPrometheusRetentionSize, value: "10241GB"},
+		{name: "size wrong unit", key: model.KeyPrometheusRetentionSize, value: "1GiB"},
+		{name: "unknown key", key: "mysql_retention", value: "24h"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := svc.Set(ctx, model.CategoryObservability, test.key, test.value, false)
+			if test.valid && err != nil {
+				t.Fatalf("Set() error = %v", err)
+			}
+			if !test.valid && !errors.Is(err, errs.ErrInvalid) {
+				t.Fatalf("Set() error = %v, want errs.ErrInvalid", err)
+			}
+		})
+	}
+}
+
 func TestAgentOutputLocale(t *testing.T) {
 	ctx := context.Background()
 	svc := New(newFakeRepo(), nil)
