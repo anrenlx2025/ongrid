@@ -198,7 +198,7 @@ describe("EdgesPage", () => {
     const k8sRow = k8sNameCells[0].closest("tr");
     expect(k8sRow).not.toBeNull();
     expect(
-      within(k8sRow as HTMLTableRowElement).getByText("K8S"),
+      within(k8sRow as HTMLTableRowElement).getByText("K8s"),
     ).toBeInTheDocument();
     const clusterLink = within(k8sRow as HTMLTableRowElement).getByRole(
       "link",

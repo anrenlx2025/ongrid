@@ -295,7 +295,7 @@ describe('KubernetesPage', () => {
     expect(screen.getByText('online')).toBeInTheDocument();
     expect(screen.getByText('Controller 运行中')).toBeInTheDocument();
     expect(screen.getByText('ongrid-k8s-control-plane')).toBeInTheDocument();
-    expect(screen.getByText('K8S 版本')).toBeInTheDocument();
+    expect(screen.getByText('K8s 版本')).toBeInTheDocument();
     expect(screen.getByText('v1.30.0')).toBeInTheDocument();
     expect(screen.getByText('2 / 3')).toBeInTheDocument();
     expect(screen.getByText('1 个待接入')).toBeInTheDocument();
@@ -839,7 +839,7 @@ describe('KubernetesPage', () => {
     });
   });
 
-  it('K8S 指标使用 Grafana 11 Explore 深链打开 Prometheus 查询', async () => {
+  it('K8s 指标使用 Grafana 11 Explore 深链打开 Prometheus 查询', async () => {
     let launchPayload: { expr?: string } | null = null;
     const replace = vi.fn();
     const open = vi.spyOn(window, 'open').mockReturnValue({
@@ -1840,7 +1840,7 @@ describe('KubernetesPage', () => {
     expect(screen.getByTestId('initial-prompt')).toHaveTextContent('回滚方案');
   });
 
-  it('渲染当前集群的 K8S 写动作审计记录', async () => {
+  it('渲染当前集群的 K8s 写动作审计记录', async () => {
     renderKubernetesDetail('/kubernetes/1?tab=actions');
 
     expect(await screen.findByText('写动作')).toBeInTheDocument();
@@ -1854,7 +1854,7 @@ describe('KubernetesPage', () => {
     expect(screen.getAllByText('restart rollout').length).toBeGreaterThan(0);
     expect(screen.getAllByText('delete pod').length).toBeGreaterThan(0);
     expect(screen.queryByText('apply patch')).not.toBeInTheDocument();
-    expect(await screen.findByText('K8S 写动作审计')).toBeInTheDocument();
+    expect(await screen.findByText('K8s 写动作审计')).toBeInTheDocument();
     expect(screen.getByText('rollout_restart · default · Deployment/api')).toBeInTheDocument();
     expect(screen.getAllByText('已执行').length).toBeGreaterThan(0);
     expect(screen.getAllByText('请求已记录').length).toBeGreaterThan(0);

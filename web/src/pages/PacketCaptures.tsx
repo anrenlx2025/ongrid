@@ -107,7 +107,7 @@ export default function PacketCapturesPage() {
     <main className="anim-fade flex min-w-0 flex-1 flex-col overflow-hidden">
       <PageHeader
         title={tr('抓包', 'Packet captures')}
-        subtitle={tr('从在线主机 Edge 发起有边界的非 K8S 抓包任务，用于故障证据留存和后续产物解析。', 'Start bounded non-Kubernetes captures from online host edges for incident evidence and later artifact parsing.')}
+        subtitle={tr('从在线主机 Edge 发起有边界的非 K8s 抓包任务，用于故障证据留存和后续产物解析。', 'Start bounded non-Kubernetes captures from online host edges for incident evidence and later artifact parsing.')}
         actions={
           <>
             <Button onClick={() => void load()}>
