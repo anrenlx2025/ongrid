@@ -177,7 +177,7 @@ export default function KubernetesPage() {
               <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
                 <tr>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('集群', 'Cluster')}</th>
-                  <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('K8S 版本', 'K8S version')}</th>
+                  <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('K8s 版本', 'K8s version')}</th>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('模式', 'Mode')}</th>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('状态', 'Status')}</th>
                   <th className="whitespace-nowrap px-4 py-2.5 text-left">{tr('节点接入', 'Node access')}</th>
@@ -1945,7 +1945,7 @@ function K8sTelemetryDrilldowns({
       <div className="divide-y divide-zinc-800/60">
         <TelemetryLinkCell
           icon={BarChart3}
-          title={tr('K8S 指标', 'K8S metrics')}
+          title={tr('K8s 指标', 'K8s metrics')}
           source="Prometheus"
           statusLabel={clusterID ? tr('查询已就绪', 'query ready') : tr('等待 cluster_id', 'waiting for cluster_id')}
           statusTone={clusterID ? 'info' : 'default'}
@@ -1956,7 +1956,7 @@ function K8sTelemetryDrilldowns({
         />
         <TelemetryLinkCell
           icon={FileText}
-          title={tr('K8S 日志', 'K8S logs')}
+          title={tr('K8s 日志', 'K8s logs')}
           source="Loki"
           statusLabel={clusterID ? tr('查询已就绪', 'query ready') : tr('等待 cluster_id', 'waiting for cluster_id')}
           statusTone={clusterID ? 'info' : 'default'}
@@ -1967,7 +1967,7 @@ function K8sTelemetryDrilldowns({
         />
         <TelemetryLinkCell
           icon={Waypoints}
-          title={tr('K8S 链路', 'K8S traces')}
+          title={tr('K8s 链路', 'K8s traces')}
           source="Tempo"
           statusLabel={clusterID ? tr('查询已就绪', 'query ready') : tr('等待 cluster_id', 'waiting for cluster_id')}
           statusTone={clusterID ? 'info' : 'default'}
@@ -2275,7 +2275,7 @@ function K8sActionAudit({
         <div className="flex min-w-0 items-center gap-2">
           <ShieldCheck size={15} className="text-zinc-400" />
           <div className="min-w-0">
-            <div className="text-sm font-medium text-zinc-100">{tr('K8S 写动作审计', 'K8S action audit')}</div>
+            <div className="text-sm font-medium text-zinc-100">{tr('K8s 写动作审计', 'K8s action audit')}</div>
             <div className="mt-0.5 text-xs text-zinc-500">
               {loading && !hasRows
                 ? tr('加载中…', 'Loading…')
@@ -2357,7 +2357,7 @@ function K8sActionAudit({
         ) : (
           <FilteredResourceEmptyState
             icon={ShieldCheck}
-            title={filtered ? tr('暂无匹配写动作审计记录', 'No matching action audit record') : tr('暂无当前集群的 K8S 写动作审批记录。', 'No K8S write-action approval records for this cluster.')}
+            title={filtered ? tr('暂无匹配写动作审计记录', 'No matching action audit record') : tr('暂无当前集群的 K8s 写动作审批记录。', 'No K8s write-action approval records for this cluster.')}
             filtered={filtered}
             hint={emptyHint}
             onClear={onClearFilters}

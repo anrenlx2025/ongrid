@@ -1505,7 +1505,7 @@ function EdgeAccessMeta({
   return (
     <div className="flex min-w-0 shrink-0 items-center gap-1">
       <EdgeAccessPill kind={attachments.length > 0 ? "k8s" : "host"}>
-        {attachments.length > 0 ? "K8S" : "Host"}
+        {attachments.length > 0 ? "K8s" : "Host"}
       </EdgeAccessPill>
       {clusters.map((item) => (
         <ClusterChipLink
