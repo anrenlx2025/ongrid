@@ -338,6 +338,8 @@ func isKnownLLMProvider(provider string) bool {
 		settingmodel.LLMProviderGemini,
 		settingmodel.LLMProviderDeepSeek,
 		settingmodel.LLMProviderKimi,
+		settingmodel.LLMProviderMiniMax,
+		settingmodel.LLMProviderXiaomi,
 		settingmodel.LLMProviderCustom:
 		return true
 	default:

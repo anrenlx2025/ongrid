@@ -14,6 +14,8 @@ func TestLoadDefaults(t *testing.T) {
 		"ONGRID_DB_DIALECT", "ONGRID_DB_DSN", "ONGRID_DB_PATH",
 		"ONGRID_JWT_SECRET", "ONGRID_JWT_ACCESS_TTL", "ONGRID_JWT_REFRESH_TTL",
 		"ONGRID_OPENAI_API_KEY", "ONGRID_OPENAI_MODEL", "ONGRID_OPENAI_BASE_URL",
+		"ONGRID_MINIMAX_API_KEY", "ONGRID_MINIMAX_MODEL", "ONGRID_MINIMAX_BASE_URL", "ONGRID_MINIMAX_MODELS",
+		"ONGRID_XIAOMI_API_KEY", "ONGRID_XIAOMI_MODEL", "ONGRID_XIAOMI_BASE_URL", "ONGRID_XIAOMI_MODELS",
 		"ONGRID_ADMIN_EMAIL", "ONGRID_ADMIN_PASSWORD",
 		"ONGRID_EDGE_CLOUD_ADDR", "ONGRID_EDGE_ACCESS_KEY", "ONGRID_EDGE_SECRET_KEY",
 		"ONGRID_EDGE_COLLECTOR_MODE", "ONGRID_EDGE_SCRAPE_CONFIG_FILE", "ONGRID_EDGE_COLLECTOR_INTERVAL",
@@ -73,6 +75,12 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.OpenAI.Model != "gpt-5.4" {
 		t.Errorf("OpenAI.Model default = %q, want gpt-5.4", cfg.OpenAI.Model)
+	}
+	if cfg.LLM.MiniMax.Model != "MiniMax-M2.7" {
+		t.Errorf("LLM.MiniMax.Model default = %q, want MiniMax-M2.7", cfg.LLM.MiniMax.Model)
+	}
+	if cfg.LLM.Xiaomi.Model != "mimo-v2.5-pro" {
+		t.Errorf("LLM.Xiaomi.Model default = %q, want mimo-v2.5-pro", cfg.LLM.Xiaomi.Model)
 	}
 	if cfg.Admin.Email != "" {
 		t.Errorf("Admin.Email default = %q, want empty", cfg.Admin.Email)

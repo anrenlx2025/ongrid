@@ -91,15 +91,14 @@ const (
 // Well-known keys under CategoryLLM. The Resolver in pkg/llm reads exactly
 // these names; keep the strings stable across releases.
 //
-// 2026-05 expansion: per-provider keys for OpenAI / Anthropic / Zhipu /
-// Gemini, each carrying api_key + base_url + JSON-encoded models list +
+// Per-provider keys carry api_key + base_url + JSON-encoded models list +
 // default_model. The legacy openai_* triple is still honoured (the
 // LLMSettingsResolver in biz/setting/llm.go falls back to the legacy
 // openai_model field when openai_default_model is empty), so existing
 // deployments survive migration cleanly.
 //
 // Naming pattern: <provider>_<field>. The provider id is the same one
-// the SPA's model dropdown sends (openai / anthropic / zhipu / gemini),
+// the SPA's model dropdown sends,
 // keeping the wire shape symmetric with the catalog endpoint.
 const (
 	KeyOpenAIAPIKey  = "openai_api_key"
@@ -134,6 +133,16 @@ const (
 	KeyKimiModels       = "kimi_models"
 	KeyKimiDefaultModel = "kimi_default_model"
 
+	KeyMiniMaxAPIKey       = "minimax_api_key" // sensitive
+	KeyMiniMaxBaseURL      = "minimax_base_url"
+	KeyMiniMaxModels       = "minimax_models"
+	KeyMiniMaxDefaultModel = "minimax_default_model"
+
+	KeyXiaomiAPIKey       = "xiaomi_api_key" // sensitive
+	KeyXiaomiBaseURL      = "xiaomi_base_url"
+	KeyXiaomiModels       = "xiaomi_models"
+	KeyXiaomiDefaultModel = "xiaomi_default_model"
+
 	// Custom = a generic OpenAI-compatible endpoint (Ollama / vLLM /
 	// OpenRouter / LM Studio / Together / Groq / any self-hosted gateway).
 	// Unlike the named providers it has no default endpoint, so base_url is
@@ -157,6 +166,8 @@ const (
 	LLMProviderGemini    = "gemini"
 	LLMProviderDeepSeek  = "deepseek"
 	LLMProviderKimi      = "kimi"
+	LLMProviderMiniMax   = "minimax"
+	LLMProviderXiaomi    = "xiaomi"
 	LLMProviderCustom    = "custom"
 )
 

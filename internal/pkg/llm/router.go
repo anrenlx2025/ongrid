@@ -2,8 +2,8 @@
 //
 // The MultiClient dispatches Chat requests to one of N pre-built sub-
 // clients keyed by ChatReq.Provider. This is the implementation of the
-// per-message provider/model selector (Anthropic / 智谱 / Gemini /
-// OpenAI). Sub-clients are themselves *openaiClient instances — every
+// per-message provider/model selector. Sub-clients are themselves
+// *openaiClient instances — every
 // supported provider exposes an OpenAI-compatible chat completions API
 // (Anthropic via its OpenAI-compatible endpoint at
 // api.anthropic.com/v1, Zhipu at open.bigmodel.cn/api/paas/v4, Gemini at
@@ -31,7 +31,7 @@ import (
 // closed-set of model slugs the operator wants to expose for this
 // provider; Label is the human-readable name shown in the UI dropdown.
 type ProviderConfig struct {
-	ID      string   // stable id: "openai" | "anthropic" | "zhipu" | "gemini"
+	ID      string   // stable provider id, e.g. "openai" or "minimax"
 	Label   string   // display name
 	APIKey  string   // empty → provider not configured (skipped at build)
 	Model   string   // default model

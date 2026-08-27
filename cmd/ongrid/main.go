@@ -644,6 +644,24 @@ func main() {
 			Models:  cfg.LLM.Kimi.Models,
 		})
 	}
+	if cfg.LLM.MiniMax.APIKey != "" {
+		providerCfgs = append(providerCfgs, llm.ProviderConfig{
+			ID: "minimax", Label: "MiniMax",
+			APIKey:  cfg.LLM.MiniMax.APIKey,
+			Model:   firstNonEmpty(cfg.LLM.MiniMax.Model, "MiniMax-M2.7"),
+			BaseURL: firstNonEmpty(cfg.LLM.MiniMax.BaseURL, "https://api.minimaxi.com/v1"),
+			Models:  cfg.LLM.MiniMax.Models,
+		})
+	}
+	if cfg.LLM.Xiaomi.APIKey != "" {
+		providerCfgs = append(providerCfgs, llm.ProviderConfig{
+			ID: "xiaomi", Label: "Xiaomi MiMo",
+			APIKey:  cfg.LLM.Xiaomi.APIKey,
+			Model:   firstNonEmpty(cfg.LLM.Xiaomi.Model, "mimo-v2.5-pro"),
+			BaseURL: firstNonEmpty(cfg.LLM.Xiaomi.BaseURL, "https://api.xiaomimimo.com/v1"),
+			Models:  cfg.LLM.Xiaomi.Models,
+		})
+	}
 	llmRouter := llm.NewMultiClient(providerCfgs, cfg.LLM.Default, openaiClient)
 
 	// Seed per-provider LLM settings rows from env on first boot so the
@@ -676,6 +694,14 @@ func main() {
 		{settingmodel.KeyKimiAPIKey, cfg.LLM.Kimi.APIKey, true},
 		{settingmodel.KeyKimiBaseURL, cfg.LLM.Kimi.BaseURL, false},
 		{settingmodel.KeyKimiDefaultModel, cfg.LLM.Kimi.Model, false},
+		// MiniMax
+		{settingmodel.KeyMiniMaxAPIKey, cfg.LLM.MiniMax.APIKey, true},
+		{settingmodel.KeyMiniMaxBaseURL, cfg.LLM.MiniMax.BaseURL, false},
+		{settingmodel.KeyMiniMaxDefaultModel, cfg.LLM.MiniMax.Model, false},
+		// Xiaomi MiMo
+		{settingmodel.KeyXiaomiAPIKey, cfg.LLM.Xiaomi.APIKey, true},
+		{settingmodel.KeyXiaomiBaseURL, cfg.LLM.Xiaomi.BaseURL, false},
+		{settingmodel.KeyXiaomiDefaultModel, cfg.LLM.Xiaomi.Model, false},
 		// OpenAI's _default_model expansion (the legacy
 		// openai_api_key / openai_model / openai_base_url rows are
 		// already seeded above).
@@ -697,6 +723,8 @@ func main() {
 		{settingmodel.KeyGeminiModels, cfg.LLM.Gemini.Models},
 		{settingmodel.KeyDeepSeekModels, cfg.LLM.DeepSeek.Models},
 		{settingmodel.KeyKimiModels, cfg.LLM.Kimi.Models},
+		{settingmodel.KeyMiniMaxModels, cfg.LLM.MiniMax.Models},
+		{settingmodel.KeyXiaomiModels, cfg.LLM.Xiaomi.Models},
 	} {
 		if len(seed.list) == 0 {
 			continue
@@ -757,6 +785,20 @@ func main() {
 			Model:   firstNonEmpty(cfg.LLM.Kimi.Model, "kimi-k2.6"),
 			BaseURL: firstNonEmpty(cfg.LLM.Kimi.BaseURL, "https://api.moonshot.cn/v1"),
 			Models:  cfg.LLM.Kimi.Models,
+		},
+		settingmodel.LLMProviderMiniMax: {
+			Label:   "MiniMax",
+			APIKey:  cfg.LLM.MiniMax.APIKey,
+			Model:   firstNonEmpty(cfg.LLM.MiniMax.Model, "MiniMax-M2.7"),
+			BaseURL: firstNonEmpty(cfg.LLM.MiniMax.BaseURL, "https://api.minimaxi.com/v1"),
+			Models:  cfg.LLM.MiniMax.Models,
+		},
+		settingmodel.LLMProviderXiaomi: {
+			Label:   "Xiaomi MiMo",
+			APIKey:  cfg.LLM.Xiaomi.APIKey,
+			Model:   firstNonEmpty(cfg.LLM.Xiaomi.Model, "mimo-v2.5-pro"),
+			BaseURL: firstNonEmpty(cfg.LLM.Xiaomi.BaseURL, "https://api.xiaomimimo.com/v1"),
+			Models:  cfg.LLM.Xiaomi.Models,
 		},
 	}
 	llmSettingsResolver := managerbizsetting.NewLLMSettingsResolver(settingSvc, llmEnvDefaults, cfg.LLM.Default)
@@ -1397,7 +1439,7 @@ func main() {
 	// issues are investigated.
 	// When the env is set we build:
 	//   - RoutingChatModel (PR-1) wrapping the existing llmRouter, one
-	//     per provider id ("openai" | "anthropic" | "zhipu" | "gemini").
+	//     per provider id.
 	//   - Decorated BaseTool slice via Registry.BuildBaseTools +
 	//     AppendHostFilesTools, then Wrap'd with the standard chain.
 	//   - SkillRegistry / AgentRegistry from ./skills + ./agents
@@ -3265,6 +3307,8 @@ func knownLLMProviderIDs() []string {
 		llm.ProviderGemini,
 		llm.ProviderDeepSeek,
 		llm.ProviderKimi,
+		llm.ProviderMiniMax,
+		llm.ProviderXiaomi,
 		llm.ProviderCustom,
 	}
 }
