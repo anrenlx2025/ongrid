@@ -685,7 +685,7 @@ function ModelDropdown({
                 >
                   {tr('设置 → 集成 → LLM 模型', 'Settings → Integrations → LLM models')}
                 </Link>{' '}
-                {tr('配置 OpenAI / Anthropic / 智谱 / Gemini / DeepSeek / Kimi 的 API key。', 'to set API keys for OpenAI / Anthropic / Zhipu / Gemini / DeepSeek / Kimi.')}
+                {tr('配置 OpenAI / Anthropic / 智谱 / Gemini / DeepSeek / Kimi / MiniMax / 小米 MiMo 的 API key。', 'to set API keys for OpenAI / Anthropic / Zhipu / Gemini / DeepSeek / Kimi / MiniMax / Xiaomi MiMo.')}
               </p>
             </div>
           ) : (

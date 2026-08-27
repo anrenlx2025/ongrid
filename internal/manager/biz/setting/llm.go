@@ -44,8 +44,8 @@ type EnvProviderDefaults struct {
 }
 
 // NewLLMSettingsResolver builds a resolver bound to the given setting
-// service. defaults is the per-provider env-seeded fallback (keyed by
-// provider id: "openai" / "anthropic" / "zhipu" / "gemini").
+// service. defaults is the per-provider env-seeded fallback keyed by
+// provider id.
 // envDefaultProvider is the env-seeded default provider id (empty =
 // pick the first sorted provider, matching legacy behaviour).
 func NewLLMSettingsResolver(svc *Service, defaults map[string]EnvProviderDefaults, envDefaultProvider string) *LLMSettingsResolver {
@@ -111,6 +111,20 @@ func allProviderKeys() []providerKeys {
 			baseURL:      model.KeyKimiBaseURL,
 			models:       model.KeyKimiModels,
 			defaultModel: model.KeyKimiDefaultModel,
+		},
+		{
+			id:           model.LLMProviderMiniMax,
+			apiKey:       model.KeyMiniMaxAPIKey,
+			baseURL:      model.KeyMiniMaxBaseURL,
+			models:       model.KeyMiniMaxModels,
+			defaultModel: model.KeyMiniMaxDefaultModel,
+		},
+		{
+			id:           model.LLMProviderXiaomi,
+			apiKey:       model.KeyXiaomiAPIKey,
+			baseURL:      model.KeyXiaomiBaseURL,
+			models:       model.KeyXiaomiModels,
+			defaultModel: model.KeyXiaomiDefaultModel,
 		},
 		{
 			id:           model.LLMProviderCustom,

@@ -20,7 +20,7 @@ import { ProviderIcon } from '@/components/icons/Provider';
 import { cn } from '@/lib/cn';
 import { useI18n } from '@/i18n/locale';
 
-type LLMProviderID = 'openai' | 'anthropic' | 'zhipu' | 'gemini' | 'deepseek' | 'kimi' | 'custom';
+type LLMProviderID = 'openai' | 'anthropic' | 'zhipu' | 'gemini' | 'deepseek' | 'kimi' | 'minimax' | 'xiaomi' | 'custom';
 
 type LLMProviderForm = {
   api_key: string;
@@ -137,6 +137,33 @@ const LLM_PROVIDERS: LLMProviderMeta[] = [
     keyDefaultModel: 'kimi_default_model',
   },
   {
+    id: 'minimax',
+    label: 'MiniMax',
+    hintZh: 'MiniMax 开放平台。在 platform.minimaxi.com 获取 API key。',
+    hintEn: 'MiniMax API. The default uses the China platform; international accounts should set Base URL to https://api.minimax.io/v1.',
+    baseURLPlaceholderZh: 'https://api.minimaxi.com/v1（默认）',
+    baseURLPlaceholderEn: 'https://api.minimaxi.com/v1 (China default)',
+    modelPlaceholder: 'MiniMax-M2.7',
+    keyAPIKey: 'minimax_api_key',
+    keyBaseURL: 'minimax_base_url',
+    keyModels: 'minimax_models',
+    keyDefaultModel: 'minimax_default_model',
+  },
+  {
+    id: 'xiaomi',
+    label: '小米 MiMo',
+    labelEn: 'Xiaomi MiMo',
+    hintZh: '小米 MiMo 开放平台。在 platform.xiaomimimo.com 获取 API key。',
+    hintEn: 'Xiaomi MiMo API. Get an API key at platform.xiaomimimo.com.',
+    baseURLPlaceholderZh: 'https://api.xiaomimimo.com/v1（默认）',
+    baseURLPlaceholderEn: 'https://api.xiaomimimo.com/v1 (default)',
+    modelPlaceholder: 'mimo-v2.5-pro',
+    keyAPIKey: 'xiaomi_api_key',
+    keyBaseURL: 'xiaomi_base_url',
+    keyModels: 'xiaomi_models',
+    keyDefaultModel: 'xiaomi_default_model',
+  },
+  {
     id: 'custom',
     custom: true,
     label: '自定义（OpenAI 兼容）',
@@ -154,13 +181,13 @@ const LLM_PROVIDERS: LLMProviderMeta[] = [
 ];
 
 // Locale-aware provider order. Operators reading the page in zh-CN see
-// the China-based providers (Zhipu / DeepSeek / Kimi) at the top because
+// the China-based providers at the top because
 // they're the ones a local deployment most likely has API keys for and
 // can reach over the public internet without VPN; en-US flips it so
 // OpenAI / Anthropic / Gemini head the list. Falls back to LLM_PROVIDERS
 // order for an unknown locale.
-const PROVIDER_ORDER_ZH = ['zhipu', 'deepseek', 'kimi', 'openai', 'anthropic', 'gemini', 'custom'] as const;
-const PROVIDER_ORDER_EN = ['openai', 'anthropic', 'gemini', 'zhipu', 'deepseek', 'kimi', 'custom'] as const;
+const PROVIDER_ORDER_ZH = ['zhipu', 'deepseek', 'kimi', 'minimax', 'xiaomi', 'openai', 'anthropic', 'gemini', 'custom'] as const;
+const PROVIDER_ORDER_EN = ['openai', 'anthropic', 'gemini', 'minimax', 'xiaomi', 'zhipu', 'deepseek', 'kimi', 'custom'] as const;
 
 function orderedProviders(locale: string): LLMProviderMeta[] {
   const order = locale === 'zh-CN' ? PROVIDER_ORDER_ZH : PROVIDER_ORDER_EN;
@@ -189,7 +216,7 @@ const emptyLLMForm: LLMProviderForm = {
 export default function SettingsLLM() {
   const { tr, locale } = useI18n();
   // Order providers locale-aware: zh-CN puts China-based providers
-  // first (Zhipu / DeepSeek / Kimi), en-US puts US-based providers
+  // first, en-US puts US-based providers
   // first (OpenAI / Anthropic / Gemini). Keeps the page in the order
   // operators are most likely to fill in.
   const providers = orderedProviders(locale);

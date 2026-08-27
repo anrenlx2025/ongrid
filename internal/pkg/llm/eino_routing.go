@@ -4,9 +4,8 @@
 // loop in this PR — wiring is a later PR.
 //
 // What this file provides:
-//   - RoutingChatModel: an eino model.ChatModel that dispatches to one of
-//     four pre-built inner ChatModels keyed by provider id
-//     ("openai" | "anthropic" | "zhipu" | "gemini"). Selection happens via
+//   - RoutingChatModel: an eino model.ChatModel that dispatches to a
+//     pre-built inner ChatModel keyed by provider id. Selection happens via
 //     the impl-specific WithProvider option; absent it, defaultProvider
 //     handles the call. Reference diagram in shows this as
 //     the "ChatModel" layer at the bottom of the agent graph.
@@ -15,8 +14,8 @@
 //   - NewClientChatModel: thin adapter wrapping an existing llm.Client into
 //     an eino model.ToolCallingChatModel. Lets PR-1 ship without depending
 //     on github.com/cloudwego/eino-ext/components/model/openai (its dep
-//     surface is heavy and PR-1 is scaffolding only). The 4 provider
-//     endpoints are all OpenAI-compatible (), so a single
+//     surface is heavy and PR-1 is scaffolding only). Provider endpoints
+//     are OpenAI-compatible, so a single
 //     adapter suffices.
 //
 // Streaming note: this scaffolding adapter buffers the response from the
@@ -36,7 +35,7 @@ import (
 )
 
 // Provider ids accepted by RoutingChatModel. Keep in lockstep with the
-// admin settings page (6 providers, all OpenAI-compatible).
+// admin settings page (all named providers are OpenAI-compatible).
 const (
 	ProviderOpenAI    = "openai"
 	ProviderAnthropic = "anthropic"
@@ -44,6 +43,8 @@ const (
 	ProviderGemini    = "gemini"
 	ProviderDeepSeek  = "deepseek"
 	ProviderKimi      = "kimi"
+	ProviderMiniMax   = "minimax"
+	ProviderXiaomi    = "xiaomi"
 	// ProviderCustom is a generic OpenAI-compatible endpoint configured
 	// entirely from settings (base_url + key + models). Routing is
 	// id-agnostic, so it dispatches like any other provider.

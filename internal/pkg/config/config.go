@@ -353,6 +353,8 @@ type LLMConfig struct {
 	Gemini    LLMProviderConfig
 	DeepSeek  LLMProviderConfig
 	Kimi      LLMProviderConfig
+	MiniMax   LLMProviderConfig
+	Xiaomi    LLMProviderConfig
 	// Default is the provider id used when a chat-send request does not
 	// specify Provider. Empty → first configured provider (deterministic
 	// alphabetical ordering, see llm.NewMultiClient).
@@ -478,6 +480,14 @@ func Load() (*Config, error) {
 	c.LLM.Kimi.Model = getEnv("ONGRID_KIMI_MODEL", "kimi-k2.6")
 	c.LLM.Kimi.BaseURL = getEnv("ONGRID_KIMI_BASE_URL", "")
 	c.LLM.Kimi.Models = splitProviderModels(getEnv("ONGRID_KIMI_MODELS", "kimi-k2.6,kimi-k2.5,moonshot-v1-128k"))
+	c.LLM.MiniMax.APIKey = getEnv("ONGRID_MINIMAX_API_KEY", "")
+	c.LLM.MiniMax.Model = getEnv("ONGRID_MINIMAX_MODEL", "MiniMax-M2.7")
+	c.LLM.MiniMax.BaseURL = getEnv("ONGRID_MINIMAX_BASE_URL", "")
+	c.LLM.MiniMax.Models = splitProviderModels(getEnv("ONGRID_MINIMAX_MODELS", "MiniMax-M2.7,MiniMax-M2.7-highspeed,MiniMax-M2.5"))
+	c.LLM.Xiaomi.APIKey = getEnv("ONGRID_XIAOMI_API_KEY", "")
+	c.LLM.Xiaomi.Model = getEnv("ONGRID_XIAOMI_MODEL", "mimo-v2.5-pro")
+	c.LLM.Xiaomi.BaseURL = getEnv("ONGRID_XIAOMI_BASE_URL", "")
+	c.LLM.Xiaomi.Models = splitProviderModels(getEnv("ONGRID_XIAOMI_MODELS", "mimo-v2.5-pro,mimo-v2.5"))
 	c.LLM.Default = getEnv("ONGRID_LLM_DEFAULT_PROVIDER", "")
 	c.LLM.DailyTokenLimit = getEnvInt("ONGRID_LLM_DAILY_TOKEN_LIMIT", 0)
 

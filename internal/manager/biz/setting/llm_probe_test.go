@@ -51,6 +51,46 @@ func TestLLMConfigProbe_WhenValid_UsesEffectiveConfiguration(t *testing.T) {
 	}
 }
 
+func TestLLMConfigProbe_AcceptsMiniMaxAndXiaomi(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		provider string
+		model    string
+		baseURL  string
+	}{
+		{settingmodel.LLMProviderMiniMax, "MiniMax-M2.7", "https://api.minimaxi.com/v1"},
+		{settingmodel.LLMProviderXiaomi, "mimo-v2.5-pro", "https://api.xiaomimimo.com/v1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			t.Parallel()
+			if _, ok := providerKeysByID(tc.provider); !ok {
+				t.Fatalf("provider %q has no settings keys", tc.provider)
+			}
+			p := NewLLMConfigProbe(map[string]EnvProviderDefaults{
+				tc.provider: {BaseURL: tc.baseURL},
+			})
+			p.call = func(_ context.Context, cfg llm.Config) (*llm.ProbeResult, error) {
+				if cfg.BaseURL != tc.baseURL {
+					t.Errorf("base URL = %q, want %q", cfg.BaseURL, tc.baseURL)
+				}
+				return &llm.ProbeResult{}, nil
+			}
+
+			res, err := p.Probe(context.Background(), LLMProbeInput{
+				Provider:     tc.provider,
+				APIKey:       "secret-key",
+				DefaultModel: tc.model,
+				Models:       []string{tc.model},
+			})
+			if err != nil || !res.Valid {
+				t.Fatalf("Probe() = (%+v, %v), want valid", res, err)
+			}
+		})
+	}
+}
+
 func TestLLMConfigProbe_WhenInputInvalid_DoesNotCallProvider(t *testing.T) {
 	t.Parallel()
 
