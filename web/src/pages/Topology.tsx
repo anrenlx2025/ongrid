@@ -38,6 +38,8 @@ import {
 
 type Tab = 'graph' | 'nodes' | 'relation-types';
 
+const isDomainManagedNodeType = (type: string) => type === 'device' || type === 'cluster';
+
 export default function TopologyPage() {
   const role = useAuth((s) => s.role);
   const isAdmin = role === 'admin';
@@ -187,6 +189,7 @@ function NodesTab({ isAdmin }: { isAdmin: boolean }) {
   // creatingType doubles as visible flag (truthy = open) + type pre-fill
   // for the modal. null = closed.
   const [creatingType, setCreatingType] = useState<string | null>(null);
+  const canCreateSelectedType = !isDomainManagedNodeType(typeFilter);
 
   const [nodeTypes, setNodeTypes] = useState<NodeType[]>([]);
   const typeChips = useMemo(
@@ -244,7 +247,7 @@ function NodesTab({ isAdmin }: { isAdmin: boolean }) {
               <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
               {tr('刷新', 'Refresh')}
             </Button>
-            {isAdmin && (
+            {isAdmin && canCreateSelectedType && (
               <Button
                 variant="primary"
                 onClick={() => setCreatingType(typeFilter || 'service')}
@@ -269,7 +272,7 @@ function NodesTab({ isAdmin }: { isAdmin: boolean }) {
               hint={isAdmin
                 ? tr('录入第一个开始', 'Add your first node to get started')
                 : tr('联系管理员录入节点', 'Ask an admin to add nodes')}
-              action={isAdmin ? (
+              action={isAdmin && canCreateSelectedType ? (
                 <Button variant="primary" onClick={() => setCreatingType(typeFilter || 'service')}>
                   <Plus size={12} /> {creatingTypeLabel(typeFilter, tr)}
                 </Button>
@@ -366,6 +369,7 @@ function NodeDetailDrawer({
   const [err, setErr] = useState<string | null>(null);
   const [addingRelation, setAddingRelation] = useState(false);
   const [busy, setBusy] = useState(false);
+  const domainManaged = isDomainManagedNodeType(node.type);
 
   const fetchNeighbors = useCallback(async () => {
     setLoading(true);
@@ -487,12 +491,21 @@ function NodeDetailDrawer({
           </ul>
         )}
       </div>
-      {isAdmin && (
+      {isAdmin && !domainManaged && (
         <div className="border-t border-zinc-800/60 px-4 py-3">
           <Button variant="danger" onClick={handleDeleteNode} disabled={busy} className="w-full justify-center">
             <Trash2 size={12} />
             {tr('删除节点', 'Delete node')}
           </Button>
+        </div>
+      )}
+      {isAdmin && domainManaged && (
+        <div className="border-t border-zinc-800/60 px-4 py-3 text-[11px] text-zinc-500">
+          {node.type === 'device'
+            ? tr('此节点由设备管理同步，请从设备页面删除。', 'This node is synced from Devices. Delete it from the Devices page.')
+            : node.props?.source === 'kubernetes'
+              ? tr('此节点由 Kubernetes 托管，请从 Kubernetes 集群页面删除。', 'This node is managed by Kubernetes. Delete it from the Kubernetes cluster page.')
+              : tr('此节点由集群管理同步，请从集群页面删除。', 'This node is synced from Clusters. Delete it from the Clusters page.')}
         </div>
       )}
       {addingRelation && (
@@ -571,7 +584,7 @@ function CreateNodeModal({
   defaultType?: string;
 }) {
   const { tr, locale } = useI18n();
-  const [type, setType] = useState(defaultType);
+  const [type, setType] = useState(isDomainManagedNodeType(defaultType) ? 'service' : defaultType);
   const [name, setName] = useState('');
   const [propsText, setPropsText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -674,7 +687,7 @@ function CreateNodeModal({
             }}
             className="w-full rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-zinc-100 focus:border-zinc-600 focus:outline-none"
           >
-            {nodeTypes.map((nt) => (
+            {nodeTypes.filter((nt) => !isDomainManagedNodeType(nt.name)).map((nt) => (
               <option key={nt.name} value={nt.name}>
                 {localizedTypeLabel(nt, locale)}（{nt.name}）
               </option>
@@ -1480,6 +1493,7 @@ function GraphTab({ isAdmin }: { isAdmin: boolean }) {
   // pre-fill hint for the modal's type field — if you're looking at
   // 服务, clicking 新建 should propose creating a service.
   const [creatingType, setCreatingType] = useState<string | null>(null);
+  const canCreateSelectedType = !isDomainManagedNodeType(typeFilter);
   // Show ALL nodes by default — including orphans (no relations yet) —
   // so a freshly-registered fleet doesn't look empty. Orphans only get
   // pruned when the operator focuses an app (appFocus): the BFS reachable
@@ -1656,7 +1670,7 @@ function GraphTab({ isAdmin }: { isAdmin: boolean }) {
               <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
               {tr('刷新', 'Refresh')}
             </Button>
-            {isAdmin && (
+            {isAdmin && canCreateSelectedType && (
               <Button
                 variant="primary"
                 onClick={() => setCreatingType(typeFilter || 'service')}
@@ -1681,7 +1695,7 @@ function GraphTab({ isAdmin }: { isAdmin: boolean }) {
               hint={isAdmin
                 ? tr('录入第一个开始', 'Add your first node to get started')
                 : tr('联系管理员录入节点', 'Ask an admin to add nodes')}
-              action={isAdmin ? (
+              action={isAdmin && canCreateSelectedType ? (
                 <Button variant="primary" onClick={() => setCreatingType(typeFilter || 'service')}>
                   <Plus size={12} /> {creatingTypeLabel(typeFilter, tr)}
                 </Button>

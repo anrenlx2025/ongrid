@@ -205,6 +205,10 @@ func (g clusterDeleteGuardStub) ValidateClusterDelete(_ context.Context, cluster
 func TestDeleteClusterEnforcesRelationsAndDependentGuards(t *testing.T) {
 	uc := newUC(t)
 	ctx := context.Background()
+	managed, _ := uc.CreateNode(ctx, string(model.NodeTypeCluster), "k8s", `{"source":"kubernetes","k8s_cluster_id":48}`)
+	if err := uc.DeleteNode(ctx, managed.ID); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("DeleteNode(kubernetes-owned) error = %v, want ErrConflict", err)
+	}
 	cluster, _ := uc.CreateNode(ctx, string(model.NodeTypeCluster), "bare-metal", `{"source":"manual"}`)
 	device, _ := uc.CreateNode(ctx, string(model.NodeTypeDevice), "host", "")
 	relation, err := uc.CreateRelation(ctx, device.ID, cluster.ID, model.RelMemberOf, `{"source":"manual"}`)
@@ -524,6 +528,9 @@ func TestDeleteNodeForDeviceRemovesRelationsAndNode(t *testing.T) {
 	dev, err := uc.CreateNode(ctx, string(model.NodeTypeDevice), "node-a", "")
 	if err != nil {
 		t.Fatalf("CreateNode(device) error = %v", err)
+	}
+	if err := uc.DeleteNode(ctx, dev.ID); !errors.Is(err, errs.ErrConflict) {
+		t.Fatalf("DeleteNode(device) error = %v, want ErrConflict", err)
 	}
 	svc, err := uc.CreateNode(ctx, string(model.NodeTypeService), "svc-a", "")
 	if err != nil {

@@ -1059,6 +1059,56 @@ func TestUsecaseListWorkloadsAttachesDeploymentReplicaSetVersions(t *testing.T) 
 	}
 }
 
+func TestUsecasePodsExcludeRecoveredControllerHistory(t *testing.T) {
+	ctx := context.Background()
+	base := newFakeRepo()
+	reg, err := NewUsecase(base, newFakeIssuer(), Config{}).CreateCluster(ctx, CreateClusterInput{Name: "prod"})
+	if err != nil {
+		t.Fatalf("CreateCluster() error = %v", err)
+	}
+	clusterID := reg.Cluster.ID
+	base.pods[podKey(clusterID, "apps", "api-old-evicted", "pod-old")] = &model.Pod{ClusterID: clusterID, Namespace: "apps", Name: "api-old-evicted", UID: "pod-old", Phase: "Failed", Reason: "Evicted", OwnerKind: "ReplicaSet", OwnerName: "api-old"}
+	base.pods[podKey(clusterID, "apps", "api-current-evicted", "pod-current")] = &model.Pod{ClusterID: clusterID, Namespace: "apps", Name: "api-current-evicted", UID: "pod-current", Phase: "Failed", Reason: "Evicted", OwnerKind: "ReplicaSet", OwnerName: "api-current"}
+	base.pods[podKey(clusterID, "apps", "standalone-failed", "pod-standalone")] = &model.Pod{ClusterID: clusterID, Namespace: "apps", Name: "standalone-failed", UID: "pod-standalone", Phase: "Failed", Reason: "Unknown"}
+	base.pods[podKey(clusterID, "apps", "deleted-job-complete", "pod-deleted-job")] = &model.Pod{ClusterID: clusterID, Namespace: "apps", Name: "deleted-job-complete", UID: "pod-deleted-job", Phase: "Succeeded", Reason: "Completed", OwnerKind: "Job", OwnerName: "deleted-job"}
+	base.events = []*model.Event{
+		{ClusterID: clusterID, UID: "old-event", Type: "Warning", InvolvedKind: "Pod", InvolvedNamespace: "apps", InvolvedName: "api-old-evicted", InvolvedUID: "pod-old"},
+		{ClusterID: clusterID, UID: "current-event", Type: "Warning", InvolvedKind: "Pod", InvolvedNamespace: "apps", InvolvedName: "api-current-evicted", InvolvedUID: "pod-current"},
+	}
+	repo := &groupingWorkloadRepo{
+		fakeRepo: base,
+		topLevel: []*model.Workload{
+			{ClusterID: clusterID, Namespace: "apps", Kind: "ReplicaSet", Name: "api-old", DesiredReplicas: 0, ReadyReplicas: 0},
+			{ClusterID: clusterID, Namespace: "apps", Kind: "ReplicaSet", Name: "api-current", DesiredReplicas: 1, ReadyReplicas: 0},
+		},
+	}
+	uc := NewUsecase(repo, newFakeIssuer(), Config{})
+
+	visible, err := uc.ListPods(ctx, ListPodsFilter{ClusterID: clusterID, Limit: 100})
+	if err != nil || len(visible) != 2 {
+		t.Fatalf("ListPods() = %+v, err = %v, want only current and standalone pods", visible, err)
+	}
+	visibleTotal, err := uc.CountPods(ctx, ListPodsFilter{ClusterID: clusterID})
+	if err != nil || visibleTotal != 2 {
+		t.Fatalf("CountPods() = %d, err = %v, want 2", visibleTotal, err)
+	}
+	pods, err := uc.ListPods(ctx, ListPodsFilter{ClusterID: clusterID, IssueOnly: true, Limit: 100})
+	if err != nil {
+		t.Fatalf("ListPods(issue) error = %v", err)
+	}
+	if len(pods) != 2 || pods[0].Name == "api-old-evicted" || pods[1].Name == "api-old-evicted" {
+		t.Fatalf("issue pods = %+v, want current and standalone failures", pods)
+	}
+	total, err := uc.CountPods(ctx, ListPodsFilter{ClusterID: clusterID, IssueOnly: true})
+	if err != nil || total != 2 {
+		t.Fatalf("CountPods(issue) = %d, err = %v, want 2", total, err)
+	}
+	events, err := uc.ListEvents(ctx, ListEventsFilter{ClusterID: clusterID, IssueOnly: true, Limit: 100})
+	if err != nil || len(events) != 1 || events[0].UID != "current-event" {
+		t.Fatalf("issue events = %+v, err = %v, want current-event", events, err)
+	}
+}
+
 func TestUsecaseInventoryReplacesSameNameNodeWithDifferentRealUID(t *testing.T) {
 	ctx := context.Background()
 	repo := newFakeRepo()
