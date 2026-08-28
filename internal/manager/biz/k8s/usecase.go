@@ -816,7 +816,7 @@ func (u *Usecase) ListPods(ctx context.Context, f ListPodsFilter) ([]*model.Pod,
 	if _, err := u.repo.GetCluster(ctx, f.ClusterID); err != nil {
 		return nil, err
 	}
-	return u.repo.ListPods(ctx, f)
+	return u.listCurrentPods(ctx, f)
 }
 
 func (u *Usecase) CountPods(ctx context.Context, f ListPodsFilter) (int64, error) {
@@ -829,7 +829,83 @@ func (u *Usecase) CountPods(ctx context.Context, f ListPodsFilter) (int64, error
 	if _, err := u.repo.GetCluster(ctx, f.ClusterID); err != nil {
 		return 0, err
 	}
-	return u.repo.CountPods(ctx, f)
+	f.Limit = 0
+	f.Offset = 0
+	items, err := u.listCurrentPods(ctx, f)
+	return int64(len(items)), err
+}
+
+func (u *Usecase) listCurrentPods(ctx context.Context, f ListPodsFilter) ([]*model.Pod, error) {
+	query := f
+	query.Limit = 0
+	query.Offset = 0
+	pods, err := u.repo.ListPods(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	workloads, err := u.repo.ListWorkloads(ctx, ListWorkloadsFilter{ClusterID: f.ClusterID})
+	if err != nil {
+		return nil, err
+	}
+	workloadsByKey := make(map[string]*model.Workload, len(workloads))
+	for _, workload := range workloads {
+		if workload != nil {
+			workloadsByKey[workloadResourceKey(workload.Kind, workload.Namespace, workload.Name)] = workload
+		}
+	}
+	current := make([]*model.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if currentPod(pod, workloadsByKey) && (!f.IssueOnly || actionablePodIssue(pod, workloadsByKey)) {
+			current = append(current, pod)
+		}
+	}
+	if f.Offset >= len(current) {
+		return []*model.Pod{}, nil
+	}
+	end := len(current)
+	if f.Limit > 0 && f.Offset+f.Limit < end {
+		end = f.Offset + f.Limit
+	}
+	return current[f.Offset:end], nil
+}
+
+func currentPod(pod *model.Pod, workloads map[string]*model.Workload) bool {
+	if pod == nil {
+		return false
+	}
+	owner := workloads[workloadResourceKey(pod.OwnerKind, pod.Namespace, pod.OwnerName)]
+	if owner == nil {
+		switch strings.ToLower(strings.TrimSpace(pod.OwnerKind)) {
+		case "deployment", "replicaset", "statefulset", "daemonset", "job", "cronjob":
+			return false
+		default:
+			return true
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(owner.Kind), "Job") {
+		return true
+	}
+	if owner.DesiredReplicas <= 0 {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(pod.Phase), "Failed") || owner.ReadyReplicas < owner.DesiredReplicas
+}
+
+func actionablePodIssue(pod *model.Pod, workloads map[string]*model.Workload) bool {
+	if pod == nil {
+		return false
+	}
+	owner := workloads[workloadResourceKey(pod.OwnerKind, pod.Namespace, pod.OwnerName)]
+	if owner == nil {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(pod.Phase), "Failed") {
+		return owner.DesiredReplicas > 0 || strings.EqualFold(strings.TrimSpace(owner.Kind), "Job")
+	}
+	if strings.EqualFold(strings.TrimSpace(owner.Kind), "Job") {
+		return owner.IsTerminalFailure
+	}
+	return owner.DesiredReplicas > 0 && owner.ReadyReplicas < owner.DesiredReplicas
 }
 
 func (u *Usecase) ListEvents(ctx context.Context, f ListEventsFilter) ([]*model.Event, error) {
@@ -883,7 +959,7 @@ func (u *Usecase) listActionableWarningEvents(ctx context.Context, f ListEventsF
 	if err != nil {
 		return nil, err
 	}
-	pods, err := u.repo.ListPods(ctx, ListPodsFilter{ClusterID: f.ClusterID, IssueOnly: true})
+	pods, err := u.listCurrentPods(ctx, ListPodsFilter{ClusterID: f.ClusterID, IssueOnly: true})
 	if err != nil {
 		return nil, err
 	}
@@ -1033,24 +1109,23 @@ func (u *Usecase) GetClusterHealth(ctx context.Context, clusterID uint64) (Clust
 	if out.DegradedWorkloads, err = u.repo.CountWorkloads(ctx, ListWorkloadsFilter{ClusterID: clusterID, IssueOnly: true, GroupReplicaSets: true}); err != nil {
 		return out, err
 	}
-	if out.PendingPods, err = u.repo.CountPods(ctx, ListPodsFilter{ClusterID: clusterID, Phase: "Pending"}); err != nil {
-		return out, err
-	}
-	if out.CrashLoopBackOffPods, err = u.repo.CountPods(ctx, ListPodsFilter{ClusterID: clusterID, Reason: "CrashLoopBackOff"}); err != nil {
-		return out, err
-	}
-	if out.OOMKilledPods, err = u.repo.CountPods(ctx, ListPodsFilter{ClusterID: clusterID, Reason: "OOMKilled"}); err != nil {
-		return out, err
-	}
-	imagePullBackOff, err := u.repo.CountPods(ctx, ListPodsFilter{ClusterID: clusterID, Reason: "ImagePullBackOff"})
+	actionablePods, err := u.listCurrentPods(ctx, ListPodsFilter{ClusterID: clusterID, IssueOnly: true})
 	if err != nil {
 		return out, err
 	}
-	errImagePull, err := u.repo.CountPods(ctx, ListPodsFilter{ClusterID: clusterID, Reason: "ErrImagePull"})
-	if err != nil {
-		return out, err
+	for _, pod := range actionablePods {
+		if pod.Phase == "Pending" {
+			out.PendingPods++
+		}
+		switch pod.Reason {
+		case "CrashLoopBackOff":
+			out.CrashLoopBackOffPods++
+		case "OOMKilled":
+			out.OOMKilledPods++
+		case "ImagePullBackOff", "ErrImagePull":
+			out.ImagePullBackOffPods++
+		}
 	}
-	out.ImagePullBackOffPods = imagePullBackOff + errImagePull
 	nodes, err := u.repo.ListNodes(ctx, clusterID)
 	if err != nil {
 		return out, err
@@ -1080,7 +1155,24 @@ func (u *Usecase) namespaceSummaries(ctx context.Context, clusterID uint64) ([]N
 		}
 		current.Namespace = namespace
 		summary := current
+		summary.Pods = 0
 		byNamespace[namespace] = &summary
+	}
+	pods, err := u.listCurrentPods(ctx, ListPodsFilter{ClusterID: clusterID})
+	if err != nil {
+		return nil, err
+	}
+	for _, pod := range pods {
+		namespace := strings.TrimSpace(pod.Namespace)
+		if namespace == "" {
+			namespace = "default"
+		}
+		summary := byNamespace[namespace]
+		if summary == nil {
+			summary = &NamespaceSummary{Namespace: namespace}
+			byNamespace[namespace] = summary
+		}
+		summary.Pods++
 	}
 	warnings, err := u.listActionableWarningEvents(ctx, ListEventsFilter{ClusterID: clusterID})
 	if err != nil {
@@ -1106,7 +1198,11 @@ func (u *Usecase) namespaceSummaries(ctx context.Context, clusterID uint64) ([]N
 		}
 	}
 	summaries = summaries[:0]
-	for _, summary := range byNamespace {
+	for namespace, summary := range byNamespace {
+		if summary.Workloads == 0 && summary.Pods == 0 && summary.Events == 0 && summary.Warnings == 0 {
+			delete(byNamespace, namespace)
+			continue
+		}
 		summaries = append(summaries, *summary)
 	}
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Namespace < summaries[j].Namespace })

@@ -128,7 +128,13 @@ func (u *Usecase) DeleteNode(ctx context.Context, id uint64) error {
 	if err != nil {
 		return err
 	}
+	if node.Type == string(model.NodeTypeDevice) {
+		return fmt.Errorf("%w: device topology nodes must be deleted from Devices", errs.ErrConflict)
+	}
 	if node.Type == string(model.NodeTypeCluster) {
+		if _, owned, _ := topologyKubernetesClusterProps(node.PropsJSON); owned {
+			return fmt.Errorf("%w: kubernetes-owned topology clusters must be deleted from Kubernetes", errs.ErrConflict)
+		}
 		for _, guard := range u.clusterDeleteGuards {
 			if err := guard.ValidateClusterDelete(ctx, id); err != nil {
 				return err

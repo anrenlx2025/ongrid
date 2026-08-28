@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Activity,
@@ -61,6 +62,7 @@ import { formatNumber, fullDateTime, relativeTime } from '@/lib/format';
 import { usePoll } from '@/lib/usePoll';
 import { useObservability } from '@/store/observability';
 import { usePermissions } from '@/store/me';
+import { listNodes as listTopologyNodes } from '@/api/topology';
 import {
   POLL_INTERVAL_MS,
   RESOURCE_PAGE_SIZE,
@@ -333,6 +335,8 @@ export function KubernetesClusterDetailPage() {
   const navigate = useNavigate();
   const grafanaOrgId = useObservability((s) => s.grafanaOrgId);
   const { clusterId = '' } = useParams();
+  const routeClusterID = clusterId.trim();
+  const [logClusterID, setLogClusterID] = useState('');
   const [searchParams, setSearchParams] = useSearchParams();
   const rawActiveTab = normalizeTab(searchParams.get('tab'));
   const [cluster, setCluster] = useState<KubernetesCluster | null>(null);
@@ -376,6 +380,26 @@ export function KubernetesClusterDetailPage() {
   const [resourceFilterError, setResourceFilterError] = useState<string | null>(null);
   const [resourceFilterRetryNonce, setResourceFilterRetryNonce] = useState(0);
   const [resourceFilterRefreshNonce, setResourceFilterRefreshNonce] = useState(0);
+
+  useEffect(() => {
+    if (!routeClusterID) {
+      setLogClusterID('');
+      return;
+    }
+    let cancelled = false;
+    setLogClusterID('');
+    void listTopologyNodes({ type: 'cluster', limit: 500 }).then((result) => {
+      if (cancelled) return;
+      const match = (result.items ?? []).find((node) => (
+        node.props?.source === 'kubernetes'
+        && String(node.props.k8s_cluster_id ?? '') === routeClusterID
+      ));
+      setLogClusterID(match ? String(match.id) : routeClusterID);
+    }).catch(() => {
+      if (!cancelled) setLogClusterID(routeClusterID);
+    });
+    return () => { cancelled = true; };
+  }, [routeClusterID]);
 
   const refresh = useCallback(async (opts?: { silent?: boolean }) => {
     if (!clusterId) return;
@@ -748,35 +772,24 @@ export function KubernetesClusterDetailPage() {
     setResourceActionType('all');
     openResourceTab(tab, { scroll: true });
   }, [openResourceTab]);
-  const openResourceLogs = useCallback(async (issue: K8sTriageIssue) => {
-    if (!cluster?.id) return;
-    const query = issueLogsQuery(String(cluster.id), issue);
-    const base = await fetchGrafanaRootURL();
-    const now = Date.now();
-    await openObservabilityUrl(buildExploreUrl({
-      base,
-      dsType: 'loki',
-      dsUid: 'ongrid-loki',
-      query: { expr: query, queryType: 'range' },
-      fromMs: now - 60 * 60 * 1000,
-      toMs: now,
-      orgId: grafanaOrgId,
-    }));
-  }, [cluster?.id, grafanaOrgId]);
+  const openResourceLogs = useCallback((issue: K8sTriageIssue) => {
+    if (!logClusterID) return;
+    navigate(k8sLogsPath(logClusterID, issue));
+  }, [logClusterID, navigate]);
   const openResourceTraces = useCallback(async (issue: K8sTriageIssue) => {
-    if (!cluster?.id) return;
+    if (!routeClusterID) return;
     const base = await fetchGrafanaRootURL();
     const now = Date.now();
     await openObservabilityUrl(buildExploreUrl({
       base,
       dsType: 'tempo',
       dsUid: 'ongrid-tempo',
-      query: { query: issueTraceQuery(String(cluster.id), issue), queryType: 'traceql' },
+      query: { query: issueTraceQuery(routeClusterID, issue), queryType: 'traceql' },
       fromMs: now - 60 * 60 * 1000,
       toMs: now,
       orgId: grafanaOrgId,
     }));
-  }, [cluster?.id, grafanaOrgId]);
+  }, [grafanaOrgId, routeClusterID]);
   const startResourceChat = useCallback(async (issue: K8sTriageIssue, mode: 'describe' | 'analyze') => {
     if (!cluster) return;
     const prompt = mode === 'describe'
@@ -937,6 +950,8 @@ export function KubernetesClusterDetailPage() {
             <>
               <K8sHealthQueue
                 cluster={cluster}
+                clusterID={routeClusterID}
+                logClusterID={logClusterID}
                 crashLoopTotal={crashLoopTotal}
                 warningEventTotal={warningEventTotal}
                 triageIssues={triageIssues}
@@ -1118,7 +1133,8 @@ export function KubernetesClusterDetailPage() {
               </div>
 
               <K8sTelemetryDrilldowns
-                cluster={cluster}
+                clusterID={routeClusterID}
+                logClusterID={logClusterID}
                 namespaces={namespaces}
               />
             </>
@@ -1454,6 +1470,8 @@ function clusterVisibleIssueChips(
 
 function K8sHealthQueue({
   cluster,
+  clusterID,
+  logClusterID,
   crashLoopTotal,
   warningEventTotal,
   triageIssues,
@@ -1463,6 +1481,8 @@ function K8sHealthQueue({
   onOpenIssueResource,
 }: {
   cluster: KubernetesCluster | null;
+  clusterID: string;
+  logClusterID: string;
   crashLoopTotal: number;
   warningEventTotal: number;
   triageIssues: K8sTriageIssue[];
@@ -1475,6 +1495,15 @@ function K8sHealthQueue({
   const navigate = useNavigate();
   const grafanaOrgId = useObservability((s) => s.grafanaOrgId);
   const [writeBusy, setWriteBusy] = useState<string | null>(null);
+  useEffect(() => {
+    const closeOtherMenus = (event: MouseEvent) => {
+      document.querySelectorAll<HTMLDetailsElement>('details[data-k8s-triage-menu][open]').forEach((menu) => {
+        if (!menu.contains(event.target as Node)) menu.open = false;
+      });
+    };
+    document.addEventListener('click', closeOtherMenus);
+    return () => document.removeEventListener('click', closeOtherMenus);
+  }, []);
   const writeEnabled = cluster?.mode === 'full-node';
   const queueWriteActionRecommendations = writeEnabled ? writeActionRecommendations : [];
   const hasOpenIssues = triageIssues.length > 0;
@@ -1485,31 +1514,20 @@ function K8sHealthQueue({
       : 'success';
   const queueIssues = triageIssues.slice(0, 8);
 
-  async function openIssueLogs(issue: K8sTriageIssue) {
-    if (!cluster?.id) return;
-    const query = issueLogsQuery(String(cluster.id), issue);
-    const base = await fetchGrafanaRootURL();
-    const now = Date.now();
-    await openObservabilityUrl(buildExploreUrl({
-      base,
-      dsType: 'loki',
-      dsUid: 'ongrid-loki',
-      query: { expr: query, queryType: 'range' },
-      fromMs: now - 60 * 60 * 1000,
-      toMs: now,
-      orgId: grafanaOrgId,
-    }));
+  function openIssueLogs(issue: K8sTriageIssue) {
+    if (!logClusterID) return;
+    navigate(k8sLogsPath(logClusterID, issue));
   }
 
   async function openIssueTraces(issue: K8sTriageIssue) {
-    if (!cluster?.id) return;
+    if (!clusterID) return;
     const base = await fetchGrafanaRootURL();
     const now = Date.now();
     await openObservabilityUrl(buildExploreUrl({
       base,
       dsType: 'tempo',
       dsUid: 'ongrid-tempo',
-      query: { query: issueTraceQuery(String(cluster.id), issue), queryType: 'traceql' },
+      query: { query: issueTraceQuery(clusterID, issue), queryType: 'traceql' },
       fromMs: now - 60 * 60 * 1000,
       toMs: now,
       orgId: grafanaOrgId,
@@ -1599,7 +1617,7 @@ function K8sHealthQueue({
                 recommendationBusy={writeBusy}
                 recommendationDisabled={!isAdmin}
                 onOpenResource={() => onOpenIssueResource(issue)}
-                onOpenLogs={() => void openIssueLogs(issue)}
+                onOpenLogs={() => openIssueLogs(issue)}
                 onDescribe={() => void startIssueChat(issue, 'describe')}
                 onTrace={() => void openIssueTraces(issue)}
                 onAnalyze={() => void startIssueChat(issue, 'analyze')}
@@ -1763,7 +1781,7 @@ function TriageQueueRow({
           {issueResourceActionLabel(issue, tr)}
         </Button>
         {hasMoreActions && (
-          <details className="group relative">
+          <details data-k8s-triage-menu className="group relative">
             <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] font-medium text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100 [&::-webkit-details-marker]:hidden">
               <MoreHorizontal size={11} />
               {tr('更多', 'More')}
@@ -1828,18 +1846,19 @@ function issueResourceActionLabel(issue: K8sTriageIssue, tr: (zh: string, en: st
 }
 
 function K8sTelemetryDrilldowns({
-  cluster,
+  clusterID,
+  logClusterID,
   namespaces,
 }: {
-  cluster: KubernetesCluster | null;
+  clusterID: string;
+  logClusterID: string;
   namespaces: string[];
 }) {
   const { tr } = useI18n();
+  const navigate = useNavigate();
   const grafanaOrgId = useObservability((s) => s.grafanaOrgId);
-  const [opening, setOpening] = useState<'metrics' | 'logs' | 'traces' | null>(null);
+  const [opening, setOpening] = useState<'metrics' | 'traces' | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const clusterID = cluster?.id ? String(cluster.id) : '';
-
   const namespaceMatcher = useMemo(() => {
     const cleaned = namespaces.map((ns) => ns.trim()).filter(Boolean);
     if (cleaned.length === 0) return '.+';
@@ -1851,9 +1870,9 @@ function K8sTelemetryDrilldowns({
     return `sum by (namespace, phase) (kube_pod_status_phase{cluster_id="${clusterID}",ongrid_source=~"k8s:.*"} == 1)`;
   }, [clusterID]);
   const logsQuery = useMemo(() => {
-    if (!clusterID) return '';
-    return `{cluster_id="${clusterID}",namespace=~"${namespaceMatcher}"}`;
-  }, [clusterID, namespaceMatcher]);
+    if (!logClusterID) return '';
+    return `{cluster_id="${logClusterID}",namespace=~"${namespaceMatcher}"}`;
+  }, [logClusterID, namespaceMatcher]);
   const traceQL = useMemo(() => {
     if (!clusterID) return '';
     return `{resource.cluster_id="${clusterID}"}`;
@@ -1883,28 +1902,9 @@ function K8sTelemetryDrilldowns({
     }
   }
 
-  async function openLogs() {
-    if (!logsQuery) return;
-    setOpening('logs');
-    setError(null);
-    try {
-      const base = await fetchGrafanaRootURL();
-      const now = Date.now();
-      const url = buildExploreUrl({
-        base,
-        dsType: 'loki',
-        dsUid: 'ongrid-loki',
-        query: { expr: logsQuery, queryType: 'range' },
-        fromMs: now - 60 * 60 * 1000,
-        toMs: now,
-        orgId: grafanaOrgId,
-      });
-      await openObservabilityUrl(url);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : (e as Error).message);
-    } finally {
-      setOpening(null);
-    }
+  function openLogs() {
+    if (!logClusterID) return;
+    navigate(k8sLogsPath(logClusterID));
   }
 
   async function openTraces() {
@@ -1937,7 +1937,7 @@ function K8sTelemetryDrilldowns({
         <div className="min-w-0">
           <div className="text-sm font-medium text-zinc-100">{tr('可观测入口', 'Observability')}</div>
           <div className="mt-0.5 truncate font-mono text-[11px] text-zinc-500">
-            cluster_id={clusterID || '—'}
+            k8s_cluster_id={clusterID || '—'} · log_cluster_id={logClusterID || '—'}
           </div>
         </div>
         <Chip tone="info">{tr('3 个数据源', '3 data sources')}</Chip>
@@ -1958,12 +1958,14 @@ function K8sTelemetryDrilldowns({
           icon={FileText}
           title={tr('K8s 日志', 'K8s logs')}
           source="Loki"
-          statusLabel={clusterID ? tr('查询已就绪', 'query ready') : tr('等待 cluster_id', 'waiting for cluster_id')}
-          statusTone={clusterID ? 'info' : 'default'}
+          statusLabel={logClusterID ? tr('查询已就绪', 'query ready') : tr('等待 cluster_id', 'waiting for cluster_id')}
+          statusTone={logClusterID ? 'info' : 'default'}
           query={logsQuery || '—'}
-          loading={opening === 'logs'}
-          disabled={!clusterID}
-          onOpen={() => void openLogs()}
+          loading={false}
+          disabled={!logClusterID}
+          actionLabel={tr('查看日志', 'View logs')}
+          actionIcon={Search}
+          onOpen={openLogs}
         />
         <TelemetryLinkCell
           icon={Waypoints}
@@ -1996,6 +1998,8 @@ function TelemetryLinkCell({
   query,
   loading,
   disabled,
+  actionLabel,
+  actionIcon: ActionIcon = ExternalLink,
   onOpen,
 }: {
   icon: LucideIcon;
@@ -2006,11 +2010,13 @@ function TelemetryLinkCell({
   query: string;
   loading: boolean;
   disabled: boolean;
+  actionLabel?: string;
+  actionIcon?: LucideIcon;
   onOpen(): void;
 }) {
   const { tr } = useI18n();
   return (
-    <div className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
+    <div role="group" aria-label={title} className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
           <Icon size={15} className="shrink-0 text-zinc-400" />
@@ -2033,8 +2039,8 @@ function TelemetryLinkCell({
         </details>
       </div>
       <Button className="justify-center md:min-w-24" onClick={onOpen} disabled={disabled || loading}>
-        <ExternalLink size={12} />
-        {loading ? tr('打开中…', 'Opening…') : tr('打开图表', 'Open chart')}
+        <ActionIcon size={12} />
+        {loading ? tr('打开中…', 'Opening…') : actionLabel || tr('打开图表', 'Open chart')}
       </Button>
     </div>
   );
@@ -2914,6 +2920,24 @@ type ResourceRowActionHandlers = {
 function ResourceRowActions({ issue, actions }: { issue: K8sTriageIssue; actions: ResourceRowActionHandlers }) {
   const { tr } = useI18n();
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const [position, setPosition] = useState<{ top: number; right: number } | null>(null);
+  const syncPosition = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    setPosition({ top: rect.bottom + 4, right: Math.max(8, window.innerWidth - rect.right) });
+  }, []);
+  useEffect(() => {
+    if (!open) return;
+    syncPosition();
+    window.addEventListener('resize', syncPosition);
+    window.addEventListener('scroll', syncPosition, true);
+    return () => {
+      window.removeEventListener('resize', syncPosition);
+      window.removeEventListener('scroll', syncPosition, true);
+    };
+  }, [open, syncPosition]);
   const run = (fn: (issue: K8sTriageIssue) => void) => {
     setOpen(false);
     fn(issue);
@@ -2921,54 +2945,65 @@ function ResourceRowActions({ issue, actions }: { issue: K8sTriageIssue; actions
   return (
     <div className="relative inline-flex justify-end">
       <Button
+        ref={triggerRef}
         className="h-7 px-2 text-[11px]"
         onClick={() => setOpen((value) => !value)}
+        aria-haspopup="menu"
         aria-expanded={open}
       >
         <MoreHorizontal size={11} />
         {tr('排障', 'Triage')}
       </Button>
-      {open && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-32 rounded-lg border border-zinc-800 bg-zinc-950 p-1 text-left shadow-xl">
-          <button
-            type="button"
-            className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] text-zinc-300 hover:bg-zinc-900 hover:text-zinc-100"
-            onClick={() => run(actions.onAnalyze)}
+      {open && position && createPortal(
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
+          <div
+            role="menu"
+            aria-label={tr('资源排障', 'Resource triage')}
+            className="fixed z-50 w-32 rounded-lg border border-zinc-800 bg-zinc-950 p-1 text-left shadow-xl"
+            style={position}
           >
-            <Activity size={11} />
-            {tr('AI 分析', 'AI analyze')}
-          </button>
-          {issueSupportsLogs(issue) && (
             <button
               type="button"
               className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] text-zinc-300 hover:bg-zinc-900 hover:text-zinc-100"
-              onClick={() => run(actions.onOpenLogs)}
+              onClick={() => run(actions.onAnalyze)}
             >
-              <FileText size={11} />
-              {tr('日志', 'Logs')}
+              <Activity size={11} />
+              {tr('AI 分析', 'AI analyze')}
             </button>
-          )}
-          {issueSupportsDescribe(issue) && (
-            <button
-              type="button"
-              className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] text-zinc-300 hover:bg-zinc-900 hover:text-zinc-100"
-              onClick={() => run(actions.onDescribe)}
-            >
-              <Search size={11} />
-              describe
-            </button>
-          )}
-          {issueSupportsTrace(issue) && (
-            <button
-              type="button"
-              className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] text-zinc-300 hover:bg-zinc-900 hover:text-zinc-100"
-              onClick={() => run(actions.onTrace)}
-            >
-              <Network size={11} />
-              {tr('链路', 'Trace')}
-            </button>
-          )}
-        </div>
+            {issueSupportsLogs(issue) && (
+              <button
+                type="button"
+                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] text-zinc-300 hover:bg-zinc-900 hover:text-zinc-100"
+                onClick={() => run(actions.onOpenLogs)}
+              >
+                <FileText size={11} />
+                {tr('日志', 'Logs')}
+              </button>
+            )}
+            {issueSupportsDescribe(issue) && (
+              <button
+                type="button"
+                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] text-zinc-300 hover:bg-zinc-900 hover:text-zinc-100"
+                onClick={() => run(actions.onDescribe)}
+              >
+                <Search size={11} />
+                describe
+              </button>
+            )}
+            {issueSupportsTrace(issue) && (
+              <button
+                type="button"
+                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] text-zinc-300 hover:bg-zinc-900 hover:text-zinc-100"
+                onClick={() => run(actions.onTrace)}
+              >
+                <Network size={11} />
+                {tr('链路', 'Trace')}
+              </button>
+            )}
+          </div>
+        </>,
+        document.body,
       )}
     </div>
   );
@@ -4817,15 +4852,15 @@ function buildNamespaceRows(
   return [...rows.values()].sort((a, b) => a.namespace.localeCompare(b.namespace));
 }
 
-function issueLogsQuery(clusterID: string, issue: K8sTriageIssue) {
-  const namespace = issue.namespace ? `,namespace="${escapeLabelValue(issue.namespace)}"` : '';
-  if ((issue.kind === 'pod' || issue.resourceKind === 'Pod') && issue.name) {
-    return `{cluster_id="${clusterID}"${namespace},pod="${escapeLabelValue(issue.name)}"}`;
-  }
-  if (issue.kind === 'node' && issue.nodeName) {
-    return `{cluster_id="${clusterID}",node_name="${escapeLabelValue(issue.nodeName)}"}`;
-  }
-  return `{cluster_id="${clusterID}"${namespace}}`;
+function k8sLogsPath(clusterID: string, issue?: K8sTriageIssue) {
+  const params = new URLSearchParams({ cluster_id: clusterID, range: '1h' });
+  if (!issue) return `/logs?${params.toString()}`;
+  if (issue.namespace) params.set('namespace', issue.namespace);
+  const resourceKind = (issue.resourceKind || issue.kind).trim().toLowerCase();
+  if (resourceKind === 'pod' && issue.name) params.set('pod', issue.name);
+  else if (resourceKind === 'node' && (issue.nodeName || issue.name)) params.set('node', issue.nodeName || issue.name || '');
+  else if (isWorkloadKind(resourceKind) && issue.name) params.set('workload', issue.name);
+  return `/logs?${params.toString()}`;
 }
 
 function issueTraceQuery(clusterID: string, issue: K8sTriageIssue) {

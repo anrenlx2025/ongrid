@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   AlertTriangle,
   BarChart3,
@@ -72,6 +72,7 @@ const INPUT = 'h-9 w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 t
 
 type ScopeKey =
   | 'cluster_ids'
+  | 'namespaces'
   | 'workloads'
   | 'pods'
   | 'containers'
@@ -129,6 +130,7 @@ function buildDisplayFields(fields: LogField[], records: LogRecord[]): DisplayFi
 
 const EMPTY_SCOPE: ScopeDraft = {
   cluster_ids: '',
+  namespaces: '',
   workloads: '',
   pods: '',
   containers: '',
@@ -283,7 +285,21 @@ function topologyNodeLabel(node: TopologyNode): string {
 
 export default function LogsPage() {
   const { tr } = useI18n();
-  const [range, setRange] = useState('1h');
+  const [searchParams] = useSearchParams();
+  const requestedRange = searchParams.get('range') || '';
+  const initialRange = RANGE_PRESETS.some((item) => item.value === requestedRange && item.value !== 'custom')
+    ? requestedRange
+    : '1h';
+  const initialScope: ScopeDraft = {
+    ...EMPTY_SCOPE,
+    cluster_ids: searchParams.get('cluster_id')?.trim() || '',
+    namespaces: searchParams.get('namespace')?.trim() || '',
+    workloads: searchParams.get('workload')?.trim() || '',
+    pods: searchParams.get('pod')?.trim() || '',
+    containers: searchParams.get('container')?.trim() || '',
+    nodes: searchParams.get('node')?.trim() || '',
+  };
+  const [range, setRange] = useState(initialRange);
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
   const [query, setQuery] = useState('');
@@ -294,8 +310,8 @@ export default function LogsPage() {
   const [committedMode, setCommittedMode] = useState<LogMatchMode>('any');
   const [deviceID, setDeviceID] = useState('');
   const [role, setRole] = useState<'' | EdgeRole>('');
-  const [scopeDraft, setScopeDraft] = useState<ScopeDraft>(EMPTY_SCOPE);
-  const [committedScope, setCommittedScope] = useState<ScopeDraft>(EMPTY_SCOPE);
+  const [scopeDraft, setScopeDraft] = useState<ScopeDraft>(() => initialScope);
+  const [committedScope, setCommittedScope] = useState<ScopeDraft>(() => initialScope);
   const [advanced, setAdvanced] = useState(false);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [clusters, setClusters] = useState<TopologyNode[]>([]);
@@ -669,7 +685,7 @@ export default function LogsPage() {
     if (role) items.push({ label: tr('角色', 'Role'), value: role });
     if (deviceID) items.push({ label: 'device_id', value: deviceID });
     const labels: Record<ScopeKey, string> = {
-      cluster_ids: 'cluster_id', workloads: 'workload', pods: 'pod',
+      cluster_ids: 'cluster_id', namespaces: 'namespace', workloads: 'workload', pods: 'pod',
       containers: 'container', nodes: 'node', source_ids: 'source_id',
       levels: 'level', files: 'file', units: 'unit',
     };
@@ -827,6 +843,7 @@ export default function LogsPage() {
               <FilterInput label={tr('排除关键词', 'Exclude keywords')} value={exclude} onChange={setExclude} wide />
               <FilterInput label={tr('级别', 'Level')} value={scopeDraft.levels} onChange={(value) => setScopeDraft((current) => ({ ...current, levels: value }))} suggestions={fieldValues.level} />
               <FilterInput label={tr('文件', 'File')} value={scopeDraft.files} onChange={(value) => setScopeDraft((current) => ({ ...current, files: value }))} suggestions={fieldValues.file} wide />
+              <FilterInput label="Namespace" value={scopeDraft.namespaces} onChange={(value) => setScopeDraft((current) => ({ ...current, namespaces: value }))} />
               <FilterInput label="Workload" value={scopeDraft.workloads} onChange={(value) => setScopeDraft((current) => ({ ...current, workloads: value }))} />
               <FilterInput label="Pod" value={scopeDraft.pods} onChange={(value) => setScopeDraft((current) => ({ ...current, pods: value }))} />
               <FilterInput label="Container" value={scopeDraft.containers} onChange={(value) => setScopeDraft((current) => ({ ...current, containers: value }))} />

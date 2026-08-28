@@ -81,7 +81,15 @@ type CapturedSearchRequest = {
   start: string;
   end: string;
   cursor?: string;
-  scope?: { cluster_ids?: string[]; levels?: string[] };
+  scope?: {
+    cluster_ids?: string[];
+    namespaces?: string[];
+    workloads?: string[];
+    pods?: string[];
+    containers?: string[];
+    nodes?: string[];
+    levels?: string[];
+  };
 };
 
 const searchRequests: CapturedSearchRequest[] = [];
@@ -195,6 +203,28 @@ describe('LogsPage', () => {
     expect(screen.getByRole('link', { name: /采集与后端配置/ })).toHaveAttribute('href', '/settings/integrations?focus=logs');
     expect(screen.queryByText('日志检索')).not.toBeInTheDocument();
     expect(screen.queryByText('采集配置')).not.toBeInTheDocument();
+  });
+
+  it('applies the cluster and time range from a Kubernetes log deep link', async () => {
+    render(
+      <MemoryRouter initialEntries={['/logs?cluster_id=7&range=6h&namespace=production&workload=payments&pod=payments-7d4&container=payments&node=worker-1']}>
+        <LogsPage />
+      </MemoryRouter>,
+    );
+
+    await waitForInitialLogs();
+
+    expect(screen.getByRole('combobox', { name: '集群' })).toHaveValue('7');
+    expect(screen.getByRole('combobox', { name: '时间范围' })).toHaveValue('6h');
+    expect(searchRequests[0]?.scope).toMatchObject({
+      cluster_ids: ['7'],
+      namespaces: ['production'],
+      workloads: ['payments'],
+      pods: ['payments-7d4'],
+      containers: ['payments'],
+      nodes: ['worker-1'],
+    });
+    expect(new Date(searchRequests[0].end).getTime() - new Date(searchRequests[0].start).getTime()).toBe(6 * 60 * 60 * 1000);
   });
 
   it('keeps successful logs and closes their cursor when the histogram fails', async () => {

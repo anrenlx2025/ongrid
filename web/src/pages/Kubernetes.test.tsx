@@ -44,6 +44,11 @@ function ChatStateProbe() {
   return <div data-testid="initial-prompt">{state?.initialPrompt || ''}</div>;
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="current-location">{`${location.pathname}${location.search}`}</div>;
+}
+
 function renderKubernetesList() {
   return render(
     <MemoryRouter>
@@ -99,6 +104,13 @@ describe('KubernetesPage', () => {
           total: 2,
         }),
       ),
+      http.get('/api/v1/topology/nodes', () => HttpResponse.json({
+        items: [
+          { id: 1, type: 'cluster', name: 'kind-local', props: { source: 'kubernetes', k8s_cluster_id: 1 }, created_at: '', updated_at: '' },
+          { id: 95, type: 'cluster', name: 'vm-kubeadm-fresh-pull', props: { source: 'kubernetes', k8s_cluster_id: 48 }, created_at: '', updated_at: '' },
+        ],
+        total: 2,
+      })),
       http.get('/api/v1/k8s/clusters/:id', () => HttpResponse.json(cluster)),
       http.get('/api/v1/k8s/clusters/:id/health', () => HttpResponse.json({
         degraded_workloads: 0,
@@ -891,6 +903,46 @@ describe('KubernetesPage', () => {
     open.mockRestore();
   });
 
+  it('K8s 日志只进入平台日志中心', async () => {
+    render(
+      <MemoryRouter initialEntries={['/kubernetes/48']}>
+        <Routes>
+          <Route path="/kubernetes/:clusterId" element={<KubernetesClusterDetailPage />} />
+          <Route path="/logs" element={<LocationProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const logsEntry = await screen.findByRole('group', { name: 'K8s 日志' });
+    expect(within(logsEntry).getByRole('button', { name: '查看日志' })).toBeInTheDocument();
+    expect(within(logsEntry).queryByRole('button', { name: '在 Grafana 中打开' })).not.toBeInTheDocument();
+
+    fireEvent.click(within(logsEntry).getByRole('button', { name: '查看日志' }));
+
+    expect(screen.getByTestId('current-location')).toHaveTextContent('/logs?cluster_id=95&range=1h');
+  });
+
+  it('Workload 资源日志进入平台日志中心并携带资源筛选', async () => {
+    render(
+      <MemoryRouter initialEntries={['/kubernetes/48?tab=workloads']}>
+        <Routes>
+          <Route path="/kubernetes/:clusterId" element={<KubernetesClusterDetailPage />} />
+          <Route path="/logs" element={<LocationProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const workloadCells = await screen.findAllByText('ongrid-edge-controller');
+    const row = workloadCells.map((cell) => cell.closest('tr')).find(Boolean);
+    expect(row).toBeTruthy();
+    fireEvent.click(within(row as HTMLElement).getByRole('button', { name: '排障' }));
+    fireEvent.click(within(screen.getByRole('menu', { name: '资源排障' })).getByRole('button', { name: '日志' }));
+
+    expect(screen.getByTestId('current-location')).toHaveTextContent(
+      '/logs?cluster_id=95&range=1h&namespace=ongrid-system&workload=ongrid-edge-controller',
+    );
+  });
+
   it('集群详情提供 Helm 升级命令', async () => {
     renderKubernetesDetail('/kubernetes/1');
 
@@ -1373,11 +1425,12 @@ describe('KubernetesPage', () => {
     expect(row).not.toBeNull();
     fireEvent.click(within(row as HTMLElement).getByRole('button', { name: '排障' }));
 
-    expect(within(row as HTMLElement).getByRole('button', { name: '日志' })).toBeInTheDocument();
-    expect(within(row as HTMLElement).getByRole('button', { name: 'describe' })).toBeInTheDocument();
-    expect(within(row as HTMLElement).getByRole('button', { name: '链路' })).toBeInTheDocument();
+    const menu = screen.getByRole('menu', { name: '资源排障' });
+    expect(within(menu).getByRole('button', { name: '日志' })).toBeInTheDocument();
+    expect(within(menu).getByRole('button', { name: 'describe' })).toBeInTheDocument();
+    expect(within(menu).getByRole('button', { name: '链路' })).toBeInTheDocument();
 
-    fireEvent.click(within(row as HTMLElement).getByRole('button', { name: 'AI 分析' }));
+    fireEvent.click(within(menu).getByRole('button', { name: 'AI 分析' }));
 
     await waitFor(() => {
       expect(sessionPayload).toEqual({ title: 'analyze ongrid-edge-controller-abc', agent_id: 'default' });
@@ -1447,16 +1500,17 @@ describe('KubernetesPage', () => {
     expect(warningRow).not.toBeNull();
     fireEvent.click(within(warningRow as HTMLElement).getByRole('button', { name: '排障' }));
 
-    expect(within(warningRow as HTMLElement).getByRole('button', { name: '日志' })).toBeInTheDocument();
-    expect(within(warningRow as HTMLElement).getByRole('button', { name: 'describe' })).toBeInTheDocument();
-    expect(within(warningRow as HTMLElement).getByRole('button', { name: '链路' })).toBeInTheDocument();
+    const menu = screen.getByRole('menu', { name: '资源排障' });
+    expect(within(menu).getByRole('button', { name: '日志' })).toBeInTheDocument();
+    expect(within(menu).getByRole('button', { name: 'describe' })).toBeInTheDocument();
+    expect(within(menu).getByRole('button', { name: '链路' })).toBeInTheDocument();
 
     const normalObject = await screen.findByText('Pod/ongrid-edge-controller-abc');
     const normalRow = normalObject.closest('tr');
     expect(normalRow).not.toBeNull();
     expect(within(normalRow as HTMLElement).queryByRole('button', { name: '排障' })).not.toBeInTheDocument();
 
-    fireEvent.click(within(warningRow as HTMLElement).getByRole('button', { name: 'AI 分析' }));
+    fireEvent.click(within(menu).getByRole('button', { name: 'AI 分析' }));
 
     await waitFor(() => {
       expect(sessionPayload).toEqual({ title: 'analyze BackOff', agent_id: 'default' });
@@ -1746,11 +1800,14 @@ describe('KubernetesPage', () => {
     expect(row).toBeTruthy();
     fireEvent.click(within(row as HTMLElement).getByRole('button', { name: '排障' }));
 
-    expect(within(row as HTMLElement).getByRole('button', { name: '日志' })).toBeInTheDocument();
-    expect(within(row as HTMLElement).getByRole('button', { name: 'describe' })).toBeInTheDocument();
-    expect(within(row as HTMLElement).queryByRole('button', { name: '链路' })).not.toBeInTheDocument();
+    const menu = screen.getByRole('menu', { name: '资源排障' });
+    expect(row).not.toContainElement(menu);
+    expect(menu).toHaveClass('fixed');
+    expect(within(menu).getByRole('button', { name: '日志' })).toBeInTheDocument();
+    expect(within(menu).getByRole('button', { name: 'describe' })).toBeInTheDocument();
+    expect(within(menu).queryByRole('button', { name: '链路' })).not.toBeInTheDocument();
 
-    fireEvent.click(within(row as HTMLElement).getByRole('button', { name: 'AI 分析' }));
+    fireEvent.click(within(menu).getByRole('button', { name: 'AI 分析' }));
 
     await waitFor(() => {
       expect(sessionPayload).toEqual({ title: 'analyze ongrid-k8s-control-plane', agent_id: 'default' });
@@ -1805,6 +1862,41 @@ describe('KubernetesPage', () => {
 
     expect(screen.getByRole('textbox', { name: '搜索资源' })).toHaveValue('');
     expect(screen.getByRole('button', { name: '只看异常' })).not.toHaveClass('border-amber-500/50');
+  });
+
+  it('异常线索只保留一个更多菜单并可点击外部关闭', async () => {
+    server.use(
+      http.get('/api/v1/k8s/clusters/:id/nodes', () => HttpResponse.json({
+        items: [{
+          id: 12,
+          cluster_id: 1,
+          node_name: 'worker-not-ready',
+          node_uid: 'node-not-ready',
+          edge_id: 6,
+          device_id: 18,
+          conditions: [{ type: 'Ready', status: 'False' }],
+          kubelet_version: 'v1.30.0',
+          last_seen_at: '2026-06-29T10:00:00Z',
+        }],
+        total: 1,
+      })),
+    );
+    renderKubernetesDetail('/kubernetes/1?tab=pods');
+
+    const moreButtons = await screen.findAllByText('更多');
+    expect(moreButtons.length).toBeGreaterThan(1);
+    const firstMenu = moreButtons[0].closest('details');
+    const secondMenu = moreButtons[1].closest('details');
+
+    fireEvent.click(moreButtons[0]);
+    expect(firstMenu).toHaveAttribute('open');
+
+    fireEvent.click(moreButtons[1]);
+    expect(firstMenu).not.toHaveAttribute('open');
+    expect(secondMenu).toHaveAttribute('open');
+
+    fireEvent.click(screen.getByText('异常线索'));
+    expect(secondMenu).not.toHaveAttribute('open');
   });
 
   it('异常线索内联展示并发起匹配的写动作建议', async () => {
