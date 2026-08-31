@@ -172,6 +172,14 @@ func (c *geminioClient) buildDialer() (gclient.Dialer, error) {
 		return nil, errors.New("tunnel: ServerAddr (or CloudAddr) is required")
 	}
 	if caFile == "" {
+		// Fail closed: TLS was configured at install time (the installer
+		// records ONGRID_EDGE_TLS_REQUIRED=1 alongside the CA path), but the
+		// CA file setting is now missing — e.g. the service Environment was
+		// recreated or cleaned. Falling back to plaintext here would expose
+		// the broker token (and every rotated token) on the wire.
+		if c.cfg.TLSRequired {
+			return nil, errors.New("tunnel: TLS required (installed with --tls-ca-file) but ONGRID_EDGE_TLS_CA_FILE is unset; refusing plaintext downgrade")
+		}
 		d := &net.Dialer{Timeout: 10 * time.Second}
 		return func() (net.Conn, error) {
 			conn, err := d.Dial("tcp", addr)
@@ -192,6 +200,24 @@ func (c *geminioClient) buildDialer() (gclient.Dialer, error) {
 	tlsCfg := &tls.Config{
 		RootCAs:    pool,
 		MinVersion: tls.VersionTLS12,
+	}
+	// Derive the TLS ServerName from the address (required for cert
+	// verification). When the address is an IP literal but the cert's
+	// CN is a DNS name, the caller must override it via
+	// ONGRID_EDGE_TLS_SERVER_NAME.
+	if c.cfg.TLSServerName != "" {
+		tlsCfg.ServerName = c.cfg.TLSServerName
+	} else if host, _, err := net.SplitHostPort(addr); err == nil && net.ParseIP(host) == nil {
+		tlsCfg.ServerName = host
+	}
+	// Fail closed: a non-empty TLSCAFile with an unresolved ServerName
+	// (IP-literal address and no TLSServerName override) refuses to
+	// start. Otherwise the TLS handshake would fail later with a
+	// cryptic error ("certificate signed by unknown authority" or
+	// "x509: cannot validate certificate") that operators tend to
+	// misread as a CA misconfiguration.
+	if tlsCfg.ServerName == "" {
+		return nil, fmt.Errorf("tunnel: TLS ServerName unresolved (addr=%q is IP literal; set ONGRID_EDGE_TLS_SERVER_NAME)", addr)
 	}
 	d := &net.Dialer{Timeout: 10 * time.Second}
 	return func() (net.Conn, error) {

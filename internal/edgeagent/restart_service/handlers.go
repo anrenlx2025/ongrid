@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package restart_service registers the edge-side handler for
 // MethodRestartService — the first mutating skill in ongrid (
 // double-sign / mutating class). The manager-side

@@ -43,16 +43,21 @@ jobs:
         env:
           GOOS: windows
           GOARCH: amd64
-        # 只编译 PR1 scope 的 4 个 Windows 子包
-        run: go build ./internal/edgeagent/dpapi/... ./internal/edgeagent/edgedirs/... ./internal/edgeagent/install/... ./internal/edgeagent/config/...
+        # 4 个 Windows 子包（PR1 scope）+ 两个最终交付入口二进制——
+        # 仅最终命令依赖图或 Windows build tags 下才暴露的编译错误
+        # 必须在 PR CI 阶段被发现
+        run: |
+          go build ./internal/edgeagent/dpapi/... ./internal/edgeagent/edgedirs/... ./internal/edgeagent/install/... ./internal/edgeagent/config/...
+          go build ./cmd/ongrid-edge ./cmd/ongrid-edge-supervisor
 
       - name: go vet (GOOS=windows)
         env:
           GOOS: windows
           GOARCH: amd64
         run: |
-          # vet 只跑 Windows 子包（避免 Linux-only 文件的误报）
+          # vet 覆盖 Windows 子包 + 两个最终交付入口（避免 Linux-only 文件的误报）
           go vet ./internal/edgeagent/dpapi/... ./internal/edgeagent/edgedirs/... ./internal/edgeagent/install/... ./internal/edgeagent/config/...
+          go vet ./cmd/ongrid-edge ./cmd/ongrid-edge-supervisor
 
       - name: go test (GOOS=windows, no-cgo)
         env:

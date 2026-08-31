@@ -411,6 +411,37 @@ type EdgeConfig struct {
 	//
 	// env: ONGRID_EDGE_COLLECTOR_INTERVAL; default 10s
 	CollectorInterval time.Duration
+
+	// TLSCAFile is the path to a PEM CA file used to verify the frontier
+	// broker's TLS cert. Empty = plaintext (no TLS). Set when the broker
+	// has tls.enable=true in frontier.yaml.
+	//
+	// env: ONGRID_EDGE_TLS_CA_FILE; default empty.
+	TLSCAFile string
+
+	// TLSServerName overrides the TLS SNI / cert verification name.
+	// Set when dialing by IP but the broker cert uses a DNS name.
+	//
+	// env: ONGRID_EDGE_TLS_SERVER_NAME; default empty.
+	TLSServerName string
+
+	// TLSRequired records that this edge was installed with TLS enabled
+	// (installer writes ONGRID_EDGE_TLS_REQUIRED=1 next to the CA path).
+	// When true, a missing TLSCAFile is a hard startup error instead of
+	// a silent plaintext fallback — the tunnel credential channel must
+	// never downgrade to cleartext unnoticed.
+	//
+	// env: ONGRID_EDGE_TLS_REQUIRED; default false.
+	TLSRequired bool
+
+	// SecretsFile is the path to the DPAPI-encrypted secrets.enc. When
+	// set and the file exists, the broker token is loaded from it via
+	// DPAPI. When the file is missing or decryption fails, fall back to
+	// SecretKey (env var).
+	//
+	// env: ONGRID_EDGE_SECRETS_FILE; default empty (the platform default
+	// from defaultSecretsFile() in paths_{windows,linux}.go applies).
+	SecretsFile string
 }
 
 // Load reads env vars and returns a Config with defaults applied.
@@ -500,6 +531,10 @@ func Load() (*Config, error) {
 	c.Edge.CollectorMode = getEnv("ONGRID_EDGE_COLLECTOR_MODE", "off")
 	c.Edge.ScrapeConfigFile = getEnv("ONGRID_EDGE_SCRAPE_CONFIG_FILE", "/etc/ongrid-edge/scrape.yaml")
 	c.Edge.CollectorInterval = getEnvDuration("ONGRID_EDGE_COLLECTOR_INTERVAL", 10*time.Second)
+	c.Edge.TLSCAFile = getEnv("ONGRID_EDGE_TLS_CA_FILE", "")
+	c.Edge.TLSServerName = getEnv("ONGRID_EDGE_TLS_SERVER_NAME", "")
+	c.Edge.TLSRequired = getEnvBool("ONGRID_EDGE_TLS_REQUIRED", false)
+	c.Edge.SecretsFile = getEnv("ONGRID_EDGE_SECRETS_FILE", "")
 
 	c.FrontierClient.Addr = getEnv("ONGRID_FRONTIER_ADDR", "frontier:40011")
 	c.FrontierClient.ServiceName = getEnv("ONGRID_FRONTIER_SERVICE_NAME", "ongrid-manager")
