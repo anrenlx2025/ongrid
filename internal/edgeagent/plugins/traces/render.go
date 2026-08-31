@@ -141,14 +141,16 @@ exporters:
     headers:
       Authorization: "{{ .AuthHeader }}"
     {{- end }}
-    {{- if .TLSInsecureSkipVerify }}
     tls:
       # The standard install ships a self-signed manager cert
       # (deploy/install/upgrade.sh), so otelcol's default cert verification
       # fails the OTLP/HTTPS push. Skip verification by default; operators
       # who plug in a real cert can set spec.tls_insecure_skip_verify=false.
-      insecure_skip_verify: true
-    {{- end }}
+      insecure_skip_verify: {{ .TLSInsecureSkipVerify }}
+      # Collector 0.157 advertises X25519MLKEM768 by default. Some deployed
+      # TLS terminators black-hole that ClientHello instead of negotiating a
+      # supported curve, so keep the manager trace path on interoperable X25519.
+      curve_preferences: [X25519]
     compression: gzip
     timeout: 30s
     sending_queue:

@@ -203,6 +203,7 @@ func TestRenderTLSInsecureSkipVerify(t *testing.T) {
 	for _, want := range []string{
 		"tls:",
 		"insecure_skip_verify: true",
+		"curve_preferences: [X25519]",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("rendered config missing %q\n--- full body ---\n%s", want, body)
@@ -457,10 +458,15 @@ func TestRenderTLSInsecureSkipVerifyDisabled(t *testing.T) {
 		t.Fatalf("render: %v", err)
 	}
 	body := string(out)
-	// With a real cert the operator opts out; the tls block must be absent
-	// so otelcol verifies the cert chain.
-	if strings.Contains(body, "insecure_skip_verify") {
-		t.Errorf("tls block must be absent when disabled, got:\n%s", body)
+	// With a real cert the operator opts out while retaining the interoperable
+	// key exchange used by the trace exporter.
+	for _, want := range []string{
+		"insecure_skip_verify: false",
+		"curve_preferences: [X25519]",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rendered config missing %q\n--- full body ---\n%s", want, body)
+		}
 	}
 }
 
