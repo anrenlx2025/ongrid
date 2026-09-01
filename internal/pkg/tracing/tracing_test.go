@@ -27,7 +27,7 @@ func TestInstrumentHTTPClient_CreatesChildSpanAndPropagatesContext(t *testing.T)
 		_ = provider.Shutdown(context.Background())
 	})
 
-	traceparent := make(chan string, 1)
+	traceparent := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		traceparent <- r.Header.Get("traceparent")
 		w.WriteHeader(http.StatusNoContent)
@@ -54,11 +54,27 @@ func TestInstrumentHTTPClient_CreatesChildSpanAndPropagatesContext(t *testing.T)
 		t.Fatal("traceparent header was not propagated")
 	}
 
+	suppressedReq, err := http.NewRequestWithContext(WithoutHTTPClientTracing(ctx), http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext suppressed: %v", err)
+	}
+	suppressedResp, err := client.Do(suppressedReq)
+	if err != nil {
+		t.Fatalf("Do suppressed: %v", err)
+	}
+	if err := suppressedResp.Body.Close(); err != nil {
+		t.Fatalf("close suppressed response body: %v", err)
+	}
+	if got := <-traceparent; got != "" {
+		t.Fatalf("suppressed traceparent = %q, want empty", got)
+	}
+
 	var clientSpan sdktrace.ReadOnlySpan
+	clientSpans := 0
 	for _, span := range recorder.Ended() {
 		if span.Name() == "HTTP GET tempo" {
 			clientSpan = span
-			break
+			clientSpans++
 		}
 	}
 	if clientSpan == nil {
@@ -69,6 +85,9 @@ func TestInstrumentHTTPClient_CreatesChildSpanAndPropagatesContext(t *testing.T)
 	}
 	if got := spanAttribute(clientSpan, "peer.service"); got != "tempo" {
 		t.Fatalf("peer.service = %q, want tempo", got)
+	}
+	if clientSpans != 1 {
+		t.Fatalf("client spans = %d, want 1", clientSpans)
 	}
 }
 

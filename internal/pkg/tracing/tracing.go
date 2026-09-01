@@ -60,6 +60,14 @@ type Config struct {
 // Shutdown gracefully drains the span buffer to the collector.
 type Shutdown func(context.Context) error
 
+type suppressHTTPClientTracingKey struct{}
+
+// WithoutHTTPClientTracing prevents InstrumentHTTPClient from creating a
+// client span for requests derived from ctx.
+func WithoutHTTPClientTracing(ctx context.Context) context.Context {
+	return context.WithValue(ctx, suppressHTTPClientTracingKey{}, true)
+}
+
 // EndSpan records an operation error before ending span. Keeping this in one
 // place prevents business spans from silently disagreeing on error status.
 func EndSpan(span trace.Span, err error) {
@@ -84,6 +92,10 @@ func InstrumentHTTPClient(client *http.Client, peerService string) *http.Client 
 	}
 	peerService = strings.TrimSpace(peerService)
 	opts := []otelhttp.Option{
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			suppressed, _ := r.Context().Value(suppressHTTPClientTracingKey{}).(bool)
+			return !suppressed
+		}),
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 			if peerService == "" {
 				return "HTTP " + r.Method

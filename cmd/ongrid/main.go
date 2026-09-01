@@ -2527,9 +2527,7 @@ func main() {
 	// provider (otel global stays as the default no-op).
 	otelhttpmw := func(next http.Handler) http.Handler {
 		return otelhttp.NewHandler(next, "ongrid-manager",
-			otelhttp.WithFilter(func(r *http.Request) bool {
-				return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
-			}),
+			otelhttp.WithFilter(shouldTraceHTTPRequest),
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 				if route := chi.RouteContext(r.Context()).RoutePattern(); route != "" {
 					return r.Method + " " + route
@@ -2941,6 +2939,15 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("ongrid shutdown complete")
+}
+
+func shouldTraceHTTPRequest(r *http.Request) bool {
+	path := r.URL.Path
+	return path != "/healthz" &&
+		path != "/readyz" &&
+		path != "/api/v1/prometheus/auth" &&
+		path != "/api/v1/traces" &&
+		!strings.HasPrefix(path, "/api/v1/traces/")
 }
 
 // llmResolverFunc is a tiny adapter from biz/setting.Service to the
