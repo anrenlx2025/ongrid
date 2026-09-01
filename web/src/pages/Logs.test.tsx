@@ -256,6 +256,27 @@ describe('LogsPage', () => {
     await waitFor(() => expect(closedCursor).toBe('origin-es-cursor'));
   });
 
+  it('renders log results without waiting for the histogram', async () => {
+    let releaseHistogram!: () => void;
+    const histogramGate = new Promise<void>((resolve) => { releaseHistogram = resolve; });
+    server.use(http.post('/api/v1/logs/histogram', async () => {
+      await histogramGate;
+      return HttpResponse.json({
+        code: 0,
+        message: '',
+        data: [{ start: '2026-08-19T01:00:00.000Z', count: 5 }],
+      });
+    }));
+
+    render(<MemoryRouter><LogsPage /></MemoryRouter>);
+
+    await screen.findByText('payment request completed');
+    expect(screen.getByText('日志总数', { exact: false })).toHaveTextContent('0');
+
+    await act(async () => { releaseHistogram(); });
+    await waitFor(() => expect(screen.getByText('日志总数', { exact: false })).toHaveTextContent('5'));
+  });
+
   it('resolves a cluster name from topology when logs contain only cluster_id', async () => {
     const recordsWithoutClusterName = records.map((record) => ({
       ...record,
