@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	oteltracing "github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 const (
@@ -73,6 +75,7 @@ func NewElasticsearchClient(cfg ElasticsearchConfig, hc *http.Client, log *slog.
 	if hc == nil {
 		hc = &http.Client{Timeout: defaultTimeout}
 	}
+	hc = oteltracing.InstrumentHTTPClient(hc, elasticsearchBackendName)
 	if log == nil {
 		log = slog.Default()
 	}
@@ -803,7 +806,7 @@ func (c *ElasticsearchClient) doJSONWithLimit(ctx context.Context, method, path 
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			c.log.Warn("close Elasticsearch response", slog.Any("err", closeErr))
+			c.log.WarnContext(ctx, "close Elasticsearch response", slog.Any("err", closeErr))
 		}
 	}()
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))

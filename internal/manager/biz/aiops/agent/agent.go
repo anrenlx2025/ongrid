@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
+
 	biz "github.com/ongridio/ongrid/internal/manager/biz/aiops"
 	"github.com/ongridio/ongrid/internal/manager/biz/aiops/toolreplay"
 	"github.com/ongridio/ongrid/internal/manager/biz/aiops/tools"
@@ -31,11 +33,14 @@ import (
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/llm"
 	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
+	"github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 // ErrMaxIterationsReached is returned from Run when cfg.MaxIterations elapse
 // without the assistant producing a final (no-tool-calls) reply.
 var ErrMaxIterationsReached = errors.New("agent: max iterations reached")
+
+var agentTracer = otel.Tracer("github.com/ongridio/ongrid/internal/manager/biz/aiops/agent")
 
 // Config tunes the agent loop.
 type Config struct {
@@ -328,7 +333,9 @@ func (a *Agent) RunStream(ctx context.Context, sessionID string, userID uint64, 
 	return a.runInternal(ctx, sessionID, userID, userContent, emit, RunOptions{})
 }
 
-func (a *Agent) runInternal(ctx context.Context, sessionID string, userID uint64, userContent string, emit Emit, opts RunOptions) (*Reply, error) {
+func (a *Agent) runInternal(ctx context.Context, sessionID string, userID uint64, userContent string, emit Emit, opts RunOptions) (reply *Reply, retErr error) {
+	ctx, span := agentTracer.Start(ctx, "aiops.Agent.Run")
+	defer func() { tracing.EndSpan(span, retErr) }()
 	if a.sessions == nil || a.llm == nil || a.tools == nil {
 		return nil, errs.ErrNotWiredYet
 	}

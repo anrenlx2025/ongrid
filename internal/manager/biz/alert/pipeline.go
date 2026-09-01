@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+
 	edgebiz "github.com/ongridio/ongrid/internal/manager/biz/edge"
 	model "github.com/ongridio/ongrid/internal/manager/model/alert"
 	edgemodel "github.com/ongridio/ongrid/internal/manager/model/edge"
@@ -193,6 +195,8 @@ func (e *PipelineEvaluator) EvaluateOnce(ctx context.Context) {
 }
 
 func (e *PipelineEvaluator) evaluate(ctx context.Context) {
+	ctx, span := otel.Tracer("github.com/ongridio/ongrid/internal/manager/biz/alert").Start(ctx, "alert.Evaluate")
+	defer span.End()
 	now := e.now()
 	if e.edges != nil {
 		// Refresh the device_last_seen_seconds_ago gauge first so any

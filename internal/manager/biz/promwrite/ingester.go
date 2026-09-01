@@ -24,8 +24,12 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/ongridio/ongrid/internal/pkg/prom"
 	pkgpromwrite "github.com/ongridio/ongrid/internal/pkg/promwrite"
+	"github.com/ongridio/ongrid/internal/pkg/tracing"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 )
 
@@ -189,14 +193,21 @@ func buildPromSamples(samples []tunnel.PromSample, fixedLabels map[string]string
 	return out
 }
 
-func (i *Ingester) write(ctx context.Context, entityLabel string, entityID uint64, source string, out []pkgpromwrite.Sample) error {
+func (i *Ingester) write(ctx context.Context, entityLabel string, entityID uint64, source string, out []pkgpromwrite.Sample) (retErr error) {
+	ctx, span := otel.Tracer("github.com/ongridio/ongrid/internal/manager/biz/promwrite").Start(ctx, "metrics.RemoteWrite")
+	span.SetAttributes(
+		attribute.Int("metrics.sample_count", len(out)),
+		attribute.String("metrics.entity_type", entityLabel),
+	)
+	defer func() { tracing.EndSpan(span, retErr) }()
+
 	if err := i.w.Write(ctx, out); err != nil {
 		i.recordFailure()
 		// Self-observability: prom_write_total{result=fail} agrees with the
 		// health snapshot (Failures++ / LastFailureAt) the health_ingest
 		// evaluator reads, so both surfaces report the same failure events.
 		prom.IncPromWrite(err)
-		i.log.Warn("promwrite: write failed",
+		i.log.WarnContext(ctx, "promwrite: write failed",
 			slog.String("entity_label", entityLabel),
 			slog.Uint64("entity_id", entityID),
 			slog.String("source", source),

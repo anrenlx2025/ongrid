@@ -147,6 +147,7 @@ services:
       # OTel tracing — Tempo OTLP HTTP receiver (HLD-004 Phase-B trace
       # evaluators need real spans for traces_spanmetrics_* to populate).
       ONGRID_OTEL_ENDPOINT: ${ONGRID_OTEL_ENDPOINT:-tempo:4318}
+      ONGRID_OTEL_SAMPLING_RATIO: ${ONGRID_OTEL_SAMPLING_RATIO:-1}
       # ADR-009: cloud-side Prometheus. Manager remote_writes open-set
       # samples here and the aiops query_promql tool reads from it.
       ONGRID_PROM_ENABLED: ${ONGRID_PROM_ENABLED:-true}

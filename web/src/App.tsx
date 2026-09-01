@@ -117,6 +117,7 @@ export default function App() {
         <Route path="/monitor" element={<MonitorPage />} />
         <Route path="/logs" element={<LogsPage />} />
         <Route path="/traces" element={<TracesPage />} />
+        <Route path="/traces/:traceId" element={<TracesPage />} />
         <Route path="/kubernetes" element={<KubernetesPage />} />
         <Route path="/kubernetes/:clusterId" element={<KubernetesClusterDetailPage />} />
         <Route path="/alerts" element={<AlertsPage />} />

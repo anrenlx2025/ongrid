@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	oteltracing "github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 // QueryRangeResult is the unmarshalled `data` field from
@@ -96,6 +98,7 @@ func newClient(r BaseURLResolver, hc *http.Client, log *slog.Logger) *Client {
 	if hc == nil {
 		hc = &http.Client{Timeout: defaultTimeout}
 	}
+	hc = oteltracing.InstrumentHTTPClient(hc, "loki")
 	return &Client{base: r, httpClient: hc, log: log}
 }
 
@@ -262,7 +265,7 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) ([]byte, err
 		return nil, fmt.Errorf("logquery: read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		c.log.Warn("logquery: non-200",
+		c.log.WarnContext(ctx, "logquery: non-200",
 			slog.Int("status", resp.StatusCode),
 			slog.String("path", path),
 		)

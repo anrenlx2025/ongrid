@@ -21,15 +21,21 @@ package tracing
 import (
 	"context"
 	"fmt"
+	"math"
+	"net/http"
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Config bundles what Init needs.
@@ -54,6 +60,58 @@ type Config struct {
 // Shutdown gracefully drains the span buffer to the collector.
 type Shutdown func(context.Context) error
 
+type suppressHTTPClientTracingKey struct{}
+
+// WithoutHTTPClientTracing prevents InstrumentHTTPClient from creating a
+// client span for requests derived from ctx.
+func WithoutHTTPClientTracing(ctx context.Context) context.Context {
+	return context.WithValue(ctx, suppressHTTPClientTracingKey{}, true)
+}
+
+// EndSpan records an operation error before ending span. Keeping this in one
+// place prevents business spans from silently disagreeing on error status.
+func EndSpan(span trace.Span, err error) {
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
+}
+
+// InstrumentHTTPClient returns a shallow copy of client whose transport
+// creates CLIENT spans and propagates W3C trace context to the backend.
+// The caller-owned client and transport are left untouched.
+func InstrumentHTTPClient(client *http.Client, peerService string) *http.Client {
+	if client == nil {
+		client = &http.Client{}
+	}
+	clone := *client
+	base := clone.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	peerService = strings.TrimSpace(peerService)
+	opts := []otelhttp.Option{
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			suppressed, _ := r.Context().Value(suppressHTTPClientTracingKey{}).(bool)
+			return !suppressed
+		}),
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			if peerService == "" {
+				return "HTTP " + r.Method
+			}
+			return "HTTP " + r.Method + " " + peerService
+		}),
+	}
+	if peerService != "" {
+		opts = append(opts, otelhttp.WithSpanOptions(
+			trace.WithAttributes(attribute.String("peer.service", peerService)),
+		))
+	}
+	clone.Transport = otelhttp.NewTransport(base, opts...)
+	return &clone
+}
+
 // Init builds and registers the global TracerProvider. When endpoint
 // is empty, returns a no-op shutdown so boot logic can defer
 // unconditionally.
@@ -61,7 +119,7 @@ func Init(ctx context.Context, cfg Config) (Shutdown, error) {
 	if strings.TrimSpace(cfg.Endpoint) == "" {
 		return func(context.Context) error { return nil }, nil
 	}
-	if cfg.SamplingRatio <= 0 || cfg.SamplingRatio > 1 {
+	if math.IsNaN(cfg.SamplingRatio) || cfg.SamplingRatio < 0 || cfg.SamplingRatio > 1 {
 		cfg.SamplingRatio = 1.0
 	}
 

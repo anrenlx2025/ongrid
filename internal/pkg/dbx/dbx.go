@@ -16,6 +16,8 @@
 package dbx
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +29,10 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -59,7 +65,7 @@ func openMySQL(dsn string, log *slog.Logger) (*gorm.DB, error) {
 	}
 
 	gdb, err := gorm.Open(gormmysql.Open(dsn), &gorm.Config{
-		Logger: newGORMLogger(os.Stdout),
+		Logger: instrumentGORMLogger(newGORMLogger(os.Stdout), "mysql"),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dbx: mysql open: %w", err)
@@ -102,7 +108,7 @@ func openSQLite(path string, log *slog.Logger) (*gorm.DB, error) {
 	dsn := buildSQLiteDSN(path)
 
 	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
-		Logger: newGORMLogger(os.Stdout),
+		Logger: instrumentGORMLogger(newGORMLogger(os.Stdout), "sqlite"),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dbx: sqlite open %q: %w", path, err)
@@ -121,6 +127,116 @@ func newGORMLogger(w io.Writer) logger.Interface {
 		IgnoreRecordNotFoundError: true,
 		Colorful:                  true,
 	})
+}
+
+type otelGORMLogger struct {
+	logger.Interface
+	dialect string
+	tracer  trace.Tracer
+}
+
+func instrumentGORMLogger(base logger.Interface, dialect string) logger.Interface {
+	return otelGORMLogger{
+		Interface: base,
+		dialect:   dialect,
+		tracer:    otel.Tracer("github.com/ongridio/ongrid/internal/pkg/dbx"),
+	}
+}
+
+func (l otelGORMLogger) LogMode(level logger.LogLevel) logger.Interface {
+	return otelGORMLogger{
+		Interface: l.Interface.LogMode(level),
+		dialect:   l.dialect,
+		tracer:    l.tracer,
+	}
+}
+
+func (l otelGORMLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		l.Interface.Trace(ctx, begin, fc, err)
+		return
+	}
+
+	_, span := l.tracer.Start(ctx, "DB QUERY",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithTimestamp(begin),
+	)
+	if !span.IsRecording() {
+		span.End()
+		l.Interface.Trace(ctx, begin, fc, err)
+		return
+	}
+
+	query, rows := fc()
+	operation := databaseOperation(query)
+	collection := databaseCollection(query, operation)
+	spanName := "DB " + operation
+	if collection != "" {
+		spanName += " " + collection
+	}
+	span.SetName(spanName)
+	span.SetAttributes(
+		attribute.String("db.system.name", l.dialect),
+		attribute.String("db.operation.name", operation),
+		attribute.String("peer.service", l.dialect),
+	)
+	if collection != "" {
+		span.SetAttributes(attribute.String("db.collection.name", collection))
+	}
+	if rows >= 0 {
+		span.SetAttributes(attribute.Int64("db.response.returned_rows", rows))
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End(trace.WithTimestamp(time.Now()))
+
+	l.Interface.Trace(ctx, begin, func() (string, int64) { return query, rows }, err)
+}
+
+func databaseOperation(query string) string {
+	fields := strings.Fields(query)
+	if len(fields) == 0 {
+		return "QUERY"
+	}
+	return strings.ToUpper(strings.Trim(fields[0], "`\""))
+}
+
+func databaseCollection(query, operation string) string {
+	fields := strings.Fields(query)
+	if len(fields) < 2 {
+		return ""
+	}
+	index := -1
+	switch operation {
+	case "SELECT", "DELETE":
+		for i := 1; i+1 < len(fields); i++ {
+			if strings.EqualFold(fields[i], "FROM") {
+				index = i + 1
+				break
+			}
+		}
+	case "INSERT", "REPLACE":
+		if strings.EqualFold(fields[1], "INTO") && len(fields) > 2 {
+			index = 2
+		}
+	case "UPDATE":
+		index = 1
+	}
+	if index < 0 || index >= len(fields) {
+		return ""
+	}
+	name := strings.Trim(fields[index], "`\"[](),;")
+	if dot := strings.LastIndexByte(name, '.'); dot >= 0 {
+		name = strings.Trim(name[dot+1:], "`\"[]")
+	}
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			return ""
+		}
+	}
+	return name
 }
 
 // buildSQLiteDSN appends pragma query params expected by modernc/glebarez sqlite.

@@ -24,6 +24,7 @@ import (
 
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tracequery"
+	"github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 // Querier is the narrow surface this handler needs. *tracequery.Client
@@ -136,7 +137,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(tracing.WithoutHTTPClientTracing(r.Context()), 30*time.Second)
 	defer cancel()
 	out, err := h.q.SearchTraces(ctx, opts)
 	if err != nil {
@@ -161,7 +162,7 @@ func (h *Handler) getTrace(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "trace_id required")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(tracing.WithoutHTTPClientTracing(r.Context()), 30*time.Second)
 	defer cancel()
 	out, err := h.q.GetTrace(ctx, id)
 	if err != nil {
@@ -185,7 +186,7 @@ func (h *Handler) tagValues(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "tag required")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(tracing.WithoutHTTPClientTracing(r.Context()), 15*time.Second)
 	defer cancel()
 	out, err := h.q.TagValues(ctx, tag)
 	if err != nil {

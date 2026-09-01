@@ -10,8 +10,12 @@ import (
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	"github.com/eino-contrib/jsonschema"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ongridio/ongrid/internal/manager/biz/aiops/tools/basetool"
+	"github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 // toolMemo is a per-run cache of identical (read-tool, args) calls. The
@@ -440,8 +444,14 @@ func (a *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON stri
 			}
 		}
 	}
+	ctx, span := otel.Tracer("github.com/ongridio/ongrid/internal/manager/biz/aiops/graph").Start(ctx, "aiops.Tool."+a.cacheName,
+		trace.WithAttributes(attribute.String("aiops.tool.name", a.cacheName)),
+	)
+	var spanErr error
+	defer func() { tracing.EndSpan(span, spanErr) }()
 	out, err = a.inner.InvokableRun(ctx, argumentsInJSON, resolved.opts...)
 	if err != nil {
+		spanErr = err
 		// Count most failures toward the cap so a failing tool cannot be
 		// hammered. draft_config_change is the exception: validation failures
 		// are common while the model corrects structured config args, and only

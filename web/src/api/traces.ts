@@ -36,14 +36,25 @@ export type TraceSearchResponse = {
 // {"batches":[{"resource":{...},"scopeSpans":[{"spans":[...]}]}]} —
 // older versions used `instrumentationLibrarySpans` instead of
 // `scopeSpans`. The page walks both shapes.
+export type OtlpAnyValue = {
+  stringValue?: string;
+  intValue?: string | number;
+  doubleValue?: number;
+  boolValue?: boolean;
+  bytesValue?: string;
+  arrayValue?: { values?: OtlpAnyValue[] };
+  kvlistValue?: { values?: OtlpAttribute[] };
+};
+
 export type OtlpAttribute = {
   key: string;
-  value?: {
-    stringValue?: string;
-    intValue?: string | number;
-    doubleValue?: number;
-    boolValue?: boolean;
-  };
+  value?: OtlpAnyValue;
+};
+
+export type OtlpSpanEvent = {
+  timeUnixNano?: string;
+  name: string;
+  attributes?: OtlpAttribute[];
 };
 
 export type OtlpSpan = {
@@ -56,6 +67,7 @@ export type OtlpSpan = {
   endTimeUnixNano?: string;
   status?: { code?: number | string; message?: string };
   attributes?: OtlpAttribute[];
+  events?: OtlpSpanEvent[];
 };
 
 export type OtlpScopeSpans = {

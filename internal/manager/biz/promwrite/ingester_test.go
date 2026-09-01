@@ -8,6 +8,10 @@ import (
 	"sync"
 	"testing"
 
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	pkgpromwrite "github.com/ongridio/ongrid/internal/pkg/promwrite"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 )
@@ -231,6 +235,35 @@ func TestIngester_Push_WriterErrPropagates(t *testing.T) {
 	if err := ing.Push(context.Background(), 1, "src", in); err == nil {
 		t.Errorf("expected writer error to propagate")
 	}
+}
+
+func TestIngester_Push_CreatesRemoteWriteParentSpan(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousProvider)
+		_ = provider.Shutdown(context.Background())
+	})
+
+	ing := NewIngester(&fakeWriter{}, slog.Default())
+	ctx, parent := provider.Tracer("test").Start(context.Background(), "ingest")
+	if err := ing.Push(ctx, 1, "embedded", []tunnel.PromSample{{Name: "up", Value: 1}}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	parent.End()
+
+	for _, span := range recorder.Ended() {
+		if span.Name() != "metrics.RemoteWrite" {
+			continue
+		}
+		if span.Parent().SpanID() != parent.SpanContext().SpanID() {
+			t.Fatalf("remote write parent = %s, want %s", span.Parent().SpanID(), parent.SpanContext().SpanID())
+		}
+		return
+	}
+	t.Fatal("metrics.RemoteWrite span missing")
 }
 
 func TestIngester_Push_NilWriterDegrades(t *testing.T) {

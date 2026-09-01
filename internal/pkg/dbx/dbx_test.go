@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/ongridio/ongrid/internal/pkg/config"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"gorm.io/gorm"
 )
 
@@ -50,6 +54,71 @@ func TestGORMLoggerIgnoresRecordNotFound(t *testing.T) {
 	trace(errors.New("query failed"))
 	if !contains(out.String(), "query failed") {
 		t.Fatalf("real database error was not logged: %q", out.String())
+	}
+}
+
+func TestInstrumentGORMLogger_CreatesDatabaseChildSpanWithoutQueryValues(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousProvider)
+		_ = provider.Shutdown(context.Background())
+	})
+
+	gormLog := instrumentGORMLogger(newGORMLogger(io.Discard), "mysql")
+	ctx, parent := provider.Tracer("test").Start(context.Background(), "request")
+	gormLog.Trace(ctx, time.Now().Add(-time.Millisecond), func() (string, int64) {
+		return "SELECT * FROM users WHERE password = 'super-secret'", 1
+	}, nil)
+	parent.End()
+
+	var databaseSpan sdktrace.ReadOnlySpan
+	for _, span := range recorder.Ended() {
+		if span.Name() == "DB SELECT users" {
+			databaseSpan = span
+			break
+		}
+	}
+	if databaseSpan == nil {
+		t.Fatalf("database span missing; ended spans = %d", len(recorder.Ended()))
+	}
+	if databaseSpan.Parent().SpanID() != parent.SpanContext().SpanID() {
+		t.Fatalf("database parent span = %s, want %s", databaseSpan.Parent().SpanID(), parent.SpanContext().SpanID())
+	}
+
+	attrs := map[string]string{}
+	for _, attr := range databaseSpan.Attributes() {
+		attrs[string(attr.Key)] = attr.Value.Emit()
+	}
+	if attrs["db.system.name"] != "mysql" || attrs["db.operation.name"] != "SELECT" || attrs["db.collection.name"] != "users" {
+		t.Fatalf("database attributes = %#v", attrs)
+	}
+	for _, value := range attrs {
+		if contains(value, "super-secret") {
+			t.Fatalf("query value leaked into span attributes: %#v", attrs)
+		}
+	}
+}
+
+func TestDatabaseCollection_ExtractsSafeTableNames(t *testing.T) {
+	tests := []struct {
+		query     string
+		operation string
+		want      string
+	}{
+		{"SELECT * FROM `users` WHERE id = 1", "SELECT", "users"},
+		{"INSERT INTO audit_events (id) VALUES (1)", "INSERT", "audit_events"},
+		{"UPDATE `ongrid`.`devices` SET name = 'x'", "UPDATE", "devices"},
+		{"DELETE FROM sessions WHERE id = 1", "DELETE", "sessions"},
+		{"SELECT 1", "SELECT", ""},
+		{"SELECT * FROM users;DROP", "SELECT", ""},
+	}
+	for _, test := range tests {
+		if got := databaseCollection(test.query, test.operation); got != test.want {
+			t.Errorf("databaseCollection(%q, %q) = %q, want %q", test.query, test.operation, got, test.want)
+		}
 	}
 }
 
