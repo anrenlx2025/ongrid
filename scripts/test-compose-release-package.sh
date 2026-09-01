@@ -136,6 +136,10 @@ for arch in amd64 arm64; do
     "$extract_dir/$package_root/docker-compose.yml"
   grep -Fq 'retention_period: "${LOKI_RETENTION_PERIOD:-720h}"' \
     "$extract_dir/$package_root/loki-config.yaml"
+  grep -Fqx '  ingestion_rate_mb: 16' \
+    "$extract_dir/$package_root/loki-config.yaml"
+  grep -Fqx '  ingestion_burst_size_mb: 32' \
+    "$extract_dir/$package_root/loki-config.yaml"
   grep -Fq 'block_retention: "${TEMPO_BLOCK_RETENTION:-168h}"' \
     "$extract_dir/$package_root/tempo-config.yaml"
   grep -Fxq 'ONGRID_EDGE_DEPS_TAG=edge-deps-test' \

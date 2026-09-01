@@ -342,6 +342,7 @@ export default function LogsPage() {
   const nextCursorRef = useRef('');
   const pageRequestRef = useRef<LogSearchRequest | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
+  const histogramAbortRef = useRef<AbortController | null>(null);
   const pageAbortRef = useRef<AbortController | null>(null);
   const facetAbortRef = useRef<AbortController | null>(null);
   const resultScrollRef = useRef<HTMLElement>(null);
@@ -464,33 +465,37 @@ export default function LogsPage() {
     const seq = ++requestSeq.current;
     ++paginationGeneration.current;
     searchAbortRef.current?.abort();
+    histogramAbortRef.current?.abort();
     pageAbortRef.current?.abort();
     pageAbortRef.current = null;
     pageRequestRef.current = null;
     abandonPagination();
     setLoadingMore(false);
-    const controller = new AbortController();
-    searchAbortRef.current = controller;
+    const searchController = new AbortController();
+    const histogramController = new AbortController();
+    searchAbortRef.current = searchController;
+    histogramAbortRef.current = histogramController;
     if (!quiet) setLoading(true);
     setError(null);
+    setHistogram([]);
+    void getLogHistogram(
+      { ...input, limit: 1, cursor: undefined },
+      histogramInterval(timeWindow.duration),
+      histogramController.signal,
+    ).then((buckets) => {
+      if (seq === requestSeq.current) setHistogram(buckets ?? []);
+    }).catch((err) => {
+      if ((err as Error).name !== 'AbortError') {
+        console.warn('log histogram request failed', err);
+      }
+    }).finally(() => {
+      if (histogramAbortRef.current === histogramController) histogramAbortRef.current = null;
+    });
     try {
-      const [searchOutcome, histogramOutcome] = await Promise.allSettled([
-        searchLogs(input, controller.signal),
-        getLogHistogram({ ...input, limit: 1, cursor: undefined }, histogramInterval(timeWindow.duration), controller.signal),
-      ]);
-      if (searchOutcome.status === 'rejected') throw searchOutcome.reason;
-      const result = searchOutcome.value;
+      const result = await searchLogs(input, searchController.signal);
       if (seq !== requestSeq.current) {
         closeCursorQuietly(result.next_cursor ?? '');
         return;
-      }
-      if (histogramOutcome.status === 'rejected' && (histogramOutcome.reason as Error).name === 'AbortError') {
-        closeCursorQuietly(result.next_cursor ?? '');
-        return;
-      }
-      const buckets = histogramOutcome.status === 'fulfilled' ? histogramOutcome.value : [];
-      if (histogramOutcome.status === 'rejected') {
-        console.warn('log histogram request failed', histogramOutcome.reason);
       }
       pageRequestRef.current = input;
       setHasCompletedSearch(true);
@@ -498,10 +503,10 @@ export default function LogsPage() {
       replaceNextCursor(result.next_cursor ?? '');
       setBackends(result.backends ?? []);
       setTookMS(result.took_ms ?? 0);
-      setHistogram(buckets ?? []);
       if (!quiet) resultScrollRef.current?.scrollTo?.({ top: 0 });
     } catch (err) {
       if (seq !== requestSeq.current || (err as Error).name === 'AbortError') return;
+      histogramController.abort();
       pageRequestRef.current = null;
       setHasCompletedSearch(true);
       setError(errorMessage(err));
@@ -511,7 +516,7 @@ export default function LogsPage() {
         replaceNextCursor('');
       }
     } finally {
-      if (searchAbortRef.current === controller) searchAbortRef.current = null;
+      if (searchAbortRef.current === searchController) searchAbortRef.current = null;
       if (seq === requestSeq.current) setLoading(false);
     }
   }, [abandonPagination, buildRequest, closeCursorQuietly, replaceNextCursor, resolveWindow, tr]);
@@ -574,6 +579,7 @@ export default function LogsPage() {
 
   useEffect(() => () => {
     searchAbortRef.current?.abort();
+    histogramAbortRef.current?.abort();
     pageAbortRef.current?.abort();
     facetAbortRef.current?.abort();
     abandonPagination();
