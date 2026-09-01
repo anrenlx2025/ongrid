@@ -362,7 +362,7 @@ function AttributeList({ title, attributes }: { title: string; attributes: OtlpA
   return (
     <section className="min-w-0">
       <h4 className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500">{title}</h4>
-      <dl className="max-h-52 divide-y divide-zinc-800/60 overflow-auto rounded-lg border border-zinc-800/60 text-[11px]">
+      <dl className="divide-y divide-zinc-800/60 overflow-hidden rounded-lg border border-zinc-800/60 text-[11px]">
         {attributes.length === 0 ? (
           <div className="px-3 py-5 text-center text-zinc-500">-</div>
         ) : attributes.map((attribute) => (
