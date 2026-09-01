@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	oteltracing "github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 // SearchResult is the unmarshalled `data` field from a Tempo /api/search
@@ -83,6 +85,7 @@ func newClient(r BaseURLResolver, hc *http.Client, log *slog.Logger) *Client {
 	if hc == nil {
 		hc = &http.Client{Timeout: defaultTimeout}
 	}
+	hc = oteltracing.InstrumentHTTPClient(hc, "tempo")
 	return &Client{base: r, httpClient: hc, log: log}
 }
 
@@ -233,7 +236,7 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) ([]byte, err
 		return nil, fmt.Errorf("tracequery: %s: not found", path)
 	}
 	if resp.StatusCode != http.StatusOK {
-		c.log.Warn("tracequery: non-200",
+		c.log.WarnContext(ctx, "tracequery: non-200",
 			slog.Int("status", resp.StatusCode),
 			slog.String("path", path),
 		)

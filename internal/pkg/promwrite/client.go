@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/golang/snappy"
+	oteltracing "github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 // Label is one (name, value) pair attached to a Sample. The Prometheus
@@ -113,6 +114,7 @@ func newClient(r EndpointResolver, hc *http.Client, log *slog.Logger) *Client {
 	if hc == nil {
 		hc = &http.Client{Timeout: defaultTimeout}
 	}
+	hc = oteltracing.InstrumentHTTPClient(hc, "prometheus")
 	return &Client{endpoint: r, httpClient: hc, log: log}
 }
 
@@ -167,11 +169,10 @@ func (c *Client) Write(ctx context.Context, samples []Sample) error {
 	// Pull a bounded portion of the body into the error so callers can log
 	// it without unbounded memory exposure.
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	c.log.Warn("promwrite: non-2xx",
+	c.log.WarnContext(ctx, "promwrite: non-2xx",
 		slog.Int("status", resp.StatusCode),
 		slog.Int("samples", len(samples)),
 		slog.String("body", string(body)),
 	)
 	return fmt.Errorf("promwrite: %s returned %d: %s", url, resp.StatusCode, string(body))
 }
-

@@ -238,11 +238,19 @@ func main() {
 	if otelEndpoint == "" {
 		otelEndpoint = "tempo:4318"
 	}
+	otelSamplingRatio := 1.0
+	if raw := strings.TrimSpace(os.Getenv("ONGRID_OTEL_SAMPLING_RATIO")); raw != "" {
+		if ratio, parseErr := strconv.ParseFloat(raw, 64); parseErr != nil || ratio <= 0 || ratio > 1 {
+			log.Warn("tracing: invalid sampling ratio, using 1.0", slog.String("value", raw))
+		} else {
+			otelSamplingRatio = ratio
+		}
+	}
 	otelShutdown, err := tracing.Init(rootCtx, tracing.Config{
 		ServiceName:   "ongrid-manager",
 		Endpoint:      otelEndpoint,
 		Insecure:      true,
-		SamplingRatio: 1.0,
+		SamplingRatio: otelSamplingRatio,
 	})
 	if err != nil {
 		log.Warn("tracing: init failed (continuing without OTel)", slog.Any("err", err))
@@ -2518,6 +2526,9 @@ func main() {
 	// provider (otel global stays as the default no-op).
 	otelhttpmw := func(next http.Handler) http.Handler {
 		return otelhttp.NewHandler(next, "ongrid-manager",
+			otelhttp.WithFilter(func(r *http.Request) bool {
+				return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
+			}),
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 				if route := chi.RouteContext(r.Context()).RoutePattern(); route != "" {
 					return r.Method + " " + route
@@ -2532,10 +2543,8 @@ func main() {
 	// OTel HTTP middleware — wraps every request in a span named
 	// "{METHOD} {ROUTE_PATTERN}" so Tempo's spanmetrics generator can
 	// derive traces_spanmetrics_latency_bucket per route. Routes added
-	// after this middleware get traced; the bare /healthz / /readyz
-	// endpoints below are also wrapped (cheap; they get filtered later
-	// by service_name=ongrid-manager,span_name=GET /healthz if you
-	// want to exclude them).
+	// after this middleware get traced. Health probes are excluded by the
+	// filter above so they cannot crowd useful traces out of Tempo search.
 	mux.Use(otelhttpmw)
 	// ADR-026 self-obs HTTP metrics — runs after OTel so chi has populated
 	// RouteContext before we read RoutePattern for the histogram label.

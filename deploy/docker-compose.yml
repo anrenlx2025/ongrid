@@ -88,6 +88,9 @@ services:
       ONGRID_PROM_URL: ${ONGRID_PROM_URL:-http://prometheus:9090/prometheus}
       ONGRID_PROM_REMOTE_WRITE_URL: ${ONGRID_PROM_REMOTE_WRITE_URL:-}
       ONGRID_PROM_QUERY_URL: ${ONGRID_PROM_QUERY_URL:-http://prometheus:9090/prometheus}
+      # Root-span head sampling. Keep local development at 100%; production
+      # can lower this without rebuilding the manager image.
+      ONGRID_OTEL_SAMPLING_RATIO: ${ONGRID_OTEL_SAMPLING_RATIO:-1}
       # Knowledge base / RAG: local BGE embedding + qdrant. This mirrors
       # the install package default so the dev stack has KB search without
       # an external embedding API key.

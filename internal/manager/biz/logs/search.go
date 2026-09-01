@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+
 	model "github.com/ongridio/ongrid/internal/manager/model/logs"
 	apperrs "github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/logquery"
+	"github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 const maxHistogramBuckets = 500
@@ -24,7 +28,9 @@ type searchCursorEnvelope struct {
 	Cursor            string `json:"cursor"`
 }
 
-func (s *Service) Search(ctx context.Context, req logquery.SearchRequest) (*logquery.SearchResult, error) {
+func (s *Service) Search(ctx context.Context, req logquery.SearchRequest) (result *logquery.SearchResult, retErr error) {
+	ctx, span := otel.Tracer("github.com/ongridio/ongrid/internal/manager/biz/logs").Start(ctx, "logs.Search")
+	defer func() { tracing.EndSpan(span, retErr) }()
 	if err := req.NormalizeAndValidate(); err != nil {
 		return nil, err
 	}
@@ -33,7 +39,9 @@ func (s *Service) Search(ctx context.Context, req logquery.SearchRequest) (*logq
 		return nil, err
 	}
 	searcher := s.loki
+	backendName := "loki"
 	if backend != nil {
+		backendName = "elasticsearch"
 		searcher, err = s.elasticsearchClient(ctx, backend)
 		if err != nil {
 			return nil, err
@@ -52,10 +60,11 @@ func (s *Service) Search(ctx context.Context, req logquery.SearchRequest) (*logq
 	} else if searcher == nil {
 		return nil, errors.New("current Loki backend is unavailable")
 	}
+	span.SetAttributes(attribute.String("logs.backend", backendName))
 	// Product search windows own (start, end]. Backend search APIs use an
 	// inclusive lower bound, so exclude the start boundary explicitly.
 	req.Start = req.Start.Add(time.Nanosecond)
-	result, err := searcher.Search(ctx, req)
+	result, err = searcher.Search(ctx, req)
 	if err != nil || backend == nil || result.NextCursor == "" {
 		return result, err
 	}
@@ -170,15 +179,17 @@ func (s *Service) FieldValues(ctx context.Context, req logquery.FieldValuesReque
 	return searcher.FieldValues(ctx, req)
 }
 
-func (s *Service) Histogram(ctx context.Context, req logquery.SearchRequest, interval time.Duration) ([]logquery.HistogramBucket, error) {
+func (s *Service) Histogram(ctx context.Context, req logquery.SearchRequest, interval time.Duration) (result []logquery.HistogramBucket, retErr error) {
+	ctx, span := otel.Tracer("github.com/ongridio/ongrid/internal/manager/biz/logs").Start(ctx, "logs.Histogram")
+	defer func() { tracing.EndSpan(span, retErr) }()
 	if err := req.NormalizeAndValidate(); err != nil {
 		return nil, err
 	}
 	if interval <= 0 || interval > logquery.MaxSearchWindow {
 		return nil, errors.New("logquery: histogram interval is invalid")
 	}
-	span := req.End.Sub(req.Start)
-	bucketCount := int((span-1)/interval) + 1
+	window := req.End.Sub(req.Start)
+	bucketCount := int((window-1)/interval) + 1
 	if bucketCount > maxHistogramBuckets {
 		return nil, fmt.Errorf("logquery: histogram exceeds %d buckets; increase interval", maxHistogramBuckets)
 	}

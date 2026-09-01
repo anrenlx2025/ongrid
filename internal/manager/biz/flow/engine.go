@@ -24,12 +24,19 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	model "github.com/ongridio/ongrid/internal/manager/model/flow"
+	"github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 // maxConcurrentNodes caps fan-out so a wide graph can't spawn an
 // unbounded number of agent workers at once.
 const maxConcurrentNodes = 4
+
+var flowTracer = otel.Tracer("github.com/ongridio/ongrid/internal/manager/biz/flow")
 
 // Engine executes a parsed graph against a run row.
 type Engine struct {
@@ -65,6 +72,13 @@ type runState struct {
 // a manual and an alert trigger doesn't double-fire the manual branch on
 // an alert.
 func (e *Engine) Execute(ctx context.Context, run *model.FlowRun, g *Graph, entryType string) (status string, runErr error) {
+	ctx, span := flowTracer.Start(ctx, "flow.Engine.Execute",
+		trace.WithAttributes(attribute.String("flow.entry_type", entryTypeLabel(entryType))),
+	)
+	defer func() {
+		span.SetAttributes(attribute.String("flow.status", status))
+		tracing.EndSpan(span, runErr)
+	}()
 	defer func() {
 		if r := recover(); r != nil {
 			status = model.RunStatusFailed
@@ -161,6 +175,11 @@ func (e *Engine) activate(ctx context.Context, run *model.FlowRun, g *Graph, byI
 // runNode resolves config, executes, persists the FlowRunNode row, and
 // fires the resulting control port.
 func (e *Engine) runNode(ctx context.Context, run *model.FlowRun, g *Graph, byID map[string]GraphNode, st *runState, node GraphNode) {
+	ctx, span := flowTracer.Start(ctx, "flow.Node."+node.Type,
+		trace.WithAttributes(attribute.String("flow.node.type", node.Type)),
+	)
+	var execErr error
+	defer func() { tracing.EndSpan(span, execErr) }()
 	started := time.Now().UTC()
 	row := &model.FlowRunNode{
 		RunID:    run.ID,
@@ -202,7 +221,6 @@ func (e *Engine) runNode(ctx context.Context, run *model.FlowRun, g *Graph, byID
 	}
 
 	var res NodeResult
-	var execErr error
 	if resolveErr != nil {
 		execErr = resolveErr
 	} else {
@@ -278,7 +296,11 @@ func entryTypeLabel(t string) string {
 // editor uses to surface a node's real output before it's wired into the
 // flow). It resolves the node's config against rc, runs the executor, and
 // returns the result — no persistence, no edge traversal.
-func (e *Engine) RunSingle(ctx context.Context, node GraphNode, rc *RunContext) (NodeResult, error) {
+func (e *Engine) RunSingle(ctx context.Context, node GraphNode, rc *RunContext) (result NodeResult, retErr error) {
+	ctx, span := flowTracer.Start(ctx, "flow.Node."+node.Type,
+		trace.WithAttributes(attribute.String("flow.node.type", node.Type)),
+	)
+	defer func() { tracing.EndSpan(span, retErr) }()
 	var cfg map[string]any
 	if len(node.Config) > 0 {
 		var raw map[string]any

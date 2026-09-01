@@ -20,11 +20,16 @@ import (
 	"fmt"
 	"log/slog"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	devicebiz "github.com/ongridio/ongrid/internal/manager/biz/device"
 	edgebiz "github.com/ongridio/ongrid/internal/manager/biz/edge"
 	topologybiz "github.com/ongridio/ongrid/internal/manager/biz/topology"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/llm"
+	"github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 // Caller is the narrow seam this package needs from the frontierbound SDK
@@ -471,11 +476,15 @@ func (r *Registry) Schemas() []llm.ToolSchema {
 // Nil args are replaced by an empty object `{}` for tools that take no
 // arguments (matches OpenAI's tool_call shape when the model decides to call
 // a zero-arg tool).
-func (r *Registry) Invoke(ctx context.Context, name string, args json.RawMessage) (ExecuteResult, error) {
+func (r *Registry) Invoke(ctx context.Context, name string, args json.RawMessage) (result ExecuteResult, retErr error) {
 	t, ok := r.tools[name]
 	if !ok {
 		return ExecuteResult{}, fmt.Errorf("%w: tool %q", errs.ErrNotFound, name)
 	}
+	ctx, span := otel.Tracer("github.com/ongridio/ongrid/internal/manager/biz/aiops/tools").Start(ctx, "aiops.Tool."+name,
+		trace.WithAttributes(attribute.String("aiops.tool.name", name)),
+	)
+	defer func() { tracing.EndSpan(span, retErr) }()
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)
 	}

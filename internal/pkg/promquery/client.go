@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	oteltracing "github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 // InstantResult is the unmarshalled `data` field from a Prom query response,
@@ -78,6 +80,7 @@ func newClient(r BaseURLResolver, hc *http.Client, log *slog.Logger) *Client {
 	if hc == nil {
 		hc = &http.Client{Timeout: defaultTimeout}
 	}
+	hc = oteltracing.InstrumentHTTPClient(hc, "prometheus")
 	return &Client{base: r, httpClient: hc, log: log}
 }
 
@@ -144,7 +147,7 @@ func (c *Client) do(ctx context.Context, path string, q url.Values) (*InstantRes
 		// Prom uses 400 for query parse errors; we want to decode that JSON
 		// so the caller can see the errorType. Anything else is an outright
 		// transport / server failure.
-		c.log.Warn("promquery: non-200",
+		c.log.WarnContext(ctx, "promquery: non-200",
 			slog.Int("status", resp.StatusCode),
 			slog.String("path", path),
 		)

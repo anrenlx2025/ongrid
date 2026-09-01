@@ -21,9 +21,11 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel"
 
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tracequery"
+	"github.com/ongridio/ongrid/internal/pkg/tracing"
 )
 
 // Querier is the narrow surface this handler needs. *tracequery.Client
@@ -138,7 +140,9 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	ctx, span := otel.Tracer("github.com/ongridio/ongrid/internal/manager/server/traces").Start(ctx, "traces.Search")
 	out, err := h.q.SearchTraces(ctx, opts)
+	tracing.EndSpan(span, err)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -163,7 +167,9 @@ func (h *Handler) getTrace(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	ctx, span := otel.Tracer("github.com/ongridio/ongrid/internal/manager/server/traces").Start(ctx, "traces.Get")
 	out, err := h.q.GetTrace(ctx, id)
+	tracing.EndSpan(span, err)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -187,7 +193,9 @@ func (h *Handler) tagValues(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+	ctx, span := otel.Tracer("github.com/ongridio/ongrid/internal/manager/server/traces").Start(ctx, "traces.TagValues")
 	out, err := h.q.TagValues(ctx, tag)
+	tracing.EndSpan(span, err)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
