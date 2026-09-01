@@ -17,11 +17,14 @@ package dbx
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	gormmysql "gorm.io/driver/mysql"
@@ -56,7 +59,7 @@ func openMySQL(dsn string, log *slog.Logger) (*gorm.DB, error) {
 	}
 
 	gdb, err := gorm.Open(gormmysql.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
+		Logger: newGORMLogger(os.Stdout),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dbx: mysql open: %w", err)
@@ -99,7 +102,7 @@ func openSQLite(path string, log *slog.Logger) (*gorm.DB, error) {
 	dsn := buildSQLiteDSN(path)
 
 	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
+		Logger: newGORMLogger(os.Stdout),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dbx: sqlite open %q: %w", path, err)
@@ -109,6 +112,15 @@ func openSQLite(path string, log *slog.Logger) (*gorm.DB, error) {
 		log.Info("sqlite opened", "path", path, "journal_mode", "WAL", "foreign_keys", "on")
 	}
 	return gdb, nil
+}
+
+func newGORMLogger(w io.Writer) logger.Interface {
+	return logger.New(log.New(w, "\r\n", log.LstdFlags), logger.Config{
+		SlowThreshold:             200 * time.Millisecond,
+		LogLevel:                  logger.Warn,
+		IgnoreRecordNotFoundError: true,
+		Colorful:                  true,
+	})
 }
 
 // buildSQLiteDSN appends pragma query params expected by modernc/glebarez sqlite.

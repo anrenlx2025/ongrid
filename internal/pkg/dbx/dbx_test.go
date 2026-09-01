@@ -1,7 +1,11 @@
 package dbx
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/ongridio/ongrid/internal/pkg/config"
 	"gorm.io/gorm"
@@ -26,6 +30,26 @@ func TestOpen_SQLiteInMemory(t *testing.T) {
 	}
 	if one != 1 {
 		t.Errorf("SELECT 1 = %d, want 1", one)
+	}
+}
+
+func TestGORMLoggerIgnoresRecordNotFound(t *testing.T) {
+	var out bytes.Buffer
+	gormLog := newGORMLogger(&out)
+	trace := func(err error) {
+		gormLog.Trace(context.Background(), time.Now(), func() (string, int64) {
+			return "SELECT 1", 0
+		}, err)
+	}
+
+	trace(gorm.ErrRecordNotFound)
+	if out.Len() != 0 {
+		t.Fatalf("record not found was logged: %q", out.String())
+	}
+
+	trace(errors.New("query failed"))
+	if !contains(out.String(), "query failed") {
+		t.Fatalf("real database error was not logged: %q", out.String())
 	}
 }
 
