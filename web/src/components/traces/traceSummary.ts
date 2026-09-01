@@ -34,7 +34,7 @@ export function formatTraceSummaryDuration(ms: number): string {
 
 export type TraceScope = 'business' | 'internal' | 'all';
 
-const INTERNAL_ROOTS = '(GET|POST|PUT|PATCH|DELETE) /(internal|api/v1/traces)/.*|GET /healthz|GET /readyz|HTTP (GET|POST) prometheus|metrics\\..*|alert\\.Evaluate';
+const INTERNAL_ROOTS = '(GET|POST|PUT|PATCH|DELETE) /(internal|api/v1/traces)/.*|GET /api/v1/prometheus/auth|GET /healthz|GET /readyz|HTTP (GET|POST) prometheus|metrics\\..*|alert\\.Evaluate';
 
 export function traceSearchQuery(
   traceQL: string,

@@ -293,7 +293,7 @@ function SpanDetails({ span, traceStartMs }: { span: TraceSpanNode; traceStartMs
           <Chip>{spanKindLabel(span.kind)}</Chip>
           <Chip>{formatDuration(span.durationMs)}</Chip>
           <Chip>{tr(`起点 +${formatDuration(offsetMs)}`, `Starts +${formatDuration(offsetMs)}`)}</Chip>
-          {isErrorStatus(span.statusCode) ? <Chip tone="danger">error</Chip> : <Chip>ok</Chip>}
+          {isErrorStatus(span.statusCode) ? <Chip tone="danger">error</Chip> : <Chip>{isOkStatus(span.statusCode) ? 'ok' : 'unset'}</Chip>}
         </div>
       </div>
 
@@ -570,6 +570,10 @@ function nanosToMs(value?: string): number {
 
 function isErrorStatus(code?: number | string): boolean {
   return code === 2 || code === '2' || code === 'STATUS_CODE_ERROR';
+}
+
+function isOkStatus(code?: number | string): boolean {
+  return code === 1 || code === '1' || code === 'STATUS_CODE_OK';
 }
 
 function spanKindLabel(kind?: number | string): string {

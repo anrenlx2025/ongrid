@@ -48,7 +48,9 @@ describe('traceSearchQuery', () => {
   });
 
   it('defaults to business traces and can select internal traffic', () => {
-    expect(traceSearchQuery('', '', '')).toContain('trace:rootName !~');
+    const businessQuery = traceSearchQuery('', '', '');
+    expect(businessQuery).toContain('trace:rootName !~');
+    expect(businessQuery).toContain('/api/v1/prometheus/auth');
     expect(traceSearchQuery('', '', '', '', 'internal')).toContain('trace:rootName =~');
   });
 });

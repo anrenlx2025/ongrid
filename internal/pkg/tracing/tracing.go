@@ -21,6 +21,7 @@ package tracing
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -106,7 +107,7 @@ func Init(ctx context.Context, cfg Config) (Shutdown, error) {
 	if strings.TrimSpace(cfg.Endpoint) == "" {
 		return func(context.Context) error { return nil }, nil
 	}
-	if cfg.SamplingRatio <= 0 || cfg.SamplingRatio > 1 {
+	if math.IsNaN(cfg.SamplingRatio) || cfg.SamplingRatio < 0 || cfg.SamplingRatio > 1 {
 		cfg.SamplingRatio = 1.0
 	}
 

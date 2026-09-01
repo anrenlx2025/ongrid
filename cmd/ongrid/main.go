@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -240,7 +241,7 @@ func main() {
 	}
 	otelSamplingRatio := 1.0
 	if raw := strings.TrimSpace(os.Getenv("ONGRID_OTEL_SAMPLING_RATIO")); raw != "" {
-		if ratio, parseErr := strconv.ParseFloat(raw, 64); parseErr != nil || ratio <= 0 || ratio > 1 {
+		if ratio, parseErr := strconv.ParseFloat(raw, 64); parseErr != nil || math.IsNaN(ratio) || ratio < 0 || ratio > 1 {
 			log.Warn("tracing: invalid sampling ratio, using 1.0", slog.String("value", raw))
 		} else {
 			otelSamplingRatio = ratio
